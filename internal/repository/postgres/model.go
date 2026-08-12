@@ -1,0 +1,56 @@
+package postgres
+
+import (
+	"time"
+
+	"github.com/google/uuid"
+
+	"github.com/matiasfelau/vinculo-vial-identity/internal/domain"
+)
+
+// userModel es la proyección de persistencia de domain.User.
+//
+// Se mantiene separada de la entidad a propósito: las etiquetas de GORM, los
+// tipos de columna y los nombres heredados del esquema son detalles de la base
+// que no deben filtrarse al dominio. El campo `password` guarda el hash Argon2id
+// y conserva ese nombre por compatibilidad con el esquema acordado.
+type userModel struct {
+	ID            uuid.UUID `gorm:"column:id;type:uuid;primaryKey"`
+	Email         string    `gorm:"column:email;type:varchar(254);not null;uniqueIndex:uix_users_email"`
+	Password      string    `gorm:"column:password;type:varchar(255);not null"`
+	DNIHashed     string    `gorm:"column:dni_hashed;type:varchar(64);not null;uniqueIndex:uix_users_dni_hashed"`
+	DNIEncrypted  string    `gorm:"column:dni_encrypted;type:text;not null"`
+	AccountStatus string    `gorm:"column:account_status;type:varchar(32);not null;default:ACTIVE"`
+	CreatedAt     time.Time `gorm:"column:created_at;type:timestamptz;not null"`
+	UpdatedAt     time.Time `gorm:"column:updated_at;type:timestamptz;not null"`
+}
+
+// TableName fija el nombre de la tabla en lugar de depender de la pluralización
+// automática de GORM.
+func (userModel) TableName() string { return "users" }
+
+func toModel(u *domain.User) *userModel {
+	return &userModel{
+		ID:            u.ID,
+		Email:         u.Email,
+		Password:      u.PasswordHash,
+		DNIHashed:     u.DNIHashed,
+		DNIEncrypted:  u.DNIEncrypted,
+		AccountStatus: string(u.AccountStatus),
+		CreatedAt:     u.CreatedAt,
+		UpdatedAt:     u.UpdatedAt,
+	}
+}
+
+func (m *userModel) toDomain() *domain.User {
+	return &domain.User{
+		ID:            m.ID,
+		Email:         m.Email,
+		PasswordHash:  m.Password,
+		DNIHashed:     m.DNIHashed,
+		DNIEncrypted:  m.DNIEncrypted,
+		AccountStatus: domain.AccountStatus(m.AccountStatus),
+		CreatedAt:     m.CreatedAt,
+		UpdatedAt:     m.UpdatedAt,
+	}
+}
