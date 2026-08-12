@@ -1,0 +1,25 @@
+# Binarios compilados
+/identity
+/identity.exe
+*.exe
+*.dll
+*.so
+*.dylib
+
+# Artefactos de test y cobertura
+*.test
+*.out
+coverage.*
+
+# Secretos y configuración local — nunca versionar
+.env
+.env.*
+!.env.example
+
+# Herramientas y editores
+/vendor/
+/bin/
+.idea/
+.vscode/
+*.swp
+.DS_Store
