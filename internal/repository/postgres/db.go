@@ -72,6 +72,21 @@ func Open(ctx context.Context, cfg Config) (*gorm.DB, error) {
 	return db, nil
 }
 
+// Ping verifica que la base responda. Alimenta el readiness del servicio: si la
+// base no contesta, el orquestador no debería derivar tráfico a esta réplica,
+// porque ningún alta podría persistirse.
+func Ping(ctx context.Context, db *gorm.DB) error {
+	if db == nil {
+		return errors.New("postgres: no hay conexión")
+	}
+
+	sqlDB, err := db.DB()
+	if err != nil {
+		return err
+	}
+	return sqlDB.PingContext(ctx)
+}
+
 // Close libera el pool subyacente.
 func Close(db *gorm.DB) error {
 	if db == nil {
