@@ -25,6 +25,9 @@ services:
       timeout: 5s
       retries: 10
       start_period: 10s
+    # Sin `networks`: se queda en la red por defecto del proyecto, junto con
+    # identity. No se une a `vinculo-vial` — esa red es para tráfico entre
+    # componentes de la plataforma, no para la base de datos de nadie.
 
   identity:
     build:
@@ -45,9 +48,29 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
+    networks:
+      # Su propia red, donde vive postgres. Declarar `networks` reemplaza la
+      # pertenencia implícita a `default`, así que hay que listarla a mano o el
+      # servicio pierde acceso a la base.
+      default:
+      # Red compartida de la plataforma: acá lo alcanza el Gateway. El alias es
+      # explícito y no `identity` a secas porque en una red con tres
+      # componentes ese nombre es demasiado genérico y colisiona fácil — cada
+      # componente se anuncia con su nombre completo.
+      vinculo-vial:
+        aliases:
+          - vinculo-vial-identity
     # La imagen es scratch: no hay shell ni curl con que ejecutar un healthcheck
     # de Compose. El endpoint /readyz existe igual y es el que consume el
     # orquestador en los entornos reales.
 
 volumes:
   postgres-data:
+
+networks:
+  # Red compartida de la plataforma. La crea el compose del Gateway, así que
+  # hay que levantarlo primero (o crearla a mano: docker network create
+  # vinculo-vial). No se declara `default` acá: Compose la crea sola para el
+  # proyecto, y postgres vive únicamente en esa red implícita.
+  vinculo-vial:
+    external: true
