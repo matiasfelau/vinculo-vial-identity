@@ -7,8 +7,8 @@
 //	go run ./cmd/genkeys
 //
 // Imprime las tres claves privadas —una por mecanismo, nunca compartidas— más
-// la clave pública HPKE, que es la única que sale de acá: es la que embebe la
-// app Android para cifrar el payload del registro.
+// la clave pública HPKE, que es la única que sale de acá: es la que embebe el
+// frontend para cifrar el payload del registro.
 //
 // La salida es material sensible: no debe quedar en el historial de la terminal
 // ni versionarse. En producción las claves las emite y rota el gestor de
@@ -50,12 +50,12 @@ func run() error {
 	}
 
 	fmt.Println("# Claves privadas del servicio — no versionar, no compartir.")
-	fmt.Printf("HPKE_PRIVATE_KEY=%s\n", hpkePrivate)
+	fmt.Printf("IDENTITY_HPKE_PRIVATE_KEY=%s\n", hpkePrivate)
 	fmt.Printf("AES_KEY=%s\n", aesKey)
 	fmt.Printf("HMAC_SECRET=%s\n", hmacSecret)
 	fmt.Println()
-	fmt.Println("# Clave pública HPKE — la única que se distribuye; va embebida en la app.")
-	fmt.Printf("HPKE_PUBLIC_KEY=%s\n", hpkePublic)
+	fmt.Println("# Clave pública HPKE — la única que se distribuye; va embebida en el frontend.")
+	fmt.Printf("IDENTITY_HPKE_PUBLIC_KEY=%s\n", hpkePublic)
 
 	return nil
 }

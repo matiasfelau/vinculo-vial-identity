@@ -21,8 +21,8 @@ var (
 	emitido  = time.Date(2026, 8, 12, 15, 30, 1, 0, time.UTC)
 )
 
-func eventoDeAlta() domain.UserRegistered {
-	return domain.UserRegistered{
+func eventoDeAlta() domain.UserCreated {
+	return domain.UserCreated{
 		UserID:        uuid.MustParse("6f2a4c1e-9d3b-4f5a-8c7d-1e2f3a4b5c6d"),
 		AccountStatus: domain.AccountStatusActive,
 		OccurredAt:    ocurrido,
@@ -35,8 +35,8 @@ func TestNewEnvelopeCompletaElSobreEstandar(t *testing.T) {
 	if _, err := uuid.Parse(env.EventID); err != nil {
 		t.Errorf("eventId = %q, se esperaba un UUID: %v", env.EventID, err)
 	}
-	if env.EventType != EventTypeUserRegistered {
-		t.Errorf("eventType = %q, se esperaba %q", env.EventType, EventTypeUserRegistered)
+	if env.EventType != EventTypeUserCreated {
+		t.Errorf("eventType = %q, se esperaba %q", env.EventType, EventTypeUserCreated)
 	}
 	if env.Producer != DefaultProducer {
 		t.Errorf("producer = %q, se esperaba %q", env.Producer, DefaultProducer)
@@ -61,16 +61,28 @@ func TestNewEnvelopeGeneraUnEventIDPorEvento(t *testing.T) {
 	}
 }
 
-// El actor es el user_hash de la plataforma. En US-01 el usuario se crea en la
-// propia petición, así que no hay X-User-Hash que propagar y se define como el
-// UUID: opaco, estable y no enumerable.
-func TestActorEsElIdentificadorOpacoDelUsuario(t *testing.T) {
-	evt := eventoDeAlta()
+// El contrato compartido fija actor en null: en el signup no hay sesión ni
+// usuario autenticado actuando. Se verifica sobre el JSON y no solo sobre el
+// struct, porque lo que consumen los otros repositorios es el literal null y no
+// un string vacío.
+func TestActorEsNull(t *testing.T) {
+	env := newEnvelope(eventoDeAlta(), DefaultProducer, emitido)
 
-	env := newEnvelope(evt, DefaultProducer, emitido)
+	if env.Actor != nil {
+		t.Errorf("actor = %v, se esperaba nil", *env.Actor)
+	}
 
-	if env.Actor != evt.UserID.String() {
-		t.Errorf("actor = %q, se esperaba %q", env.Actor, evt.UserID)
+	body, err := json.Marshal(env)
+	if err != nil {
+		t.Fatalf("no se pudo serializar: %v", err)
+	}
+
+	var sobre map[string]json.RawMessage
+	if err := json.Unmarshal(body, &sobre); err != nil {
+		t.Fatalf("el sobre no es JSON válido: %v", err)
+	}
+	if got := string(sobre["actor"]); got != "null" {
+		t.Errorf("actor = %s, se esperaba null", got)
 	}
 }
 
@@ -126,13 +138,16 @@ func TestFormaSerializadaDelSobre(t *testing.T) {
 	if err := json.Unmarshal(sobre["payload"], &payload); err != nil {
 		t.Fatalf("el payload no es JSON válido: %v", err)
 	}
-	for _, campo := range []string{"userId", "accountStatus", "registeredAt"} {
-		if _, ok := payload[campo]; !ok {
-			t.Errorf("falta el campo %q del payload: %s", campo, sobre["payload"])
-		}
+
+	// El contrato acota el payload a userId y nada más. Se afirma la ausencia de
+	// cualquier otro campo, no solo la presencia de este: un campo de más que se
+	// cuele acá se vuelve parte del contrato de facto en cuanto un consumidor lo
+	// lea.
+	if len(payload) != 1 {
+		t.Errorf("el payload tiene %d campos, el contrato define solo userId: %s", len(payload), sobre["payload"])
 	}
-	if got := payload["accountStatus"]; got != string(domain.AccountStatusActive) {
-		t.Errorf("accountStatus = %v, se esperaba %q", got, domain.AccountStatusActive)
+	if got := payload["userId"]; got != eventoDeAlta().UserID.String() {
+		t.Errorf("userId = %v, se esperaba %q", got, eventoDeAlta().UserID)
 	}
 }
 
@@ -147,12 +162,8 @@ func TestNewEnvelopeNormalizaLasMarcasDeTiempoAUTC(t *testing.T) {
 		t.Errorf("timestamp = %q, se esperaba UTC", env.Timestamp)
 	}
 
-	payload, ok := env.Payload.(userRegisteredPayload)
-	if !ok {
-		t.Fatalf("payload = %T, se esperaba userRegisteredPayload", env.Payload)
-	}
-	if !strings.HasSuffix(payload.RegisteredAt, "Z") {
-		t.Errorf("registeredAt = %q, se esperaba UTC", payload.RegisteredAt)
+	if _, ok := env.Payload.(userCreatedPayload); !ok {
+		t.Fatalf("payload = %T, se esperaba userCreatedPayload", env.Payload)
 	}
 }
 

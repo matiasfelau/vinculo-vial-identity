@@ -1,6 +1,7 @@
 package http_test
 
 import (
+	"bytes"
 	"context"
 	"encoding/base64"
 	"encoding/json"
@@ -9,6 +10,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -23,13 +25,15 @@ type serviceMock struct {
 	userID uuid.UUID
 	err    error
 
-	calls      int
-	cryptogram []byte
+	calls              int
+	ephemeralPublicKey []byte
+	ciphertext         []byte
 }
 
-func (m *serviceMock) SignUp(_ context.Context, cryptogram []byte) (uuid.UUID, error) {
+func (m *serviceMock) SignUp(_ context.Context, ephemeralPublicKey, ciphertext []byte) (uuid.UUID, error) {
 	m.calls++
-	m.cryptogram = cryptogram
+	m.ephemeralPublicKey = ephemeralPublicKey
+	m.ciphertext = ciphertext
 	if m.err != nil {
 		return uuid.Nil, m.err
 	}
@@ -71,9 +75,17 @@ func (ts *testServer) post(t *testing.T, path, body string) *httptest.ResponseRe
 	return rec
 }
 
-func signUpBody(cryptogram string) string {
+// signUpBody arma el cuerpo del contrato compartido: las dos piezas del mensaje
+// HPKE, cada una en base64. El handler no interpreta su contenido —eso es del
+// descifrador—, así que los tests le pasan texto plano reconocible.
+func signUpBody(ciphertext string) string {
+	return signUpBodyCon("clave-efimera", ciphertext)
+}
+
+func signUpBodyCon(ephemeralPublicKey, ciphertext string) string {
 	payload, _ := json.Marshal(map[string]string{
-		"cryptogram": base64.StdEncoding.EncodeToString([]byte(cryptogram)),
+		"ephemeral_public_key": base64.StdEncoding.EncodeToString([]byte(ephemeralPublicKey)),
+		"ciphertext":           base64.StdEncoding.EncodeToString([]byte(ciphertext)),
 	})
 	return string(payload)
 }
@@ -115,27 +127,85 @@ func TestSignUpDevuelve201(t *testing.T) {
 	}
 }
 
-func TestSignUpDecodificaElCriptogramaAntesDeDelegarlo(t *testing.T) {
+// Las dos piezas llegan en base64 y se delegan decodificadas, cada una en su
+// argumento: intercambiarlas rompería el descifrado de forma difícil de
+// diagnosticar, así que el test las distingue por contenido.
+func TestSignUpDecodificaLasDosPiezasAntesDeDelegarlas(t *testing.T) {
 	ts := newTestServer(t, nil)
 
-	if rec := ts.post(t, "/api/v1/auth/signup", signUpBody("criptograma")); rec.Code != http.StatusCreated {
+	body := signUpBodyCon("la-clave-efimera", "el-ciphertext")
+	if rec := ts.post(t, "/api/v1/auth/signup", body); rec.Code != http.StatusCreated {
 		t.Fatalf("status = %d, se esperaba 201", rec.Code)
 	}
 
-	if got := string(ts.svc.cryptogram); got != "criptograma" {
-		t.Errorf("el servicio recibió %q, se esperaba el criptograma decodificado", got)
+	if got := string(ts.svc.ephemeralPublicKey); got != "la-clave-efimera" {
+		t.Errorf("ephemeral_public_key = %q, se esperaba la clave efímera decodificada", got)
+	}
+	if got := string(ts.svc.ciphertext); got != "el-ciphertext" {
+		t.Errorf("ciphertext = %q, se esperaba el ciphertext decodificado", got)
+	}
+}
+
+// El contrato dice "base64" sin precisar variante, y cada plataforma elige por
+// su cuenta. Rechazar la URL-safe o la que viene sin relleno convertiría esa
+// diferencia en un 400 a diagnosticar entre repositorios.
+func TestSignUpAceptaLasVariantesDeBase64(t *testing.T) {
+	const enc = "clave-efimera"
+	// Contiene un byte 0xFF, que en el alfabeto estándar produce `/` y en el
+	// URL-safe `_`: sin un valor así las dos variantes serían idénticas y el test
+	// no distinguiría nada.
+	ct := []byte{0xFF, 0xFE, 0xFD, 0x01}
+
+	variantes := map[string]*base64.Encoding{
+		"estándar con relleno": base64.StdEncoding,
+		"estándar sin relleno": base64.RawStdEncoding,
+		"URL-safe con relleno": base64.URLEncoding,
+		"URL-safe sin relleno": base64.RawURLEncoding,
+	}
+
+	for name, codificacion := range variantes {
+		t.Run(name, func(t *testing.T) {
+			ts := newTestServer(t, nil)
+
+			body, _ := json.Marshal(map[string]string{
+				"ephemeral_public_key": codificacion.EncodeToString([]byte(enc)),
+				"ciphertext":           codificacion.EncodeToString(ct),
+			})
+
+			rec := ts.post(t, "/api/v1/auth/signup", string(body))
+
+			if rec.Code != http.StatusCreated {
+				t.Fatalf("status = %d, se esperaba 201 (%s)", rec.Code, rec.Body.String())
+			}
+			// Las cuatro variantes tienen que producir exactamente los mismos
+			// bytes: aceptar de más no puede significar decodificar distinto.
+			if got := string(ts.svc.ephemeralPublicKey); got != enc {
+				t.Errorf("ephemeral_public_key = %q, se esperaba %q", got, enc)
+			}
+			if got := ts.svc.ciphertext; !bytes.Equal(got, ct) {
+				t.Errorf("ciphertext = %v, se esperaba %v", got, ct)
+			}
+		})
 	}
 }
 
 func TestSignUpDevuelve400AnteCuerposInvalidos(t *testing.T) {
+	valida := base64.StdEncoding.EncodeToString([]byte("clave-efimera"))
+
 	cases := map[string]string{
-		"cuerpo vacío":             ``,
-		"JSON malformado":          `{"cryptogram":`,
-		"cryptogram ausente":       `{}`,
-		"cryptogram vacío":         `{"cryptogram":""}`,
-		"cryptogram no es base64":  `{"cryptogram":"no-es-base64-!!!"}`,
-		"cryptogram no es cadena":  `{"cryptogram":42}`,
-		"cuerpo que no es un mapa": `["criptograma"]`,
+		"cuerpo vacío":                   ``,
+		"JSON malformado":                `{"ciphertext":`,
+		"cuerpo vacío como objeto":       `{}`,
+		"ephemeral_public_key ausente":   `{"ciphertext":"` + valida + `"}`,
+		"ephemeral_public_key vacía":     `{"ephemeral_public_key":"","ciphertext":"` + valida + `"}`,
+		"ephemeral_public_key no base64": `{"ephemeral_public_key":"no-es-base64-!!!","ciphertext":"` + valida + `"}`,
+		"ephemeral_public_key no cadena": `{"ephemeral_public_key":42,"ciphertext":"` + valida + `"}`,
+		"ciphertext ausente":             `{"ephemeral_public_key":"` + valida + `"}`,
+		"ciphertext vacío":               `{"ephemeral_public_key":"` + valida + `","ciphertext":""}`,
+		"ciphertext no base64":           `{"ephemeral_public_key":"` + valida + `","ciphertext":"no-es-base64-!!!"}`,
+		"ciphertext no es cadena":        `{"ephemeral_public_key":"` + valida + `","ciphertext":42}`,
+		"formato concatenado anterior":   `{"cryptogram":"` + valida + `"}`,
+		"cuerpo que no es un mapa":       `["criptograma"]`,
 	}
 
 	for name, body := range cases {
@@ -155,16 +225,81 @@ func TestSignUpDevuelve400AnteCuerposInvalidos(t *testing.T) {
 	}
 }
 
+// Los tres rechazos del sobre externo (JSON ilegible, campo vacío, campo no
+// base64) también quedan en el log del servidor, igual que los rechazos del
+// payload interno: `code=solicitud_invalida` sin más contexto no alcanza para
+// diagnosticar de qué de los tres se trata.
+func TestSignUpDevuelve400AnteCuerposInvalidosQuedaRegistradoEnElLog(t *testing.T) {
+	valida := base64.StdEncoding.EncodeToString([]byte("clave-efimera"))
+
+	cases := map[string]struct {
+		body     string
+		esperado []string
+	}{
+		"JSON malformado": {
+			`{"ciphertext":`,
+			[]string{"WARN", "no es JSON interpretable"},
+		},
+		"ephemeral_public_key ausente": {
+			`{"ciphertext":"` + valida + `"}`,
+			[]string{"WARN", "campo del signup vacío", "ephemeral_public_key"},
+		},
+		"ciphertext no base64": {
+			`{"ephemeral_public_key":"` + valida + `","ciphertext":"no-es-base64-!!!"}`,
+			[]string{"WARN", "no es base64 válido", "ciphertext", "longitud_recibida"},
+		},
+	}
+
+	for name, tc := range cases {
+		t.Run(name, func(t *testing.T) {
+			ts := newTestServer(t, nil)
+
+			rec := ts.post(t, "/api/v1/auth/signup", tc.body)
+			if rec.Code != http.StatusBadRequest {
+				t.Fatalf("status = %d, se esperaba 400 (%s)", rec.Code, rec.Body.String())
+			}
+
+			logs := ts.logs.String()
+			for _, esperado := range tc.esperado {
+				if !strings.Contains(logs, esperado) {
+					t.Errorf("el log debería incluir %q: %s", esperado, logs)
+				}
+			}
+		})
+	}
+}
+
+// A esta altura ni siquiera se intentó descifrar el mensaje: dni, tramite,
+// sexo y selfie siguen dentro del ciphertext. El log del sobre externo no
+// puede filtrarlos porque todavía no existen en claro en ningún lado.
+func TestSignUpCiphertextNoBase64NoFiltraElValorEnElLog(t *testing.T) {
+	ts := newTestServer(t, nil)
+	valida := base64.StdEncoding.EncodeToString([]byte("clave-efimera"))
+	const basura = "no-es-base64-pero-podria-parecer-sensible-!!!"
+
+	rec := ts.post(t, "/api/v1/auth/signup",
+		`{"ephemeral_public_key":"`+valida+`","ciphertext":"`+basura+`"}`)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, se esperaba 400", rec.Code)
+	}
+
+	if strings.Contains(ts.logs.String(), basura) {
+		t.Errorf("el log incluye el contenido del campo, no solo su longitud: %s", ts.logs.String())
+	}
+}
+
 func TestSignUpMapeaLosErroresDeDominio(t *testing.T) {
 	cases := map[string]struct {
 		err    error
 		status int
 		code   string
 	}{
-		"datos inválidos":      {domain.ErrInvalidInput, http.StatusBadRequest, "datos_invalidos"},
-		"usuario duplicado":    {domain.ErrDuplicateUser, http.StatusConflict, "registro_no_disponible"},
-		"criptograma ilegible": {domain.ErrInvalidCryptogram, http.StatusInternalServerError, "error_interno"},
-		"fallo inesperado":     {errors.New("la base no responde"), http.StatusInternalServerError, "error_interno"},
+		"datos inválidos":         {domain.ErrInvalidInput, http.StatusBadRequest, "datos_invalidos"},
+		"identidad no verificada": {domain.ErrIdentityNotVerified, http.StatusBadRequest, "identidad_no_verificada"},
+		"usuario duplicado":       {domain.ErrDuplicateUser, http.StatusConflict, "registro_no_disponible"},
+		"criptograma mal formado": {domain.ErrMalformedCryptogram, http.StatusBadRequest, "solicitud_invalida"},
+		"criptograma ilegible":    {domain.ErrInvalidCryptogram, http.StatusInternalServerError, "error_interno"},
+		"fallo inesperado":        {errors.New("la base no responde"), http.StatusInternalServerError, "error_interno"},
 	}
 
 	for name, tc := range cases {
@@ -200,6 +335,26 @@ func TestConflictoNoRevelaQueDatoColisiono(t *testing.T) {
 	}
 }
 
+// El mismo motivo que el test anterior: precisar si falló el trámite, el sexo
+// o la selfie facilitaría tantear los datos de otra persona hasta acertar.
+func TestIdentidadNoVerificadaNoRevelaQueDatoFallo(t *testing.T) {
+	ts := newTestServer(t, nil)
+	ts.svc.err = domain.ErrIdentityNotVerified
+
+	rec := ts.post(t, "/api/v1/auth/signup", signUpBody("criptograma"))
+
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, se esperaba 400", rec.Code)
+	}
+
+	cuerpo := strings.ToLower(rec.Body.String())
+	for _, filtracion := range []string{"tramite", "trámite", "sexo", "selfie", "renaper"} {
+		if strings.Contains(cuerpo, filtracion) {
+			t.Errorf("la respuesta menciona %q y permite tantear datos de otra persona: %s", filtracion, rec.Body.String())
+		}
+	}
+}
+
 // El 400 sí detalla los campos, para que la app corrija el formulario de una
 // vez, pero nunca los valores rechazados.
 func TestErrorDeValidacionDetallaCamposSinExponerValores(t *testing.T) {
@@ -230,6 +385,49 @@ func TestErrorDeValidacionDetallaCamposSinExponerValores(t *testing.T) {
 	}
 }
 
+// El motivo del rechazo también tiene que quedar en el log del servidor, no
+// solo en la respuesta: es lo que permite diagnosticar un patrón de rechazos
+// (un campo del frontend mal mapeado, una regla que empezó a fallar en masa)
+// sin depender de que el cliente reporte el error.
+func TestErrorDeValidacionQuedaRegistradoEnElLog(t *testing.T) {
+	ts := newTestServer(t, nil)
+	ts.svc.err = validation.Errors{
+		{Field: "tramite", Code: validation.CodeLength, Message: "el número de trámite debe tener 11 dígitos"},
+		{Field: "sexo", Code: validation.CodeFormat, Message: "el sexo debe ser M, F o X"},
+	}
+
+	rec := ts.post(t, "/api/v1/auth/signup", signUpBody("criptograma"))
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, se esperaba 400", rec.Code)
+	}
+
+	logs := ts.logs.String()
+	for _, esperado := range []string{
+		"WARN", "registro rechazado por validación",
+		"tramite", "el número de trámite debe tener 11 dígitos",
+		"sexo", "el sexo debe ser M, F o X",
+	} {
+		if !strings.Contains(logs, esperado) {
+			t.Errorf("el log debería incluir %q: %s", esperado, logs)
+		}
+	}
+}
+
+// FieldError no tiene un campo Value: no hay dónde filtrar el dato rechazado
+// aunque el log quisiera incluirlo. Este test no ejercita una limpieza activa,
+// deja constancia de la garantía estructural para que, si alguna vez alguien le
+// agrega un campo Value a FieldError, algo en el repo lo obligue a repensarlo.
+func TestErrorDeValidacionNoTieneDondeFiltrarElValor(t *testing.T) {
+	var fe validation.FieldError
+	typ := reflect.TypeOf(fe)
+
+	for i := range typ.NumField() {
+		if name := typ.Field(i).Name; name == "Value" || name == "RejectedValue" {
+			t.Fatalf("FieldError ganó un campo %q: el log y la respuesta HTTP volverían a filtrar el dato rechazado", name)
+		}
+	}
+}
+
 // El detalle criptográfico no puede salir en la respuesta: convertiría al
 // endpoint en un oráculo sobre el estado de las claves.
 func TestErrorCriptograficoNoSeFiltraEnLaRespuesta(t *testing.T) {
@@ -245,7 +443,7 @@ func TestErrorCriptograficoNoSeFiltraEnLaRespuesta(t *testing.T) {
 		}
 	}
 	// Pero sí debe quedar registrado del lado del servidor.
-	if !strings.Contains(ts.logs.String(), "criptograma") {
+	if !strings.Contains(ts.logs.String(), "descifrar") {
 		t.Error("el fallo de descifrado debe quedar en el log del servidor")
 	}
 }
@@ -283,6 +481,24 @@ func TestErrorIncluyeElRequestIDParaCorrelacionar(t *testing.T) {
 
 	if decodeError(t, rec)["requestId"] == "" {
 		t.Error("el error debe llevar el request id para poder correlacionarlo con el log")
+	}
+}
+
+// message repite error bajo una clave más explícita, para clientes que buscan
+// esa convención por nombre. No es información nueva, así que alcanza con
+// probar que las dos claves coinciden siempre.
+func TestErrorIncluyeMessageIgualAError(t *testing.T) {
+	ts := newTestServer(t, nil)
+	ts.svc.err = domain.ErrDuplicateUser
+
+	rec := ts.post(t, "/api/v1/auth/signup", signUpBody("criptograma"))
+
+	body := decodeError(t, rec)
+	if body["message"] == "" {
+		t.Fatal("se esperaba el campo message")
+	}
+	if body["message"] != body["error"] {
+		t.Errorf("message = %q, error = %q; deberían coincidir", body["message"], body["error"])
 	}
 }
 

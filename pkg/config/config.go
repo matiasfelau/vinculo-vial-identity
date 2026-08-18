@@ -84,10 +84,17 @@ func (c PostgresConfig) DSN() string {
 // CryptoConfig agrupa el material criptográfico. Son tres claves independientes
 // y no se derivan una de otra: comprometer una no debe comprometer las demás.
 type CryptoConfig struct {
-	// HPKEPrivateKey descifra el criptograma de transporte (base64 de 32 bytes).
+	// HPKEPrivateKey descifra el mensaje de transporte (base64 de 32 bytes). Es
+	// la mitad privada del par cuya pública embebe el frontend en
+	// IDENTITY_HPKE_PUBLIC_KEY.
 	HPKEPrivateKey Secret
-	// HPKEInfo es el contexto de derivación; debe coincidir byte a byte con el
-	// contextInfo que usa el cliente Tink.
+	// HPKEInfo es el contexto de derivación (`info` en RFC 9180). Debe coincidir
+	// byte a byte con el que use el cliente al cifrar; si difiere, el AEAD no
+	// autentica y todas las altas fallan.
+	//
+	// El valor por defecto es vacío, que es lo que produce una librería HPKE
+	// cuando no se le pasa un info explícito: el contrato compartido no define
+	// ninguno, así que lo interoperable es no inventarlo de este lado.
 	HPKEInfo string
 	// AESKey cifra el DNI at-rest (base64 de 32 bytes).
 	AESKey Secret
@@ -114,17 +121,27 @@ type EventsConfig struct {
 // Valores por defecto pensados para que el entorno local levante sin definir
 // más que los secretos.
 const (
-	defaultHTTPPort            = 8080
-	defaultReadTimeout         = 10 * time.Second
-	defaultWriteTimeout        = 15 * time.Second
-	defaultIdleTimeout         = 60 * time.Second
-	defaultShutdownTimeout     = 15 * time.Second
-	defaultMaxBodyBytes        = 8 << 10
+	defaultHTTPPort        = 8080
+	defaultReadTimeout     = 10 * time.Second
+	defaultWriteTimeout    = 15 * time.Second
+	defaultIdleTimeout     = 60 * time.Second
+	defaultShutdownTimeout = 15 * time.Second
+	// El payload incluye una selfie: ver la nota de router.DefaultMaxBodyBytes
+	// para el cálculo. Los dos valores deben moverse juntos.
+	defaultMaxBodyBytes = 10 << 20
+	// minViableMaxBodyBytes es el piso que exige (*Config).validate(); ver el
+	// comentario ahí.
+	// 512 KiB es 64 veces el default de antes de la selfie (8 KiB) —lo bastante
+	// por encima como para que un valor "olvidado sin actualizar" quede
+	// atrapado acá, y lo bastante por debajo del default (10 MiB) como para
+	// dejarle margen real a un operador que sepa que su app produce selfies
+	// livianas y quiera ajustar el límite hacia abajo a propósito.
+	minViableMaxBodyBytes      = 512 << 10
 	defaultMaxOpenConns        = 20
 	defaultMaxIdleConns        = 5
 	defaultConnMaxLifetime     = 30 * time.Minute
 	defaultConnMaxIdleTime     = 5 * time.Minute
-	defaultHPKEInfo            = "vinculo-vial/identity/signup/v1"
+	defaultHPKEInfo            = ""
 	defaultEventsExchange      = "vinculo-vial.events"
 	defaultEventsProducer      = "vinculo-vial-identity"
 	defaultEventsPublishTimeut = 5 * time.Second
@@ -161,8 +178,8 @@ func Load() (*Config, error) {
 		},
 
 		Crypto: CryptoConfig{
-			HPKEPrivateKey:    Secret(r.required("HPKE_PRIVATE_KEY")),
-			HPKEInfo:          r.str("HPKE_INFO", defaultHPKEInfo),
+			HPKEPrivateKey:    Secret(r.required("IDENTITY_HPKE_PRIVATE_KEY")),
+			HPKEInfo:          r.str("IDENTITY_HPKE_INFO", defaultHPKEInfo),
 			AESKey:            Secret(r.required("AES_KEY")),
 			HMACSecret:        Secret(r.required("HMAC_SECRET")),
 			Argon2MemoryKiB:   r.integer("ARGON2_MEMORY_KIB", 64*1024),
@@ -200,6 +217,17 @@ func (c *Config) validate() error {
 	}
 	if c.HTTP.MaxBodyBytes <= 0 {
 		r.fail("config: HTTP_MAX_BODY_BYTES debe ser positivo")
+	} else if c.HTTP.MaxBodyBytes < minViableMaxBodyBytes {
+		// No es un tope estricto arbitrario: por debajo de esto, ningún alta
+		// real puede completarse, porque el payload incluye una selfie. Un
+		// valor así no es "conservador", es un servicio que rechaza el 100% de
+		// los registros legítimos sin decir por qué —exactamente lo que pasó
+		// cuando HTTP_MAX_BODY_BYTES quedó en 8 KiB (el valor de antes de la
+		// selfie) en un .env que nunca se sincronizó con .env.example—. Mejor
+		// que el proceso ni arranque a que arranque y falle en silencio recién
+		// con el primer registro real.
+		r.fail("config: HTTP_MAX_BODY_BYTES (%d) es menor al mínimo viable (%d): el payload incluye una selfie, y con este límite ningún alta real podría completarse",
+			c.HTTP.MaxBodyBytes, minViableMaxBodyBytes)
 	}
 	if c.Postgres.MaxOpenConns < 1 {
 		r.fail("config: POSTGRES_MAX_OPEN_CONNS debe ser al menos 1")

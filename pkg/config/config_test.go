@@ -17,12 +17,12 @@ import (
 func entornoMinimo() map[string]string {
 	clave := base64.StdEncoding.EncodeToString(make([]byte, 32))
 	return map[string]string{
-		"POSTGRES_USER":     "identity",
-		"POSTGRES_PASSWORD": "sup3rs3cr3t",
-		"POSTGRES_DB":       "identity",
-		"HPKE_PRIVATE_KEY":  clave,
-		"AES_KEY":           clave,
-		"HMAC_SECRET":       clave,
+		"POSTGRES_USER":             "identity",
+		"POSTGRES_PASSWORD":         "sup3rs3cr3t",
+		"POSTGRES_DB":               "identity",
+		"IDENTITY_HPKE_PRIVATE_KEY": clave,
+		"AES_KEY":                   clave,
+		"HMAC_SECRET":               clave,
 	}
 }
 
@@ -35,7 +35,7 @@ func aplicar(t *testing.T, env map[string]string) {
 		"POSTGRES_HOST", "POSTGRES_PORT", "POSTGRES_USER", "POSTGRES_PASSWORD",
 		"POSTGRES_DB", "POSTGRES_SSLMODE", "POSTGRES_LOG_SQL",
 		"POSTGRES_MAX_OPEN_CONNS", "POSTGRES_MAX_IDLE_CONNS",
-		"HPKE_PRIVATE_KEY", "HPKE_INFO", "AES_KEY", "HMAC_SECRET",
+		"IDENTITY_HPKE_PRIVATE_KEY", "IDENTITY_HPKE_INFO", "AES_KEY", "HMAC_SECRET",
 		"ARGON2_MEMORY_KIB", "ARGON2_ITERATIONS", "ARGON2_PARALLELISM",
 		"RABBITMQ_ENABLED", "RABBITMQ_URL", "RABBITMQ_EXCHANGE",
 	} {
@@ -68,15 +68,18 @@ func TestLoadConElEntornoMinimo(t *testing.T) {
 	if cfg.Events.Enabled {
 		t.Error("el broker debería estar deshabilitado por defecto: no está en el compose local")
 	}
-	if cfg.Crypto.HPKEInfo == "" {
-		t.Error("se esperaba un HPKE_INFO por defecto")
+	// El info por defecto es vacío a propósito: el contrato compartido no define
+	// ninguno y un valor inventado de este lado rompería el descifrado de todo
+	// mensaje que produzca una librería HPKE estándar.
+	if cfg.Crypto.HPKEInfo != "" {
+		t.Errorf("info = %q, se esperaba vacío por defecto", cfg.Crypto.HPKEInfo)
 	}
 }
 
 func TestLoadExigeLosSecretos(t *testing.T) {
 	obligatorias := []string{
 		"POSTGRES_USER", "POSTGRES_PASSWORD", "POSTGRES_DB",
-		"HPKE_PRIVATE_KEY", "AES_KEY", "HMAC_SECRET",
+		"IDENTITY_HPKE_PRIVATE_KEY", "AES_KEY", "HMAC_SECRET",
 	}
 
 	for _, faltante := range obligatorias {
@@ -106,7 +109,7 @@ func TestLoadAcumulaLosErrores(t *testing.T) {
 		t.Fatal("se esperaba un error")
 	}
 
-	for _, faltante := range []string{"POSTGRES_USER", "HPKE_PRIVATE_KEY", "AES_KEY", "HMAC_SECRET"} {
+	for _, faltante := range []string{"POSTGRES_USER", "IDENTITY_HPKE_PRIVATE_KEY", "AES_KEY", "HMAC_SECRET"} {
 		if !strings.Contains(err.Error(), faltante) {
 			t.Errorf("el error debería mencionar %s: %v", faltante, err)
 		}
@@ -123,6 +126,9 @@ func TestLoadRechazaValoresMalFormados(t *testing.T) {
 		"memoria Argon2 baja":     {"ARGON2_MEMORY_KIB": "1024"},
 		"iteraciones Argon2 cero": {"ARGON2_ITERATIONS": "0"},
 		"pool ocioso mayor":       {"POSTGRES_MAX_OPEN_CONNS": "5", "POSTGRES_MAX_IDLE_CONNS": "10"},
+		// El valor real que causó el incidente: el default de antes de la
+		// selfie, olvidado en un .env que nunca se sincronizó con .env.example.
+		"tope de body demasiado bajo para una selfie": {"HTTP_MAX_BODY_BYTES": "8192"},
 	}
 
 	for name, override := range cases {
@@ -137,6 +143,29 @@ func TestLoadRechazaValoresMalFormados(t *testing.T) {
 				t.Error("se esperaba un error de configuración")
 			}
 		})
+	}
+}
+
+// Regresión del incidente real: un .env con HTTP_MAX_BODY_BYTES=8192 (el
+// default de antes de la selfie) hacía que el servicio arrancara sin quejarse
+// y rechazara el 100% de los registros recién con el primer intento real,
+// con un error que no decía nada sobre el límite de body. El mensaje tiene
+// que ser explícito para que la próxima vez se diagnostique desde el propio
+// log de arranque, no desde una prueba E2E.
+func TestLoadRechazaTopeDeBodyMenorAlMinimoViable(t *testing.T) {
+	env := entornoMinimo()
+	env["HTTP_MAX_BODY_BYTES"] = "8192"
+	aplicar(t, env)
+
+	_, err := config.Load()
+	if err == nil {
+		t.Fatal("se esperaba un error de configuración")
+	}
+	if !strings.Contains(err.Error(), "HTTP_MAX_BODY_BYTES") {
+		t.Errorf("el error debería nombrar la variable: %v", err)
+	}
+	if !strings.Contains(err.Error(), "selfie") {
+		t.Errorf("el error debería explicar por qué el límite importa, no solo que está mal: %v", err)
 	}
 }
 

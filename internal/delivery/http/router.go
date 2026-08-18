@@ -8,9 +8,14 @@ import (
 	"github.com/gin-gonic/gin"
 )
 
-// DefaultMaxBodyBytes es el tope del cuerpo aceptado. El criptograma de un alta
-// ronda los cientos de bytes; 8 KiB deja margen holgado sin permitir abusos.
-const DefaultMaxBodyBytes int64 = 8 << 10
+// DefaultMaxBodyBytes es el tope del cuerpo aceptado.
+//
+// Desde que el payload incluye una selfie, el cuerpo ya no ronda los cientos de
+// bytes de antes: validation.MaxSelfieBytes (4 MiB) en base64 son ~5.3 MiB, y
+// todo el JSON —selfie incluida— se vuelve a envolver en base64 una vez más como
+// `ciphertext` del mensaje HPKE, sumando otro ~33%. 10 MiB deja margen sobre ese
+// cálculo sin habilitar que el endpoint reciba archivos arbitrariamente grandes.
+const DefaultMaxBodyBytes int64 = 10 << 20
 
 // RouterConfig son los parámetros de armado del router.
 type RouterConfig struct {

@@ -22,6 +22,7 @@ import (
 	"github.com/matiasfelau/vinculo-vial-identity/internal/delivery/events"
 	delivery "github.com/matiasfelau/vinculo-vial-identity/internal/delivery/http"
 	"github.com/matiasfelau/vinculo-vial-identity/internal/domain"
+	"github.com/matiasfelau/vinculo-vial-identity/internal/renaper"
 	"github.com/matiasfelau/vinculo-vial-identity/internal/repository/postgres"
 	"github.com/matiasfelau/vinculo-vial-identity/internal/service/signup"
 	"github.com/matiasfelau/vinculo-vial-identity/pkg/config"
@@ -95,11 +96,14 @@ func run() error {
 		}
 	}()
 
+	renaperSvc := buildRenaper(logger)
+
 	service, err := signup.New(signup.Deps{
 		Decryptor: decryptor,
 		Indexer:   indexer,
 		Cipher:    cipher,
 		Hasher:    hasher,
+		Renaper:   renaperSvc,
 		Users:     users,
 		Publisher: publisher,
 		Logger:    logger,
@@ -185,6 +189,19 @@ func buildPublisher(cfg *config.Config, logger *slog.Logger) (domain.EventPublis
 	}
 
 	return p, p.Close, nil
+}
+
+// buildRenaper construye el verificador de identidad.
+//
+// Hoy solo existe el Mock: no hay credenciales ni contrato acordado con la API
+// real de RENAPER. A diferencia de buildPublisher, esto no es una decisión de
+// configuración —no hay un RENAPER_ENABLED que alternar— porque no hay todavía
+// una alternativa real que cablear. El WARN en cada arranque es la única
+// salvaguarda: que quede imposible de ignorar que ninguna identidad se está
+// verificando de verdad.
+func buildRenaper(logger *slog.Logger) domain.RenaperService {
+	logger.Warn("RenaperService en modo mock: ninguna identidad se verifica realmente; no usar en producción")
+	return &renaper.Mock{}
 }
 
 func serve(ctx context.Context, cfg *config.Config, handler http.Handler, logger *slog.Logger) error {

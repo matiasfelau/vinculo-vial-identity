@@ -105,12 +105,12 @@ func NewPublisher(cfg Config, logger *slog.Logger) (*Publisher, error) {
 	return p, nil
 }
 
-// PublishUserRegistered emite el evento con confirmación del broker.
+// PublishUserCreated emite el evento con confirmación del broker.
 //
 // La entrega es persistente y se espera el ack: sin confirmación, un publish
 // exitoso solo prueba que el mensaje salió del proceso, no que el broker lo
 // haya aceptado, y un reinicio del broker lo perdería en silencio.
-func (p *Publisher) PublishUserRegistered(ctx context.Context, evt domain.UserRegistered) error {
+func (p *Publisher) PublishUserCreated(ctx context.Context, evt domain.UserCreated) error {
 	envelope := newEnvelope(evt, p.cfg.Producer, p.now())
 
 	body, err := json.Marshal(envelope)
@@ -182,7 +182,7 @@ func (p *Publisher) send(ctx context.Context, msg amqp.Publishing) (*amqp.Deferr
 	return p.ch.PublishWithDeferredConfirmWithContext(
 		ctx,
 		p.cfg.Exchange,
-		EventTypeUserRegistered,
+		EventTypeUserCreated,
 		// mandatory=false: que hoy no haya cola atada al routing key es una
 		// decisión de los consumidores, no un fallo del alta.
 		false,

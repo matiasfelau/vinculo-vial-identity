@@ -69,19 +69,27 @@ func NewUser(email, passwordHash, dniHashed, dniEncrypted string, now time.Time)
 	}, nil
 }
 
-// UserRegistered es el evento de dominio que se emite tras persistir un alta.
+// UserCreated es el evento de dominio que se emite tras persistir un alta. Se
+// publica como `user.created`, el nombre que fija el contrato compartido de
+// US-01.
 //
 // No transporta PII: ni email, ni DNI, ni derivados del DNI. Los consumidores
 // que necesiten datos del usuario los piden a este servicio.
-type UserRegistered struct {
+//
+// AccountStatus y OccurredAt son parte del evento de dominio pero no del sobre
+// que viaja al broker: el contrato acota el payload publicado a userId. Se
+// conservan acá porque describen el hecho ocurrido y cualquier consumidor
+// interno futuro los necesitaría; ampliarlos en el bus es una decisión del
+// contrato, no de esta entidad.
+type UserCreated struct {
 	UserID        uuid.UUID
 	AccountStatus AccountStatus
 	OccurredAt    time.Time
 }
 
-// NewUserRegistered deriva el evento a partir del usuario recién persistido.
-func NewUserRegistered(u *User) UserRegistered {
-	return UserRegistered{
+// NewUserCreated deriva el evento a partir del usuario recién persistido.
+func NewUserCreated(u *User) UserCreated {
+	return UserCreated{
 		UserID:        u.ID,
 		AccountStatus: u.AccountStatus,
 		OccurredAt:    u.CreatedAt,

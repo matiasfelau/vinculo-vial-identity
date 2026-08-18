@@ -17,15 +17,17 @@ type UserRepository interface {
 
 // EventPublisher publica eventos de dominio hacia el broker de la plataforma.
 type EventPublisher interface {
-	// PublishUserRegistered emite el evento user.registered.
-	PublishUserRegistered(ctx context.Context, evt UserRegistered) error
+	// PublishUserCreated emite el evento user.created.
+	PublishUserCreated(ctx context.Context, evt UserCreated) error
 }
 
 // HPKEDecryptor descifra el criptograma de transporte que envía la app.
 type HPKEDecryptor interface {
-	// Decrypt devuelve el plaintext del criptograma HPKE. El llamador es
-	// responsable de limpiar el buffer devuelto cuando termina de usarlo.
-	Decrypt(cryptogram []byte) ([]byte, error)
+	// Decrypt devuelve el plaintext del mensaje HPKE, que el contrato transporta
+	// en sus dos piezas separadas: la clave pública efímera del emisor (`enc` en
+	// RFC 9180) y el ciphertext sellado por el AEAD. El llamador es responsable
+	// de limpiar el buffer devuelto cuando termina de usarlo.
+	Decrypt(ephemeralPublicKey, ciphertext []byte) ([]byte, error)
 }
 
 // SymmetricCipher cifra datos sensibles para persistirlos (cifrado at-rest).
@@ -51,4 +53,22 @@ type PasswordHasher interface {
 	// Verify compara en tiempo constante una contraseña contra un hash
 	// codificado previamente por Hash.
 	Verify(password []byte, encodedHash string) (bool, error)
+}
+
+// RenaperService verifica una identidad contra RENAPER (Registro Nacional de
+// las Personas) antes del alta: confirma que el DNI, el número de trámite y el
+// sexo registral corresponden a una persona real, y que la selfie coincide con
+// la biometría de esa persona. Reemplaza al gate de atestación de dispositivo
+// que usaba US-01 antes de esta versión del contrato.
+type RenaperService interface {
+	// ValidateIdentity devuelve (true, nil) cuando la identidad se confirma;
+	// (false, nil) cuando RENAPER respondió pero no pudo confirmarla —dato
+	// inválido o selfie que no coincide, sin distinguir cuál de las dos—; y
+	// (_, error) cuando el propio servicio de RENAPER no pudo consultarse (caído,
+	// timeout, credenciales rechazadas). Esta última categoría no implica nada
+	// sobre la identidad: es un fallo de la dependencia externa, no un veredicto.
+	//
+	// El llamador es responsable de limpiar dni, tramite, sexo y selfie cuando
+	// termina de usarlos.
+	ValidateIdentity(ctx context.Context, dni, tramite, sexo, selfie []byte) (bool, error)
 }

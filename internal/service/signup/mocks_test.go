@@ -14,13 +14,15 @@ type decryptorMock struct {
 	plaintext []byte
 	err       error
 
-	calls      int
-	cryptogram []byte
+	calls              int
+	ephemeralPublicKey []byte
+	ciphertext         []byte
 }
 
-func (m *decryptorMock) Decrypt(cryptogram []byte) ([]byte, error) {
+func (m *decryptorMock) Decrypt(ephemeralPublicKey, ciphertext []byte) ([]byte, error) {
 	m.calls++
-	m.cryptogram = cryptogram
+	m.ephemeralPublicKey = ephemeralPublicKey
+	m.ciphertext = ciphertext
 	if m.err != nil {
 		return nil, m.err
 	}
@@ -87,6 +89,38 @@ func (m *hasherMock) Verify(pwd []byte, encodedHash string) (bool, error) {
 	return "$argon2id$"+string(pwd) == encodedHash, nil
 }
 
+type renaperMock struct {
+	// verified es la respuesta cuando err es nil. El harness lo inicializa en
+	// true: la vía feliz asume una identidad verificada, igual que el resto de
+	// los dobles asume éxito salvo que el test configure lo contrario.
+	verified bool
+	err      error
+
+	mu      sync.Mutex
+	calls   int
+	dni     []string
+	tramite []string
+	sexo    []string
+	selfie  [][]byte
+}
+
+func (m *renaperMock) ValidateIdentity(_ context.Context, dni, tramite, sexo, selfie []byte) (bool, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	m.calls++
+	m.dni = append(m.dni, string(dni))
+	m.tramite = append(m.tramite, string(tramite))
+	m.sexo = append(m.sexo, string(sexo))
+	// Copia: el servicio limpia el buffer que pasó apenas este método vuelve.
+	m.selfie = append(m.selfie, append([]byte(nil), selfie...))
+
+	if m.err != nil {
+		return false, m.err
+	}
+	return m.verified, nil
+}
+
 type repositoryMock struct {
 	err error
 
@@ -118,10 +152,10 @@ type publisherMock struct {
 
 	mu        sync.Mutex
 	calls     int
-	published []domain.UserRegistered
+	published []domain.UserCreated
 }
 
-func (m *publisherMock) PublishUserRegistered(_ context.Context, evt domain.UserRegistered) error {
+func (m *publisherMock) PublishUserCreated(_ context.Context, evt domain.UserCreated) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 

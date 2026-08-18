@@ -1,7 +1,9 @@
 package signup_test
 
 import (
+	"encoding/base64"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"slices"
@@ -16,11 +18,26 @@ import (
 	"github.com/matiasfelau/vinculo-vial-identity/internal/validation"
 )
 
+// selfieBytes es el contenido mínimo que pasa la validación de formato: la
+// cabecera PNG y nada más. El validador solo mira los primeros bytes, así que
+// no hace falta un PNG real y decodificable.
+var selfieBytes = []byte{0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, 0x00, 0x01, 0x02, 0x03}
+
+var validSelfieBase64 = base64.StdEncoding.EncodeToString(selfieBytes)
+
+// validPayload es un payload enteramente válido. El sexo va en minúscula a
+// propósito, para que la vía feliz también ejercite NormalizeSexo de punta a
+// punta y no solo en los tests de la capa de validación.
+var validPayload = fmt.Sprintf(
+	`{"email":"Vecino@VinculoVial.AR","password":"Rosario-2026!clave","dni":"30.123.456","tramite":"12345678901","sexo":"f","selfie":%q}`,
+	validSelfieBase64,
+)
+
 const (
-	validPayload = `{"email":"Vecino@VinculoVial.AR","password":"Rosario-2026!clave","dni":"30.123.456"}`
-	// El criptograma es opaco para el servicio: quien lo interpreta es el
-	// descifrador, que acá está doblado.
-	cryptogram = "criptograma-opaco"
+	// Las dos piezas del mensaje HPKE son opacas para el servicio: quien las
+	// interpreta es el descifrador, que acá está doblado.
+	ephemeralPublicKey = "clave-efimera-opaca"
+	ciphertext         = "ciphertext-opaco"
 )
 
 // fijo es el instante que devuelve el reloj inyectado, para que las marcas de
@@ -33,6 +50,7 @@ type harness struct {
 	indexer   *indexerMock
 	cipher    *cipherMock
 	hasher    *hasherMock
+	renaper   *renaperMock
 	repo      *repositoryMock
 	publisher *publisherMock
 	logs      *strings.Builder
@@ -46,6 +64,7 @@ func newHarness(t *testing.T, tune ...func(*signup.Deps)) *harness {
 		indexer:   &indexerMock{},
 		cipher:    &cipherMock{},
 		hasher:    &hasherMock{},
+		renaper:   &renaperMock{verified: true},
 		repo:      &repositoryMock{},
 		publisher: &publisherMock{},
 		logs:      &strings.Builder{},
@@ -56,6 +75,7 @@ func newHarness(t *testing.T, tune ...func(*signup.Deps)) *harness {
 		Indexer:   h.indexer,
 		Cipher:    h.cipher,
 		Hasher:    h.hasher,
+		Renaper:   h.renaper,
 		Users:     h.repo,
 		Publisher: h.publisher,
 		Logger:    slog.New(slog.NewTextHandler(h.logs, &slog.HandlerOptions{Level: slog.LevelDebug})),
@@ -77,7 +97,7 @@ func newHarness(t *testing.T, tune ...func(*signup.Deps)) *harness {
 func TestSignUpFelizPersisteYPublica(t *testing.T) {
 	h := newHarness(t)
 
-	id, err := h.svc.SignUp(t.Context(), []byte(cryptogram))
+	id, err := h.svc.SignUp(t.Context(), []byte(ephemeralPublicKey), []byte(ciphertext))
 	if err != nil {
 		t.Fatalf("error inesperado: %v", err)
 	}
@@ -102,28 +122,36 @@ func TestSignUpFelizPersisteYPublica(t *testing.T) {
 	if h.publisher.calls != 1 {
 		t.Errorf("se publicó %d veces, se esperaba 1", h.publisher.calls)
 	}
+	if h.renaper.calls != 1 {
+		t.Errorf("se consultó RENAPER %d veces, se esperaba 1", h.renaper.calls)
+	}
 }
 
-// El criptograma llega tal cual al descifrador, sin manipulación previa.
-func TestSignUpPasaElCriptogramaSinTocarlo(t *testing.T) {
+// Las dos piezas llegan tal cual al descifrador, sin manipulación previa y cada
+// una en su argumento.
+func TestSignUpPasaLasDosPiezasSinTocarlas(t *testing.T) {
 	h := newHarness(t)
 
-	if _, err := h.svc.SignUp(t.Context(), []byte(cryptogram)); err != nil {
+	if _, err := h.svc.SignUp(t.Context(), []byte(ephemeralPublicKey), []byte(ciphertext)); err != nil {
 		t.Fatalf("error inesperado: %v", err)
 	}
 
-	if got := string(h.decryptor.cryptogram); got != cryptogram {
-		t.Errorf("criptograma = %q, se esperaba %q", got, cryptogram)
+	if got := string(h.decryptor.ephemeralPublicKey); got != ephemeralPublicKey {
+		t.Errorf("clave efímera = %q, se esperaba %q", got, ephemeralPublicKey)
+	}
+	if got := string(h.decryptor.ciphertext); got != ciphertext {
+		t.Errorf("ciphertext = %q, se esperaba %q", got, ciphertext)
 	}
 }
 
-// La normalización tiene que ocurrir antes de derivar: si no, 30.123.456 y
-// 30123456 producirían Blind Index distintos y la misma persona entraría dos
-// veces, y Vecino@… y vecino@… esquivarían el índice único de email.
+// La normalización tiene que ocurrir antes de derivar y antes de consultar
+// RENAPER: si no, 30.123.456 y 30123456 producirían Blind Index distintos y la
+// misma persona entraría dos veces, Vecino@… y vecino@… esquivarían el índice
+// único de email, y "f" llegaría a RENAPER en lugar de "F".
 func TestSignUpNormalizaAntesDeDerivar(t *testing.T) {
 	h := newHarness(t)
 
-	if _, err := h.svc.SignUp(t.Context(), []byte(cryptogram)); err != nil {
+	if _, err := h.svc.SignUp(t.Context(), []byte(ephemeralPublicKey), []byte(ciphertext)); err != nil {
 		t.Fatalf("error inesperado: %v", err)
 	}
 
@@ -136,13 +164,38 @@ func TestSignUpNormalizaAntesDeDerivar(t *testing.T) {
 	if got := h.repo.last().Email; got != "vecino@vinculovial.ar" {
 		t.Errorf("email persistido = %q, se esperaba en minúscula", got)
 	}
+	if want := []string{"F"}; !slices.Equal(h.renaper.sexo, want) {
+		t.Errorf("RENAPER recibió sexo = %v, se esperaba %v", h.renaper.sexo, want)
+	}
 }
 
-// Ninguna columna puede terminar guardando el DNI ni la contraseña en claro.
+// RENAPER recibe exactamente el DNI, el trámite, el sexo y la selfie del
+// payload, ya normalizados, sin que el servicio los transforme de más.
+func TestSignUpConsultaRenaperConLosDatosCorrectos(t *testing.T) {
+	h := newHarness(t)
+
+	if _, err := h.svc.SignUp(t.Context(), []byte(ephemeralPublicKey), []byte(ciphertext)); err != nil {
+		t.Fatalf("error inesperado: %v", err)
+	}
+
+	if want := []string{"30123456"}; !slices.Equal(h.renaper.dni, want) {
+		t.Errorf("RENAPER recibió dni = %v, se esperaba %v", h.renaper.dni, want)
+	}
+	if want := []string{"12345678901"}; !slices.Equal(h.renaper.tramite, want) {
+		t.Errorf("RENAPER recibió tramite = %v, se esperaba %v", h.renaper.tramite, want)
+	}
+	if len(h.renaper.selfie) != 1 || string(h.renaper.selfie[0]) != string(selfieBytes) {
+		t.Errorf("RENAPER recibió selfie = %v, se esperaba %v", h.renaper.selfie, selfieBytes)
+	}
+}
+
+// Ninguna columna puede terminar guardando el DNI, el trámite, el sexo, la
+// selfie ni la contraseña en claro. domain.User no tiene ni siquiera un campo
+// donde eso pudiera colarse: la garantía es estructural, no solo de valor.
 func TestSignUpNoPersisteDatosEnClaro(t *testing.T) {
 	h := newHarness(t)
 
-	if _, err := h.svc.SignUp(t.Context(), []byte(cryptogram)); err != nil {
+	if _, err := h.svc.SignUp(t.Context(), []byte(ephemeralPublicKey), []byte(ciphertext)); err != nil {
 		t.Fatalf("error inesperado: %v", err)
 	}
 	u := h.repo.last()
@@ -161,17 +214,22 @@ func TestSignUpNoPersisteDatosEnClaro(t *testing.T) {
 	}
 }
 
-// El DNI y la contraseña solo pueden aparecer en el log del gateway si alguien
-// los loguea acá; el servicio registra únicamente el identificador opaco.
+// El DNI, el trámite, el sexo, la selfie y la contraseña solo pueden aparecer
+// en el log si alguien los loguea acá; el servicio registra únicamente el
+// identificador opaco.
 func TestSignUpNoLogueaDatosSensibles(t *testing.T) {
 	h := newHarness(t)
 
-	if _, err := h.svc.SignUp(t.Context(), []byte(cryptogram)); err != nil {
+	if _, err := h.svc.SignUp(t.Context(), []byte(ephemeralPublicKey), []byte(ciphertext)); err != nil {
 		t.Fatalf("error inesperado: %v", err)
 	}
 
 	logs := h.logs.String()
-	for _, secreto := range []string{"30123456", "30.123.456", "Rosario-2026!clave", "vecino@vinculovial.ar"} {
+	secretos := []string{
+		"30123456", "30.123.456", "Rosario-2026!clave", "vecino@vinculovial.ar",
+		"12345678901", validSelfieBase64,
+	}
+	for _, secreto := range secretos {
 		if strings.Contains(logs, secreto) {
 			t.Errorf("el log filtra %q: %s", secreto, logs)
 		}
@@ -182,13 +240,13 @@ func TestSignUpPropagaElFalloDeDescifrado(t *testing.T) {
 	h := newHarness(t)
 	h.decryptor.err = domain.ErrInvalidCryptogram
 
-	_, err := h.svc.SignUp(t.Context(), []byte(cryptogram))
+	_, err := h.svc.SignUp(t.Context(), []byte(ephemeralPublicKey), []byte(ciphertext))
 
 	if !errors.Is(err, domain.ErrInvalidCryptogram) {
 		t.Fatalf("error = %v, se esperaba ErrInvalidCryptogram", err)
 	}
 	// Nada se deriva ni se persiste si el criptograma no abrió.
-	if h.hasher.calls != 0 || h.repo.calls != 0 || h.publisher.calls != 0 {
+	if h.renaper.calls != 0 || h.hasher.calls != 0 || h.repo.calls != 0 || h.publisher.calls != 0 {
 		t.Error("no debe hacerse trabajo alguno tras un fallo de descifrado")
 	}
 }
@@ -197,7 +255,7 @@ func TestSignUpRechazaPayloadNoJSON(t *testing.T) {
 	h := newHarness(t)
 	h.decryptor.plaintext = []byte("esto no es json")
 
-	_, err := h.svc.SignUp(t.Context(), []byte(cryptogram))
+	_, err := h.svc.SignUp(t.Context(), []byte(ephemeralPublicKey), []byte(ciphertext))
 
 	if !errors.Is(err, domain.ErrInvalidInput) {
 		t.Fatalf("error = %v, se esperaba ErrInvalidInput", err)
@@ -208,13 +266,28 @@ func TestSignUpRechazaPayloadNoJSON(t *testing.T) {
 }
 
 func TestSignUpRechazaDatosInvalidos(t *testing.T) {
+	valida := fmt.Sprintf(`"tramite":"12345678901","sexo":"F","selfie":%q`, validSelfieBase64)
+
 	cases := map[string]string{
-		"email inválido":     `{"email":"no-es-un-email","password":"Rosario-2026!clave","dni":"30123456"}`,
-		"DNI corto":          `{"email":"vecino@vinculovial.ar","password":"Rosario-2026!clave","dni":"123"}`,
-		"DNI con letras":     `{"email":"vecino@vinculovial.ar","password":"Rosario-2026!clave","dni":"3012345A"}`,
-		"contraseña débil":   `{"email":"vecino@vinculovial.ar","password":"corta","dni":"30123456"}`,
+		"email inválido":     fmt.Sprintf(`{"email":"no-es-un-email","password":"Rosario-2026!clave","dni":"30123456",%s}`, valida),
+		"DNI corto":          fmt.Sprintf(`{"email":"vecino@vinculovial.ar","password":"Rosario-2026!clave","dni":"123",%s}`, valida),
+		"DNI con letras":     fmt.Sprintf(`{"email":"vecino@vinculovial.ar","password":"Rosario-2026!clave","dni":"3012345A",%s}`, valida),
+		"contraseña débil":   fmt.Sprintf(`{"email":"vecino@vinculovial.ar","password":"corta","dni":"30123456",%s}`, valida),
 		"campos ausentes":    `{}`,
-		"contraseña con DNI": `{"email":"vecino@vinculovial.ar","password":"Rosario30123456!","dni":"30123456"}`,
+		"contraseña con DNI": fmt.Sprintf(`{"email":"vecino@vinculovial.ar","password":"Rosario30123456!","dni":"30123456",%s}`, valida),
+		"trámite corto": fmt.Sprintf(
+			`{"email":"vecino@vinculovial.ar","password":"Rosario-2026!clave","dni":"30123456","tramite":"123","sexo":"F","selfie":%q}`,
+			validSelfieBase64,
+		),
+		"sexo inválido": fmt.Sprintf(
+			`{"email":"vecino@vinculovial.ar","password":"Rosario-2026!clave","dni":"30123456","tramite":"12345678901","sexo":"Z","selfie":%q}`,
+			validSelfieBase64,
+		),
+		"selfie no es base64": `{"email":"vecino@vinculovial.ar","password":"Rosario-2026!clave","dni":"30123456","tramite":"12345678901","sexo":"F","selfie":"no-es-base64-!!!"}`,
+		"selfie sin magic bytes de imagen": fmt.Sprintf(
+			`{"email":"vecino@vinculovial.ar","password":"Rosario-2026!clave","dni":"30123456","tramite":"12345678901","sexo":"F","selfie":%q}`,
+			base64.StdEncoding.EncodeToString([]byte("esto no es una imagen")),
+		),
 	}
 
 	for name, plaintext := range cases {
@@ -222,7 +295,7 @@ func TestSignUpRechazaDatosInvalidos(t *testing.T) {
 			h := newHarness(t)
 			h.decryptor.plaintext = []byte(plaintext)
 
-			_, err := h.svc.SignUp(t.Context(), []byte(cryptogram))
+			_, err := h.svc.SignUp(t.Context(), []byte(ephemeralPublicKey), []byte(ciphertext))
 
 			if !errors.Is(err, domain.ErrInvalidInput) {
 				t.Fatalf("error = %v, se esperaba ErrInvalidInput", err)
@@ -233,11 +306,55 @@ func TestSignUpRechazaDatosInvalidos(t *testing.T) {
 				t.Errorf("se esperaba el detalle por campo, error = %v", err)
 			}
 
-			// La validación corta antes del trabajo caro y antes de la base.
-			if h.hasher.calls != 0 || h.cipher.calls != 0 || h.repo.calls != 0 {
-				t.Error("no debe derivarse ni persistirse nada con datos inválidos")
+			// La validación local corta antes de RENAPER y antes del trabajo caro:
+			// no tiene sentido gastar una consulta externa en un payload que se
+			// iba a rechazar de todos modos.
+			if h.renaper.calls != 0 || h.hasher.calls != 0 || h.cipher.calls != 0 || h.repo.calls != 0 {
+				t.Error("no debe derivarse, consultarse ni persistirse nada con datos inválidos")
 			}
 		})
+	}
+}
+
+// Caso dedicado, con el resto del payload válido: aísla el rechazo cuando
+// RENAPER responde que no puede confirmar la identidad.
+func TestSignUpPropagaIdentidadNoVerificada(t *testing.T) {
+	h := newHarness(t)
+	h.renaper.verified = false
+
+	_, err := h.svc.SignUp(t.Context(), []byte(ephemeralPublicKey), []byte(ciphertext))
+
+	if !errors.Is(err, domain.ErrIdentityNotVerified) {
+		t.Fatalf("error = %v, se esperaba ErrIdentityNotVerified", err)
+	}
+	// La identidad no se confirmó: no hay hash de contraseña que calcular ni
+	// alta que persistir.
+	if h.hasher.calls != 0 {
+		t.Error("no debe derivarse la contraseña si RENAPER no verificó la identidad")
+	}
+	if h.repo.calls != 0 {
+		t.Error("no debe persistirse un alta sin identidad verificada")
+	}
+}
+
+// Un fallo al consultar RENAPER (caído, timeout) no es lo mismo que una
+// identidad no verificada: es un problema de la dependencia externa, no un
+// veredicto, y no debe mapearse a ErrIdentityNotVerified.
+func TestSignUpPropagaElFalloDeRenaper(t *testing.T) {
+	h := newHarness(t)
+	falloRenaper := errors.New("renaper no responde")
+	h.renaper.err = falloRenaper
+
+	_, err := h.svc.SignUp(t.Context(), []byte(ephemeralPublicKey), []byte(ciphertext))
+
+	if !errors.Is(err, falloRenaper) {
+		t.Fatalf("error = %v, se esperaba el fallo de RENAPER", err)
+	}
+	if errors.Is(err, domain.ErrIdentityNotVerified) {
+		t.Error("un fallo de la consulta no es un veredicto de identidad no verificada")
+	}
+	if h.repo.calls != 0 {
+		t.Error("no debe persistirse un alta si no se pudo consultar RENAPER")
 	}
 }
 
@@ -245,7 +362,7 @@ func TestSignUpPropagaElDuplicado(t *testing.T) {
 	h := newHarness(t)
 	h.repo.err = domain.ErrDuplicateUser
 
-	_, err := h.svc.SignUp(t.Context(), []byte(cryptogram))
+	_, err := h.svc.SignUp(t.Context(), []byte(ephemeralPublicKey), []byte(ciphertext))
 
 	if !errors.Is(err, domain.ErrDuplicateUser) {
 		t.Fatalf("error = %v, se esperaba ErrDuplicateUser", err)
@@ -262,7 +379,7 @@ func TestSignUpSobreviveAlFalloDelPublisher(t *testing.T) {
 	h := newHarness(t)
 	h.publisher.err = errors.New("rabbitmq no responde")
 
-	id, err := h.svc.SignUp(t.Context(), []byte(cryptogram))
+	id, err := h.svc.SignUp(t.Context(), []byte(ephemeralPublicKey), []byte(ciphertext))
 
 	if err != nil {
 		t.Fatalf("el alta debe mantenerse pese al fallo del broker, error = %v", err)
@@ -273,7 +390,7 @@ func TestSignUpSobreviveAlFalloDelPublisher(t *testing.T) {
 	if h.repo.calls != 1 {
 		t.Errorf("se persistió %d veces, se esperaba 1", h.repo.calls)
 	}
-	if !strings.Contains(h.logs.String(), "user.registered") {
+	if !strings.Contains(h.logs.String(), "user.created") {
 		t.Error("el fallo de publicación debe quedar registrado para poder repararlo")
 	}
 }
@@ -281,7 +398,7 @@ func TestSignUpSobreviveAlFalloDelPublisher(t *testing.T) {
 func TestSignUpPublicaElEventoDelUsuarioCreado(t *testing.T) {
 	h := newHarness(t)
 
-	id, err := h.svc.SignUp(t.Context(), []byte(cryptogram))
+	id, err := h.svc.SignUp(t.Context(), []byte(ephemeralPublicKey), []byte(ciphertext))
 	if err != nil {
 		t.Fatalf("error inesperado: %v", err)
 	}
@@ -310,7 +427,7 @@ func TestSignUpPropagaFallosDeLosPrimitivos(t *testing.T) {
 		h := newHarness(t)
 		h.cipher.err = falloCifrado
 
-		_, err := h.svc.SignUp(t.Context(), []byte(cryptogram))
+		_, err := h.svc.SignUp(t.Context(), []byte(ephemeralPublicKey), []byte(ciphertext))
 
 		if !errors.Is(err, falloCifrado) {
 			t.Fatalf("error = %v, se esperaba el fallo del cifrador", err)
@@ -324,7 +441,7 @@ func TestSignUpPropagaFallosDeLosPrimitivos(t *testing.T) {
 		h := newHarness(t)
 		h.hasher.err = falloHash
 
-		_, err := h.svc.SignUp(t.Context(), []byte(cryptogram))
+		_, err := h.svc.SignUp(t.Context(), []byte(ephemeralPublicKey), []byte(ciphertext))
 
 		if !errors.Is(err, falloHash) {
 			t.Fatalf("error = %v, se esperaba el fallo del hasher", err)
@@ -341,6 +458,7 @@ func TestNewExigeTodasLasDependencias(t *testing.T) {
 		"sin indexador":   func(d *signup.Deps) { d.Indexer = nil },
 		"sin cifrador":    func(d *signup.Deps) { d.Cipher = nil },
 		"sin hasher":      func(d *signup.Deps) { d.Hasher = nil },
+		"sin renaper":     func(d *signup.Deps) { d.Renaper = nil },
 		"sin repositorio": func(d *signup.Deps) { d.Users = nil },
 		"sin publisher":   func(d *signup.Deps) { d.Publisher = nil },
 	}
@@ -352,6 +470,7 @@ func TestNewExigeTodasLasDependencias(t *testing.T) {
 				Indexer:   &indexerMock{},
 				Cipher:    &cipherMock{},
 				Hasher:    &hasherMock{},
+				Renaper:   &renaperMock{verified: true},
 				Users:     &repositoryMock{},
 				Publisher: &publisherMock{},
 			}
@@ -370,6 +489,7 @@ func TestNewAplicaValoresPorDefecto(t *testing.T) {
 		Indexer:   &indexerMock{},
 		Cipher:    &cipherMock{},
 		Hasher:    &hasherMock{},
+		Renaper:   &renaperMock{verified: true},
 		Users:     &repositoryMock{},
 		Publisher: &publisherMock{},
 	})
@@ -378,7 +498,7 @@ func TestNewAplicaValoresPorDefecto(t *testing.T) {
 	}
 
 	// Sin Logger ni Now explícitos el servicio debe seguir funcionando.
-	if _, err := svc.SignUp(t.Context(), []byte(cryptogram)); err != nil {
+	if _, err := svc.SignUp(t.Context(), []byte(ephemeralPublicKey), []byte(ciphertext)); err != nil {
 		t.Errorf("error inesperado: %v", err)
 	}
 }
@@ -392,7 +512,7 @@ func TestSignUpEsConcurrente(t *testing.T) {
 	errs := make(chan error, goroutines)
 	for range goroutines {
 		go func() {
-			_, err := h.svc.SignUp(t.Context(), []byte(cryptogram))
+			_, err := h.svc.SignUp(t.Context(), []byte(ephemeralPublicKey), []byte(ciphertext))
 			errs <- err
 		}()
 	}
