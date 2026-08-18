@@ -14,3 +14,12 @@ docker-compose.yml
 identity
 coverage.*
 *.test
+
+# Notas locales de trabajo — ya cubiertas por *.md (CLAUDE.md) pero explícitas
+# para que quede claro en una auditoría del contexto de build, no implícito en
+# un wildcard.
+CLAUDE.md
+.clauderules
+
+# CI/CD: no forma parte del contexto que necesita el binario.
+.github
