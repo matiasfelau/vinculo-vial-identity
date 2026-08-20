@@ -1,9 +1,9 @@
 name: Docker Release
 
-# Dispara en cada push a main (etiqueta `latest` + `sha-<corto>`) y en cada tag
-# de versión `vX.Y.Z` (suma la etiqueta semántica). El job de build nunca corre
-# si el de test falla: no hay build de imagen, y mucho menos push, sobre un
-# commit con la suite en rojo.
+# Dispara en cada push a main (etiqueta `sha-<corto>`) y en cada tag de versión
+# `vX.Y.Z` (suma las etiquetas semánticas `vX.Y.Z`, `vX.Y` y `latest`). El job
+# de build nunca corre si el de test falla: no hay build de imagen, y mucho
+# menos push, sobre un commit con la suite en rojo.
 on:
   push:
     branches: [main]
@@ -43,19 +43,28 @@ jobs:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
 
-      # Deriva las etiquetas del evento que disparó el workflow: `latest` +
-      # `sha-<corto>` siempre que se publique desde main, y la etiqueta semver
-      # cuando el disparador es un tag `vX.Y.Z`. No hay versión hardcodeada acá
-      # para no tener que recordar actualizar este archivo en cada release.
+      # Deriva las etiquetas del evento que disparó el workflow: `sha-<corto>`
+      # siempre que se publique desde main, y las etiquetas semver (`vX.Y.Z` +
+      # `vX.Y`) cuando el disparador es un tag `vX.Y.Z`. No hay versión
+      # hardcodeada acá para no tener que recordar actualizar este archivo en
+      # cada release.
+      #
+      # `latest=auto` es a propósito, no `enable={{is_default_branch}}`: con
+      # is_default_branch, cualquier push a main —incluso uno que no cierra un
+      # release— pisaría `latest` en Docker Hub con un build sin versionar.
+      # `latest=auto` solo aplica la etiqueta cuando el disparador es el tag
+      # semver más alto (y no una pre-release), así `latest` siempre apunta a
+      # la última versión publicada.
       - uses: docker/metadata-action@v5
         id: meta
         with:
           images: felaufernandezbottaro/vinculo-vial-identity
+          flavor: |
+            latest=auto
           tags: |
-            type=raw,value=latest,enable={{is_default_branch}}
             type=sha,prefix=sha-,format=short
-            type=semver,pattern={{version}}
-            type=semver,pattern={{major}}.{{minor}}
+            type=semver,pattern=v{{version}}
+            type=semver,pattern=v{{major}}.{{minor}}
 
       - uses: docker/build-push-action@v6
         with:
