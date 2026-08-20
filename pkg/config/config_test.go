@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/matiasfelau/vinculo-vial-identity/pkg/config"
 )
@@ -23,8 +24,17 @@ func entornoMinimo() map[string]string {
 		"IDENTITY_HPKE_PRIVATE_KEY": clave,
 		"AES_KEY":                   clave,
 		"HMAC_SECRET":               clave,
+		"JWT_PRIVATE_KEY":           clavePEMDePrueba,
 	}
 }
+
+// clavePEMDePrueba es un PEM sintácticamente válido pero criptográficamente
+// falso: config.Load no interpreta la clave, solo la guarda como Secret y
+// deshace el escapado de saltos de línea. Interpretarla de verdad es
+// responsabilidad de internal/token, que se prueba aparte con claves RSA
+// reales. Viaja con los saltos de línea escapados, tal como cmd/genkeys la
+// imprime y tal como tiene que poder pegarse en una sola línea de .env.
+const clavePEMDePrueba = `-----BEGIN PRIVATE KEY-----\nZmFsc2E=\n-----END PRIVATE KEY-----\n`
 
 func aplicar(t *testing.T, env map[string]string) {
 	t.Helper()
@@ -36,6 +46,7 @@ func aplicar(t *testing.T, env map[string]string) {
 		"POSTGRES_DB", "POSTGRES_SSLMODE", "POSTGRES_LOG_SQL",
 		"POSTGRES_MAX_OPEN_CONNS", "POSTGRES_MAX_IDLE_CONNS",
 		"IDENTITY_HPKE_PRIVATE_KEY", "IDENTITY_HPKE_INFO", "AES_KEY", "HMAC_SECRET",
+		"JWT_PRIVATE_KEY", "ACCESS_TOKEN_TTL_MINUTES", "REFRESH_TOKEN_TTL_DAYS",
 		"ARGON2_MEMORY_KIB", "ARGON2_ITERATIONS", "ARGON2_PARALLELISM",
 		"RABBITMQ_ENABLED", "RABBITMQ_URL", "RABBITMQ_EXCHANGE",
 	} {
@@ -74,12 +85,84 @@ func TestLoadConElEntornoMinimo(t *testing.T) {
 	if cfg.Crypto.HPKEInfo != "" {
 		t.Errorf("info = %q, se esperaba vacío por defecto", cfg.Crypto.HPKEInfo)
 	}
+	// Los defaults son los que fija el contrato compartido de US-02, no una
+	// elección local: Gateway asume estos mismos TTL del lado de la
+	// verificación.
+	if cfg.Token.AccessTokenTTL != 15*time.Minute {
+		t.Errorf("access token ttl = %v, se esperaban 15 minutos", cfg.Token.AccessTokenTTL)
+	}
+	if cfg.Token.RefreshTokenTTL != 30*24*time.Hour {
+		t.Errorf("refresh token ttl = %v, se esperaban 30 días", cfg.Token.RefreshTokenTTL)
+	}
+}
+
+// El parser de .env no soporta valores multilínea: el PEM viaja con los
+// saltos de línea escapados y config.Load tiene que devolverlos intactos.
+func TestLoadDesescapaLosSaltosDeLineaDeLaClaveJWT(t *testing.T) {
+	aplicar(t, entornoMinimo())
+
+	cfg, err := config.Load()
+	if err != nil {
+		t.Fatalf("error inesperado: %v", err)
+	}
+
+	got := cfg.Crypto.JWTPrivateKey.Reveal()
+	if strings.Contains(got, `\n`) {
+		t.Errorf("la clave conserva saltos de línea escapados: %q", got)
+	}
+	if !strings.Contains(got, "\n") {
+		t.Errorf("la clave debería tener saltos de línea reales: %q", got)
+	}
+	if !strings.HasPrefix(got, "-----BEGIN PRIVATE KEY-----\n") {
+		t.Errorf("la clave no empieza con el encabezado PEM esperado: %q", got)
+	}
+}
+
+func TestLoadRechazaTTLNoPositivos(t *testing.T) {
+	cases := map[string]map[string]string{
+		"access token ttl cero":     {"ACCESS_TOKEN_TTL_MINUTES": "0"},
+		"access token ttl negativo": {"ACCESS_TOKEN_TTL_MINUTES": "-1"},
+		"refresh token ttl cero":    {"REFRESH_TOKEN_TTL_DAYS": "0"},
+		"refresh token ttl negativo": {"REFRESH_TOKEN_TTL_DAYS": "-1"},
+	}
+
+	for name, override := range cases {
+		t.Run(name, func(t *testing.T) {
+			env := entornoMinimo()
+			for k, v := range override {
+				env[k] = v
+			}
+			aplicar(t, env)
+
+			if _, err := config.Load(); err == nil {
+				t.Error("se esperaba un error de configuración")
+			}
+		})
+	}
+}
+
+func TestLoadAceptaTTLPersonalizados(t *testing.T) {
+	env := entornoMinimo()
+	env["ACCESS_TOKEN_TTL_MINUTES"] = "5"
+	env["REFRESH_TOKEN_TTL_DAYS"] = "7"
+	aplicar(t, env)
+
+	cfg, err := config.Load()
+	if err != nil {
+		t.Fatalf("error inesperado: %v", err)
+	}
+	if cfg.Token.AccessTokenTTL != 5*time.Minute {
+		t.Errorf("access token ttl = %v, se esperaban 5 minutos", cfg.Token.AccessTokenTTL)
+	}
+	if cfg.Token.RefreshTokenTTL != 7*24*time.Hour {
+		t.Errorf("refresh token ttl = %v, se esperaban 7 días", cfg.Token.RefreshTokenTTL)
+	}
 }
 
 func TestLoadExigeLosSecretos(t *testing.T) {
 	obligatorias := []string{
 		"POSTGRES_USER", "POSTGRES_PASSWORD", "POSTGRES_DB",
-		"IDENTITY_HPKE_PRIVATE_KEY", "AES_KEY", "HMAC_SECRET",
+		"IDENTITY_HPKE_PRIVATE_KEY", "AES_KEY", "HMAC_SECRET", "JWT_PRIVATE_KEY",
 	}
 
 	for _, faltante := range obligatorias {
@@ -109,7 +192,7 @@ func TestLoadAcumulaLosErrores(t *testing.T) {
 		t.Fatal("se esperaba un error")
 	}
 
-	for _, faltante := range []string{"POSTGRES_USER", "IDENTITY_HPKE_PRIVATE_KEY", "AES_KEY", "HMAC_SECRET"} {
+	for _, faltante := range []string{"POSTGRES_USER", "IDENTITY_HPKE_PRIVATE_KEY", "AES_KEY", "HMAC_SECRET", "JWT_PRIVATE_KEY"} {
 		if !strings.Contains(err.Error(), faltante) {
 			t.Errorf("el error debería mencionar %s: %v", faltante, err)
 		}

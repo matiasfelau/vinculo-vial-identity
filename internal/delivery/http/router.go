@@ -20,6 +20,7 @@ const DefaultMaxBodyBytes int64 = 10 << 20
 // RouterConfig son los parámetros de armado del router.
 type RouterConfig struct {
 	SignUp SignUpService
+	SignIn SignInService
 	Logger *slog.Logger
 	// ReadinessCheck reporta si las dependencias externas responden. Si es nil,
 	// /readyz se limita a informar que el proceso está vivo.
@@ -34,7 +35,7 @@ type RouterConfig struct {
 
 // NewRouter arma el router con sus middlewares y rutas.
 func NewRouter(cfg RouterConfig) (*gin.Engine, error) {
-	handler, err := NewHandler(cfg.SignUp, cfg.Logger)
+	handler, err := NewHandler(cfg.SignUp, cfg.SignIn, cfg.Logger)
 	if err != nil {
 		return nil, err
 	}
@@ -95,6 +96,7 @@ func NewRouter(cfg RouterConfig) (*gin.Engine, error) {
 
 	auth := r.Group("/api/v1/auth", limitBody(maxBody), noStore())
 	auth.POST("/signup", handler.SignUp)
+	auth.POST("/signin", handler.SignIn)
 
 	r.NoRoute(func(c *gin.Context) {
 		c.JSON(http.StatusNotFound, errorResponse{Code: codeInvalidRequest, Error: "recurso no encontrado", RequestID: requestIDOf(c)})

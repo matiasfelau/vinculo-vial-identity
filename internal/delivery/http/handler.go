@@ -1,4 +1,5 @@
-// Package http expone el caso de uso de registro sobre HTTP/REST.
+// Package http expone los casos de uso de registro (US-01) e inicio de sesión
+// (US-02) sobre HTTP/REST.
 //
 // El servicio vive detrás de vinculo-vial-gateway: Kong ya validó App
 // Attestation antes de que la petición llegue acá, así que este handler no
@@ -25,21 +26,31 @@ type SignUpService interface {
 	SignUp(ctx context.Context, ephemeralPublicKey, ciphertext []byte) (uuid.UUID, error)
 }
 
-// Handler atiende el alta de vecinos.
+// SignInService es el puerto que necesita el handler para el login (US-02),
+// declarado del lado del consumidor por el mismo motivo que SignUpService.
+type SignInService interface {
+	SignIn(ctx context.Context, ephemeralPublicKey, ciphertext []byte) (accessToken, refreshToken string, err error)
+}
+
+// Handler atiende el alta y el inicio de sesión de vecinos.
 type Handler struct {
 	signUp SignUpService
+	signIn SignInService
 	logger *slog.Logger
 }
 
 // NewHandler construye el handler.
-func NewHandler(svc SignUpService, logger *slog.Logger) (*Handler, error) {
-	if svc == nil {
+func NewHandler(signUp SignUpService, signIn SignInService, logger *slog.Logger) (*Handler, error) {
+	if signUp == nil {
 		return nil, errors.New("http: falta el servicio de registro")
+	}
+	if signIn == nil {
+		return nil, errors.New("http: falta el servicio de inicio de sesión")
 	}
 	if logger == nil {
 		logger = slog.Default()
 	}
-	return &Handler{signUp: svc, logger: logger}, nil
+	return &Handler{signUp: signUp, signIn: signIn, logger: logger}, nil
 }
 
 // SignUp atiende POST /api/v1/auth/signup.
@@ -89,14 +100,60 @@ func (h *Handler) SignUp(c *gin.Context) {
 	c.JSON(http.StatusCreated, signUpResponse{UserID: userID.String()})
 }
 
+// SignIn atiende POST /api/v1/auth/signin.
+//
+//	200 — login exitoso, con el par de tokens de la sesión nueva.
+//	400 — el cuerpo no es interpretable, o los datos descifrados no validan
+//	      (DNI mal formado, contraseña vacía).
+//	401 — el DNI no corresponde a ningún usuario o la contraseña no verifica,
+//	      con la misma respuesta en los dos casos (anti-enumeración).
+//	500 — el mensaje HPKE no descifra, o falla algo interno.
+//
+// El 403 que enumera el contrato lo produce el gateway cuando la atestación de
+// la app no convence; nunca llega a este handler.
+func (h *Handler) SignIn(c *gin.Context) {
+	var req signInRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		// Igual que en SignUp: acá todavía no hay nada descifrado, así que
+		// err.Error() de un bind fallido describe sintaxis JSON o un tipo que no
+		// matchea, nunca el contenido de un campo — es seguro loguearlo tal cual.
+		h.logger.WarnContext(c.Request.Context(), "cuerpo del signin no es JSON interpretable",
+			slog.String("request_id", requestIDOf(c)),
+			slog.String("error", err.Error()),
+		)
+		h.abort(c, http.StatusBadRequest, codeInvalidRequest,
+			"el cuerpo debe ser un JSON con los campos ephemeral_public_key y ciphertext", nil)
+		return
+	}
+
+	ephemeralPublicKey, ok := h.decodeField(c, "ephemeral_public_key", req.EphemeralPublicKey)
+	if !ok {
+		return
+	}
+
+	ciphertext, ok := h.decodeField(c, "ciphertext", req.Ciphertext)
+	if !ok {
+		return
+	}
+
+	accessToken, refreshToken, err := h.signIn.SignIn(c.Request.Context(), ephemeralPublicKey, ciphertext)
+	if err != nil {
+		h.abortWithDomainError(c, err)
+		return
+	}
+
+	c.JSON(http.StatusOK, signInResponse{AccessToken: accessToken, RefreshToken: refreshToken})
+}
+
 // decodeField exige que el campo esté presente y sea base64, y aborta la
-// petición con un 400 si no lo es.
+// petición con un 400 si no lo es. La usan tanto SignUp como SignIn: los dos
+// reciben el mismo sobre HPKE de dos piezas.
 //
 // El nombre del campo se nombra en el mensaje pero nunca su valor: es material
 // criptográfico y no tiene por qué aparecer en una respuesta ni en un log.
 func (h *Handler) decodeField(c *gin.Context, name, value string) ([]byte, bool) {
 	if value == "" {
-		h.logger.WarnContext(c.Request.Context(), "campo del signup vacío",
+		h.logger.WarnContext(c.Request.Context(), "campo del sobre HPKE vacío",
 			slog.String("request_id", requestIDOf(c)),
 			slog.String("field", name),
 		)
@@ -110,7 +167,7 @@ func (h *Handler) decodeField(c *gin.Context, name, value string) ([]byte, bool)
 		// material criptográfico (la clave efímera o el ciphertext), y ni
 		// siquiera decodificó, así que tampoco hay un payload interno que
 		// proteger acá — solo no hay motivo para loguear un blob opaco entero.
-		h.logger.WarnContext(c.Request.Context(), "campo del signup no es base64 válido",
+		h.logger.WarnContext(c.Request.Context(), "campo del sobre HPKE no es base64 válido",
 			slog.String("request_id", requestIDOf(c)),
 			slog.String("field", name),
 			slog.Int("longitud_recibida", len(value)),
@@ -174,6 +231,14 @@ func (h *Handler) abortWithDomainError(c *gin.Context, err error) {
 		// Mensaje deliberadamente ambiguo: decir si colisionó el email o el DNI
 		// permitiría averiguar si una persona concreta está registrada.
 		h.abort(c, http.StatusConflict, codeConflict, "no es posible completar el registro con los datos provistos", nil)
+
+	case errors.Is(err, domain.ErrInvalidCredentials):
+		// 401 unificado: mismo status, mismo código, mismo mensaje tanto si el
+		// DNI no corresponde a ningún usuario como si la contraseña no
+		// verifica. Distinguirlos en la respuesta habilitaría enumerar qué
+		// DNIs están registrados; el motivo real ya quedó en el log del
+		// servicio, identificado por dni_hashed.
+		h.abort(c, http.StatusUnauthorized, codeInvalidCredentials, "credenciales inválidas", nil)
 
 	case errors.Is(err, domain.ErrIdentityNotVerified):
 		// 400 y no 409: no hay ningún otro registro con el que haya colisionado,

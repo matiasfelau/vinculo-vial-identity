@@ -138,6 +138,25 @@ func TestMapCreateErrorNoFiltraDatosSensibles(t *testing.T) {
 	}
 }
 
+func TestMapFindErrorTraduceRegistroNoEncontrado(t *testing.T) {
+	got := mapFindError(gorm.ErrRecordNotFound)
+	if !errors.Is(got, domain.ErrUserNotFound) {
+		t.Errorf("error = %v, se esperaba ErrUserNotFound", got)
+	}
+}
+
+func TestMapFindErrorNoTraduceOtrosFallos(t *testing.T) {
+	original := errors.New("connection reset by peer")
+	got := mapFindError(original)
+
+	if errors.Is(got, domain.ErrUserNotFound) {
+		t.Errorf("%v no debería traducirse a ErrUserNotFound", original)
+	}
+	if !errors.Is(got, original) {
+		t.Errorf("el error original debe quedar envuelto para diagnóstico: %v", got)
+	}
+}
+
 func TestCloseToleraConexionNula(t *testing.T) {
 	if err := Close(nil); err != nil {
 		t.Errorf("error inesperado: %v", err)
