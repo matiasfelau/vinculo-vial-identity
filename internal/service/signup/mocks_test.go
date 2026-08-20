@@ -141,6 +141,15 @@ func (m *repositoryMock) Create(_ context.Context, u *domain.User) error {
 	return nil
 }
 
+// FindByDNIHashed no lo ejercita ningún test de signup: es parte de
+// domain.UserRepository solo porque el login (US-02) lo necesita sobre el
+// mismo repositorio. Un panic acá delata inmediatamente si algún cambio futuro
+// hace que el alta empiece a depender de una búsqueda que hoy no le
+// corresponde.
+func (m *repositoryMock) FindByDNIHashed(context.Context, string) (*domain.User, error) {
+	panic("signup: FindByDNIHashed no se usa en el alta")
+}
+
 func (m *repositoryMock) last() domain.User {
 	m.mu.Lock()
 	defer m.mu.Unlock()

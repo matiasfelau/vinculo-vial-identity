@@ -40,20 +40,43 @@ func (m *serviceMock) SignUp(_ context.Context, ephemeralPublicKey, ciphertext [
 	return m.userID, nil
 }
 
+type signInServiceMock struct {
+	accessToken  string
+	refreshToken string
+	err          error
+
+	calls              int
+	ephemeralPublicKey []byte
+	ciphertext         []byte
+}
+
+func (m *signInServiceMock) SignIn(_ context.Context, ephemeralPublicKey, ciphertext []byte) (string, string, error) {
+	m.calls++
+	m.ephemeralPublicKey = ephemeralPublicKey
+	m.ciphertext = ciphertext
+	if m.err != nil {
+		return "", "", m.err
+	}
+	return m.accessToken, m.refreshToken, nil
+}
+
 type testServer struct {
-	handler http.Handler
-	svc     *serviceMock
-	logs    *strings.Builder
+	handler   http.Handler
+	svc       *serviceMock
+	signInSvc *signInServiceMock
+	logs      *strings.Builder
 }
 
 func newTestServer(t *testing.T, ready func(context.Context) error) *testServer {
 	t.Helper()
 
 	svc := &serviceMock{userID: uuid.New()}
+	signInSvc := &signInServiceMock{accessToken: "access-token", refreshToken: "refresh-token"}
 	logs := &strings.Builder{}
 
 	router, err := delivery.NewRouter(delivery.RouterConfig{
 		SignUp:         svc,
+		SignIn:         signInSvc,
 		Logger:         slog.New(slog.NewTextHandler(logs, &slog.HandlerOptions{Level: slog.LevelDebug})),
 		ReadinessCheck: ready,
 	})
@@ -61,7 +84,7 @@ func newTestServer(t *testing.T, ready func(context.Context) error) *testServer 
 		t.Fatalf("no se pudo armar el router: %v", err)
 	}
 
-	return &testServer{handler: router, svc: svc, logs: logs}
+	return &testServer{handler: router, svc: svc, signInSvc: signInSvc, logs: logs}
 }
 
 func (ts *testServer) post(t *testing.T, path, body string) *httptest.ResponseRecorder {
@@ -83,6 +106,20 @@ func signUpBody(ciphertext string) string {
 }
 
 func signUpBodyCon(ephemeralPublicKey, ciphertext string) string {
+	payload, _ := json.Marshal(map[string]string{
+		"ephemeral_public_key": base64.StdEncoding.EncodeToString([]byte(ephemeralPublicKey)),
+		"ciphertext":           base64.StdEncoding.EncodeToString([]byte(ciphertext)),
+	})
+	return string(payload)
+}
+
+// signInBody arma el cuerpo del login: el mismo wrapper HPKE de dos piezas que
+// el alta, así que reutiliza exactamente la misma forma de sobre.
+func signInBody(ciphertext string) string {
+	return signInBodyCon("clave-efimera", ciphertext)
+}
+
+func signInBodyCon(ephemeralPublicKey, ciphertext string) string {
 	payload, _ := json.Marshal(map[string]string{
 		"ephemeral_public_key": base64.StdEncoding.EncodeToString([]byte(ephemeralPublicKey)),
 		"ciphertext":           base64.StdEncoding.EncodeToString([]byte(ciphertext)),
@@ -242,7 +279,7 @@ func TestSignUpDevuelve400AnteCuerposInvalidosQuedaRegistradoEnElLog(t *testing.
 		},
 		"ephemeral_public_key ausente": {
 			`{"ciphertext":"` + valida + `"}`,
-			[]string{"WARN", "campo del signup vacío", "ephemeral_public_key"},
+			[]string{"WARN", "campo del sobre HPKE vacío", "ephemeral_public_key"},
 		},
 		"ciphertext no base64": {
 			`{"ephemeral_public_key":"` + valida + `","ciphertext":"no-es-base64-!!!"}`,
@@ -617,7 +654,164 @@ func TestRutasYMetodosNoSoportados(t *testing.T) {
 }
 
 func TestNewRouterExigeElServicio(t *testing.T) {
-	if _, err := delivery.NewRouter(delivery.RouterConfig{Logger: slog.New(slog.NewTextHandler(io.Discard, nil))}); err == nil {
-		t.Error("se esperaba un error al armar el router sin servicio")
+	t.Run("sin servicio de registro", func(t *testing.T) {
+		cfg := delivery.RouterConfig{
+			SignIn: &signInServiceMock{},
+			Logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
+		}
+		if _, err := delivery.NewRouter(cfg); err == nil {
+			t.Error("se esperaba un error al armar el router sin servicio de registro")
+		}
+	})
+
+	t.Run("sin servicio de login", func(t *testing.T) {
+		cfg := delivery.RouterConfig{
+			SignUp: &serviceMock{},
+			Logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
+		}
+		if _, err := delivery.NewRouter(cfg); err == nil {
+			t.Error("se esperaba un error al armar el router sin servicio de login")
+		}
+	})
+}
+
+func TestSignInDevuelve200ConLosTokens(t *testing.T) {
+	ts := newTestServer(t, nil)
+
+	rec := ts.post(t, "/api/v1/auth/signin", signInBody("criptograma"))
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, se esperaba 200 (%s)", rec.Code, rec.Body.String())
+	}
+
+	var body struct {
+		AccessToken  string `json:"access_token"`
+		RefreshToken string `json:"refresh_token"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatalf("la respuesta no es JSON: %v", err)
+	}
+	if body.AccessToken != ts.signInSvc.accessToken {
+		t.Errorf("access_token = %q, se esperaba %q", body.AccessToken, ts.signInSvc.accessToken)
+	}
+	if body.RefreshToken != ts.signInSvc.refreshToken {
+		t.Errorf("refresh_token = %q, se esperaba %q", body.RefreshToken, ts.signInSvc.refreshToken)
+	}
+}
+
+func TestSignInDecodificaLasDosPiezasAntesDeDelegarlas(t *testing.T) {
+	ts := newTestServer(t, nil)
+
+	body := signInBodyCon("la-clave-efimera", "el-ciphertext")
+	if rec := ts.post(t, "/api/v1/auth/signin", body); rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, se esperaba 200", rec.Code)
+	}
+
+	if got := string(ts.signInSvc.ephemeralPublicKey); got != "la-clave-efimera" {
+		t.Errorf("ephemeral_public_key = %q, se esperaba la clave efímera decodificada", got)
+	}
+	if got := string(ts.signInSvc.ciphertext); got != "el-ciphertext" {
+		t.Errorf("ciphertext = %q, se esperaba el ciphertext decodificado", got)
+	}
+}
+
+func TestSignInDevuelve400AnteCuerposInvalidos(t *testing.T) {
+	valida := base64.StdEncoding.EncodeToString([]byte("clave-efimera"))
+
+	cases := map[string]string{
+		"cuerpo vacío":                 ``,
+		"JSON malformado":              `{"ciphertext":`,
+		"ephemeral_public_key ausente": `{"ciphertext":"` + valida + `"}`,
+		"ciphertext ausente":           `{"ephemeral_public_key":"` + valida + `"}`,
+		"ciphertext no base64":         `{"ephemeral_public_key":"` + valida + `","ciphertext":"no-es-base64-!!!"}`,
+	}
+
+	for name, body := range cases {
+		t.Run(name, func(t *testing.T) {
+			ts := newTestServer(t, nil)
+
+			rec := ts.post(t, "/api/v1/auth/signin", body)
+
+			if rec.Code != http.StatusBadRequest {
+				t.Fatalf("status = %d, se esperaba 400 (%s)", rec.Code, rec.Body.String())
+			}
+			if ts.signInSvc.calls != 0 {
+				t.Error("el servicio no debería invocarse con un cuerpo inválido")
+			}
+		})
+	}
+}
+
+func TestSignInMapeaLosErroresDeDominio(t *testing.T) {
+	cases := map[string]struct {
+		err    error
+		status int
+		code   string
+	}{
+		"datos inválidos":         {domain.ErrInvalidInput, http.StatusBadRequest, "datos_invalidos"},
+		"credenciales inválidas":  {domain.ErrInvalidCredentials, http.StatusUnauthorized, "credenciales_invalidas"},
+		"criptograma mal formado": {domain.ErrMalformedCryptogram, http.StatusBadRequest, "solicitud_invalida"},
+		"criptograma ilegible":    {domain.ErrInvalidCryptogram, http.StatusInternalServerError, "error_interno"},
+		"fallo inesperado":        {errors.New("la base no responde"), http.StatusInternalServerError, "error_interno"},
+	}
+
+	for name, tc := range cases {
+		t.Run(name, func(t *testing.T) {
+			ts := newTestServer(t, nil)
+			ts.signInSvc.err = tc.err
+
+			rec := ts.post(t, "/api/v1/auth/signin", signInBody("criptograma"))
+
+			if rec.Code != tc.status {
+				t.Fatalf("status = %d, se esperaba %d (%s)", rec.Code, tc.status, rec.Body.String())
+			}
+			if got := decodeError(t, rec)["code"]; got != tc.code {
+				t.Errorf("code = %v, se esperaba %q", got, tc.code)
+			}
+		})
+	}
+}
+
+// Un DNI inexistente y una contraseña incorrecta tienen que producir
+// exactamente la misma respuesta: distinguirlas permitiría enumerar qué DNIs
+// están registrados.
+func TestCredencialesInvalidasNoRevelanQueDatoFallo(t *testing.T) {
+	ts := newTestServer(t, nil)
+	ts.signInSvc.err = domain.ErrInvalidCredentials
+
+	rec := ts.post(t, "/api/v1/auth/signin", signInBody("criptograma"))
+
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("status = %d, se esperaba 401", rec.Code)
+	}
+
+	cuerpo := strings.ToLower(rec.Body.String())
+	for _, filtracion := range []string{"dni", "password", "contraseña", "existe", "usuario"} {
+		if strings.Contains(cuerpo, filtracion) {
+			t.Errorf("el 401 menciona %q y permite tantear cuál dato falló: %s", filtracion, rec.Body.String())
+		}
+	}
+}
+
+func TestSignInCuerpoDesmesuradoSeRechaza(t *testing.T) {
+	ts := newTestServer(t, nil)
+
+	rec := ts.post(t, "/api/v1/auth/signin", signInBody(strings.Repeat("a", int(delivery.DefaultMaxBodyBytes)*2)))
+
+	if rec.Code == http.StatusOK {
+		t.Errorf("un cuerpo por encima del tope no debería aceptarse (status %d)", rec.Code)
+	}
+	if ts.signInSvc.calls != 0 {
+		t.Error("el servicio no debería invocarse con un cuerpo por encima del tope")
+	}
+}
+
+func TestSignInRespuestaNoSeCachea(t *testing.T) {
+	ts := newTestServer(t, nil)
+
+	rec := ts.post(t, "/api/v1/auth/signin", signInBody("criptograma"))
+
+	if got := rec.Header().Get("Cache-Control"); got != "no-store" {
+		t.Errorf("Cache-Control = %q, se esperaba no-store", got)
 	}
 }

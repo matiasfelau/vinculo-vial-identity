@@ -22,6 +22,25 @@ type signUpResponse struct {
 	UserID string `json:"userId"`
 }
 
+// signInRequest es el único dato que el login acepta: el mismo wrapper HPKE
+// del alta, en las dos piezas que fija el contrato compartido.
+//
+// El cuerpo no lleva DNI ni contraseña: los dos viajan dentro del ciphertext,
+// cifrados extremo a extremo desde el dispositivo — la contraseña es una
+// credencial reutilizable, y merece la misma protección de transporte que el
+// DNI del alta, a diferencia del refresh token de un solo uso de US-03.
+type signInRequest struct {
+	EphemeralPublicKey string `json:"ephemeral_public_key"`
+	Ciphertext         string `json:"ciphertext"`
+}
+
+// signInResponse acompaña al 200: el par de tokens de la sesión recién
+// creada.
+type signInResponse struct {
+	AccessToken  string `json:"access_token"`
+	RefreshToken string `json:"refresh_token"`
+}
+
 // Códigos de error de la API. Son estables y la app decide el texto a mostrar;
 // el campo `error` es para diagnóstico humano, no para parsear.
 const (
@@ -29,7 +48,11 @@ const (
 	codeInvalidInput        = "datos_invalidos"
 	codeIdentityNotVerified = "identidad_no_verificada"
 	codeConflict            = "registro_no_disponible"
-	codeInternal            = "error_interno"
+	// codeInvalidCredentials es el código único del 401 de /signin, tanto para
+	// un DNI inexistente como para una contraseña incorrecta: distinguirlos
+	// habilitaría enumerar qué DNIs están registrados.
+	codeInvalidCredentials = "credenciales_invalidas"
+	codeInternal           = "error_interno"
 )
 
 // errorResponse es la forma única de todos los errores de la API.

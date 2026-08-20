@@ -3,7 +3,8 @@
 Microservicio de identidad de Vínculo Vial. Bounded context estricto: identidad
 y seguridad. No conoce vehículos ni patentes.
 
-Alcance actual: **US-01 / CU-01 — Registro de un vecino**.
+Alcance actual: **US-01 / CU-01 — Registro de un vecino** y **US-02 / CU-02 —
+Inicio de sesión**.
 
 ## Cómo funciona un alta
 
@@ -98,6 +99,69 @@ condicionarlo a ninguna variable de entorno y deja un `WARN` en cada arranque
 nada—. Cuando exista el cliente real, va a vivir en el mismo paquete, detrás del
 mismo puerto, sin que el resto del servicio se entere del cambio.
 
+## Cómo funciona un login
+
+La app envía DNI y contraseña dentro del mismo tipo de mensaje HPKE que el
+registro: la contraseña es una credencial reutilizable, y merece la misma
+protección de transporte que el DNI del alta —a diferencia del Refresh Token
+de un solo uso que rota US-03, que sí viaja en texto plano—.
+
+```
+POST /api/v1/auth/signin
+      │
+      ├─ 1. Descifrar el mensaje (HPKE, RFC 9180)
+      ├─ 2. Normalizar el DNI
+      ├─ 3. Validar formato (DNI, contraseña       → 400 si algo no pasa
+      │      no vacía)
+      ├─ 4. Blind Index del DNI (HMAC-SHA256)      → 401 genérico si no
+      │      y búsqueda                                hay usuario
+      ├─ 5. Verificar la contraseña                → 401 genérico si no
+      │      (argon2.Verify)                            coincide
+      ├─ 6. Emitir Access Token (JWT RS256, 15m)
+      ├─ 7. Emitir Refresh Token (opaco, 30d)
+      └─ 8. Persistir la sesión (solo el           → 200
+             SHA-256 del refresh token)
+```
+
+### Respuestas
+
+| Código | Cuándo |
+|---|---|
+| `200` | Login exitoso. Devuelve `access_token` (JWT) y `refresh_token` (opaco). |
+| `400` | El cuerpo no es interpretable, o los datos descifrados no validan (DNI mal formado, contraseña vacía). |
+| `401` | El DNI no corresponde a ningún usuario, o la contraseña no verifica. Respuesta idéntica en los dos casos. |
+| `500` | Un mensaje bien formado que no descifra, o falla algo interno. |
+
+El `403` que enumera el contrato compartido lo produce el gateway cuando la App
+Attestation no convence; nunca lo emite este servicio.
+
+### El 401 unificado
+
+Un DNI inexistente y una contraseña incorrecta producen la misma respuesta
+—mismo status, mismo código, mismo cuerpo— y también el mismo costo en tiempo:
+cuando el DNI no corresponde a ningún usuario, el servicio igual ejecuta
+`argon2.Verify` contra un hash dummy derivado una única vez al arrancar, para
+que la ausencia de una comparación real no se note por el reloj. Distinguir
+los dos casos —en la respuesta o en la latencia— convertiría el endpoint en un
+oráculo para averiguar qué DNIs están registrados.
+
+El motivo real del rechazo sí queda en el log del servidor, identificado por
+`dni_hashed` y nunca por el DNI en claro: es diagnóstico interno, no algo que
+el cliente pueda usar para enumerar.
+
+### Tokens de sesión
+
+Mismo esquema en `/signin` que en la rotación de US-03: Access Token JWT
+**RS256** (Identity firma, Gateway verifica con la Public Key correspondiente),
+TTL 15 minutos, claim `sub` = UUID interno del usuario y ningún otro
+dato —ni DNI, ni email, ni el Blind Index—. Refresh Token opaco
+(`crypto/rand`), TTL 30 días, persistido en `sessions` solo como su SHA-256.
+
+**Fuera de alcance de este CU**: bloqueo de cuenta por intentos fallidos
+(`failed_login_attempts` / `lock_until` no existen; la defensa contra fuerza
+bruta masiva es del gateway), recuperación de contraseña, y la rotación del
+Refresh Token (`/refresh`, `/logout`), que es US-03.
+
 ## Los dos mecanismos criptográficos
 
 No confundirlos: son independientes y usan claves distintas a propósito.
@@ -112,19 +176,37 @@ A eso se suman el Blind Index del DNI (HMAC-SHA256, `HMAC_SECRET`) que habilita
 la detección de duplicados sin exponer el dato, y Argon2id para la contraseña.
 
 Comprometer una clave no debe comprometer las otras, y cada una tiene su propio
-ciclo de rotación. `go run ./cmd/genkeys` genera las tres.
+ciclo de rotación. `go run ./cmd/genkeys` genera las cuatro.
+
+## Firma de sesión (JWT)
+
+Un tercer mecanismo, independiente de los dos anteriores: **RS256** sobre un
+par RSA de al menos 2048 bits. Identity es el único custodio de la Private Key
+(`JWT_PRIVATE_KEY`) y el único componente que firma; el Gateway y el resto de
+la plataforma reciben solo la Public Key (`JWT_PUBLIC_KEY`) para verificar. Se
+eligió una firma asimétrica en lugar de un secreto compartido (HS256) a
+propósito: HS256 obligaría a distribuir el material de firma a cada
+verificador, y cualquiera de ellos podría entonces emitir tokens válidos.
+
+El JWT se compone a mano sobre la librería estándar (`internal/token`), sin
+sumar una dependencia de terceros: son tres segmentos en base64url y una firma
+RSASSA-PKCS1-v1_5 sobre SHA-256, algo que la librería estándar cubre por
+completo y que este servicio nunca necesita volver a interpretar —firma, pero
+no verifica los tokens que él mismo emite—.
 
 ## Puesta en marcha
 
 ```bash
 cp .env.example .env
-go run ./cmd/genkeys        # copiar las tres claves privadas al .env
+go run ./cmd/genkeys        # copiar las cuatro claves privadas al .env
 docker compose up --build
 ```
 
-`IDENTITY_HPKE_PUBLIC_KEY`, que `genkeys` también imprime, es la única clave que
-sale de acá: se embebe en el frontend para cifrar el payload del registro. Los
-dos valores tienen que salir de la misma corrida.
+`IDENTITY_HPKE_PUBLIC_KEY` y `JWT_PUBLIC_KEY`, que `genkeys` también imprime,
+son las dos claves que salen de acá: la primera se embebe en el frontend para
+cifrar el payload del registro, la segunda va al Gateway para verificar los
+Access Token. Cada par (privada + pública) tiene que salir de la misma
+corrida.
 
 Para correr el servicio fuera del contenedor hace falta un Postgres accesible y
 `POSTGRES_HOST` apuntando a él:
@@ -157,15 +239,17 @@ conocen todas las implementaciones concretas.
 ```
 cmd/api/                    binario del servicio, resolución de dependencias
 cmd/genkeys/                generación del material criptográfico
-internal/domain/            entidad User, eventos, errores centinela, puertos
-internal/service/signup/    orquestación del caso de uso
-internal/repository/postgres/  persistencia GORM
-internal/delivery/http/     handler Gin, DTOs, middlewares
+internal/domain/            entidades User y Session, eventos, errores centinela, puertos
+internal/service/signup/    orquestación del alta (US-01)
+internal/service/signin/    orquestación del login (US-02)
+internal/repository/postgres/  persistencia GORM (users, sessions)
+internal/delivery/http/     handlers Gin, DTOs, middlewares
 internal/delivery/events/   publisher RabbitMQ (+ inerte)
 internal/crypto/hpke/       descifrado del transporte
 internal/crypto/symmetric/  cifrado at-rest
 internal/crypto/blindindex/ Blind Index del DNI
 internal/crypto/password/   Argon2id
+internal/token/             emisión de Access Token (JWT RS256) y Refresh Token opaco
 internal/renaper/           verificación de identidad (hoy solo Mock)
 internal/validation/        Never Trust the Client
 pkg/config/                 carga y validación de variables de entorno
@@ -195,6 +279,25 @@ tener datos reales en producción hay que pasar a una herramienta con versionado
 insumos de la verificación contra RENAPER, no datos que el dominio conserve. Se
 usan una vez, en memoria, y se limpian con `defer` antes de que la función
 vuelva, sea cual sea el resultado del alta.
+
+Tabla `sessions`, creada con `AutoMigrate` en la inicialización del
+repositorio de sesiones. Requiere que `users` ya exista: declara una clave
+foránea hacia ella.
+
+| campo | tipo | notas |
+|---|---|---|
+| `id` | uuid | PK, generada en el dominio |
+| `user_id` | uuid | FK → `users.id`, `ON DELETE CASCADE` |
+| `refresh_token_hash` | varchar(64) | UNIQUE — SHA-256 del Refresh Token opaco |
+| `is_revoked` | boolean | `false` al crearse; US-03 la revoca |
+| `expires_at` | timestamptz | +30 días desde la emisión |
+| `created_at` | timestamptz | |
+
+El Refresh Token en claro nunca se persiste: solo existe en la respuesta HTTP
+que recibe el cliente. La clave foránea con `ON DELETE CASCADE` se agrega con
+SQL crudo después de `AutoMigrate`, de forma idempotente: GORM solo la genera
+sola a partir de una asociación Go, y no hace falta cargar esa relación
+completa solo para declararla.
 
 ## Evento publicado
 
@@ -231,7 +334,19 @@ autenticado actuando: el usuario se está creando en esa misma petición.
   romper el registro por un problema del broker, pero hay que resolverlo antes
   de que algún consumidor dependa del evento para algo crítico.
 - **Migraciones versionadas**, en lugar de `AutoMigrate`.
-- **Rate limiting** del endpoint de alta. Argon2id reserva 64 MiB por derivación
-  concurrente y RENAPER agrega una llamada de red externa por alta, así que el
-  tope de concurrencia es una decisión de capacidad que hoy queda del lado del
+- **Rate limiting** de los endpoints de alta y login. Argon2id reserva 64 MiB
+  por derivación concurrente (el login también deriva uno, vía `Verify`, en
+  cada intento) y RENAPER agrega una llamada de red externa por alta, así que
+  el tope de concurrencia es una decisión de capacidad que hoy queda del lado
+  del gateway.
+- **Bloqueo de cuenta por intentos fallidos.** El login no lleva
+  `failed_login_attempts` ni `lock_until`: un DNI puede probarse contra
+  contraseñas indefinidamente sin que la cuenta se bloquee. La defensa contra
+  fuerza bruta masiva es hoy responsabilidad exclusiva del rate limiting del
   gateway.
+- **Recuperación de contraseña.** No existe ningún flujo para que un vecino
+  recupere el acceso si la olvida.
+- **Revocación inmediata de Access Tokens.** Son JWT stateless: siguen siendo
+  válidos hasta su `exp` (máx. 15 minutos) aunque la sesión se revoque en
+  US-03. Requeriría una denylist consultada por el gateway — fuera de alcance
+  del MVP.

@@ -148,6 +148,34 @@ func ValidateSignUp(in SignUpInput) ([]byte, error) {
 	return selfie, errs.OrNil()
 }
 
+// SignInInput son los datos del login que ValidateSignIn necesita.
+//
+// DNI debe llegar ya normalizado con NormalizeDNI.
+type SignInInput struct {
+	DNI      []byte
+	Password []byte
+}
+
+// ValidateSignIn aplica Fail-Fast sobre el payload de login: formato del DNI y
+// presencia de la contraseña.
+//
+// A diferencia de ValidateSignUp, acá no se evalúa la fortaleza de la
+// contraseña —clases de caracteres, similitud con el DNI o el email—: esas son
+// reglas del alta, no del login. Una cuenta ya existente pudo haberse creado
+// bajo una política más laxa que la vigente, y el login no es el lugar para
+// rechazarla retroactivamente por eso. Solo se exige que no venga vacía; la
+// coincidencia real la decide argon2.Verify más adelante, no esta función.
+func ValidateSignIn(in SignInInput) error {
+	var errs Errors
+
+	validateDNI(&errs, in.DNI)
+	if len(in.Password) == 0 {
+		errs.add("password", CodeRequired, "la contraseña es obligatoria")
+	}
+
+	return errs.OrNil()
+}
+
 func validateEmail(errs *Errors, email string) {
 	const field = "email"
 
