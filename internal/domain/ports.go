@@ -1,6 +1,11 @@
 package domain
 
-import "context"
+import (
+	"context"
+	"time"
+
+	"github.com/google/uuid"
+)
 
 // Los puertos se declaran acá, del lado del consumidor, y las implementaciones
 // concretas viven en internal/repository, internal/delivery e internal/crypto.
@@ -13,6 +18,30 @@ type UserRepository interface {
 	// de dni_hashed; la detección del duplicado se delega a la base para evitar
 	// la condición de carrera de un chequeo previo.
 	Create(ctx context.Context, u *User) error
+
+	// FindByDNIHashed busca un usuario por el Blind Index de su DNI. Es la única
+	// vía de búsqueda del login (US-02): nunca se busca por DNI en claro, que no
+	// se persiste. Debe devolver ErrUserNotFound (envuelto o no) cuando ningún
+	// usuario tiene ese índice.
+	FindByDNIHashed(ctx context.Context, dniHashed string) (*User, error)
+}
+
+// SessionRepository persiste sesiones: el registro de cada Refresh Token
+// emitido, identificado por su SHA-256.
+type SessionRepository interface {
+	// Create inserta la sesión nueva.
+	Create(ctx context.Context, s *Session) error
+}
+
+// TokenGenerator emite el par de tokens de una sesión nueva tras un login
+// exitoso.
+type TokenGenerator interface {
+	// NewAccessToken firma un JWT RS256 de vida corta. El claim `sub` es el UUID
+	// interno del usuario; nunca lleva DNI, email ni el Blind Index.
+	NewAccessToken(userID uuid.UUID) (string, error)
+	// NewRefreshToken genera un token opaco criptográficamente aleatorio, su
+	// SHA-256 —la única forma en que se persiste— y su vencimiento absoluto.
+	NewRefreshToken() (token, hash string, expiresAt time.Time, err error)
 }
 
 // EventPublisher publica eventos de dominio hacia el broker de la plataforma.

@@ -49,8 +49,31 @@ var (
 	// genérico: precisar si falló el trámite, el sexo o la selfie facilitaría
 	// tantear los datos de otra persona hasta acertar.
 	ErrIdentityNotVerified = errors.New("domain: RENAPER no pudo verificar la identidad")
+
+	// ErrUserNotFound indica que no existe ningún usuario para el criterio de
+	// búsqueda dado.
+	//
+	// Es un detalle interno entre el repositorio y el caso de uso de login: este
+	// último lo colapsa en ErrInvalidCredentials antes de que salga de esa capa,
+	// para no distinguir "el DNI no existe" de "la contraseña es incorrecta".
+	ErrUserNotFound = errors.New("domain: usuario no encontrado")
+
+	// ErrInvalidCredentials indica que el DNI o la contraseña del login no son
+	// válidos. Deliberadamente no distingue cuál de los dos casos ocurrió —DNI
+	// inexistente o contraseña incorrecta—, ni en el error ni en la respuesta que
+	// produce (→ 401 Unauthorized, cuerpo y timing idénticos en ambos casos):
+	// distinguirlos habilitaría enumerar qué DNIs están registrados.
+	ErrInvalidCredentials = errors.New("domain: credenciales inválidas")
+
+	// ErrInvalidSession indica que se intentó construir una sesión inconsistente.
+	// Es un error de programación, no un dato inválido del cliente. → 500.
+	ErrInvalidSession = errors.New("domain: sesión inconsistente")
 )
 
 func invalidUser(reason string) error {
 	return fmt.Errorf("%w: %s", ErrInvalidUser, reason)
+}
+
+func invalidSession(reason string) error {
+	return fmt.Errorf("%w: %s", ErrInvalidSession, reason)
 }

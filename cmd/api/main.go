@@ -24,7 +24,9 @@ import (
 	"github.com/matiasfelau/vinculo-vial-identity/internal/domain"
 	"github.com/matiasfelau/vinculo-vial-identity/internal/renaper"
 	"github.com/matiasfelau/vinculo-vial-identity/internal/repository/postgres"
+	"github.com/matiasfelau/vinculo-vial-identity/internal/service/signin"
 	"github.com/matiasfelau/vinculo-vial-identity/internal/service/signup"
+	"github.com/matiasfelau/vinculo-vial-identity/internal/token"
 	"github.com/matiasfelau/vinculo-vial-identity/pkg/config"
 )
 
@@ -86,6 +88,18 @@ func run() error {
 		return err
 	}
 
+	// Requiere que la tabla users ya exista: sessions declara la clave foránea
+	// hacia ella.
+	sessions, err := postgres.NewSessionRepository(ctx, db)
+	if err != nil {
+		return err
+	}
+
+	tokens, err := buildTokenGenerator(cfg)
+	if err != nil {
+		return err
+	}
+
 	publisher, closePublisher, err := buildPublisher(cfg, logger)
 	if err != nil {
 		return err
@@ -98,7 +112,7 @@ func run() error {
 
 	renaperSvc := buildRenaper(logger)
 
-	service, err := signup.New(signup.Deps{
+	signUpService, err := signup.New(signup.Deps{
 		Decryptor: decryptor,
 		Indexer:   indexer,
 		Cipher:    cipher,
@@ -112,13 +126,27 @@ func run() error {
 		return err
 	}
 
+	signInService, err := signin.New(signin.Deps{
+		Decryptor: decryptor,
+		Indexer:   indexer,
+		Hasher:    hasher,
+		Users:     users,
+		Sessions:  sessions,
+		Tokens:    tokens,
+		Logger:    logger,
+	})
+	if err != nil {
+		return err
+	}
+
 	router, err := delivery.NewRouter(delivery.RouterConfig{
-		SignUp:       service,
+		SignUp:       signUpService,
+		SignIn:       signInService,
 		Logger:       logger,
 		MaxBodyBytes: cfg.HTTP.MaxBodyBytes,
 		Debug:        cfg.HTTP.Debug,
-		// Readiness apoyada en la base: si no responde, ningún alta podría
-		// persistirse y el orquestador no debería mandar tráfico acá.
+		// Readiness apoyada en la base: si no responde, ni un alta ni un login
+		// podrían persistirse y el orquestador no debería mandar tráfico acá.
 		ReadinessCheck: func(ctx context.Context) error { return postgres.Ping(ctx, db) },
 	})
 	if err != nil {
@@ -164,6 +192,13 @@ func buildCrypto(cfg *config.Config) (domain.HPKEDecryptor, domain.BlindIndexer,
 	}
 
 	return decryptor, indexer, cipher, hasher, nil
+}
+
+// buildTokenGenerator construye el emisor de tokens de sesión (US-02). La
+// clave se valida acá —formato PEM, algoritmo, largo mínimo— y no en el primer
+// login.
+func buildTokenGenerator(cfg *config.Config) (domain.TokenGenerator, error) {
+	return token.New(cfg.Crypto.JWTPrivateKey.Reveal(), cfg.Token.AccessTokenTTL, cfg.Token.RefreshTokenTTL)
 }
 
 // buildPublisher elige entre el publisher real y el inerte.

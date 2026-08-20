@@ -37,6 +37,7 @@ type Config struct {
 	Postgres PostgresConfig
 	Crypto   CryptoConfig
 	Events   EventsConfig
+	Token    TokenConfig
 }
 
 // HTTPConfig son los parámetros del servidor.
@@ -100,10 +101,29 @@ type CryptoConfig struct {
 	AESKey Secret
 	// HMACSecret genera el Blind Index del DNI (base64 de 32 bytes o más).
 	HMACSecret Secret
+	// JWTPrivateKey firma el Access Token (RS256, PEM RSA). Identity es el único
+	// custodio: Gateway y el resto de la plataforma reciben solo la Public Key
+	// correspondiente (JWT_PUBLIC_KEY), que este servicio nunca necesita leer.
+	//
+	// En el .env viaja en una sola línea, con los saltos de línea del PEM
+	// escapados como \n literal —el parser de .env no soporta valores
+	// multilínea—; se desescapan acá, antes de guardarla. cmd/genkeys ya la
+	// imprime en ese formato, lista para pegar.
+	JWTPrivateKey Secret
 
 	Argon2MemoryKiB   int
 	Argon2Iterations  int
 	Argon2Parallelism int
+}
+
+// TokenConfig son los TTL de los tokens de sesión que emite el login (US-02).
+type TokenConfig struct {
+	// AccessTokenTTL es la vida del JWT de acceso. El contrato compartido fija
+	// la variable en minutos (ACCESS_TOKEN_TTL_MINUTES), no como duración de Go.
+	AccessTokenTTL time.Duration
+	// RefreshTokenTTL es la vida del Refresh Token opaco. El contrato compartido
+	// fija la variable en días (REFRESH_TOKEN_TTL_DAYS).
+	RefreshTokenTTL time.Duration
 }
 
 // EventsConfig son los parámetros del broker.
@@ -145,6 +165,11 @@ const (
 	defaultEventsExchange      = "vinculo-vial.events"
 	defaultEventsProducer      = "vinculo-vial-identity"
 	defaultEventsPublishTimeut = 5 * time.Second
+	// defaultAccessTokenTTLMinutes y defaultRefreshTokenTTLDays son los valores
+	// que fija el contrato compartido de US-02, no una elección local: Gateway
+	// asume estos mismos TTL del lado de la verificación.
+	defaultAccessTokenTTLMinutes = 15
+	defaultRefreshTokenTTLDays   = 30
 )
 
 // Load lee la configuración del entorno y la valida.
@@ -182,6 +207,7 @@ func Load() (*Config, error) {
 			HPKEInfo:          r.str("IDENTITY_HPKE_INFO", defaultHPKEInfo),
 			AESKey:            Secret(r.required("AES_KEY")),
 			HMACSecret:        Secret(r.required("HMAC_SECRET")),
+			JWTPrivateKey:     Secret(unescapeNewlines(r.required("JWT_PRIVATE_KEY"))),
 			Argon2MemoryKiB:   r.integer("ARGON2_MEMORY_KIB", 64*1024),
 			Argon2Iterations:  r.integer("ARGON2_ITERATIONS", 3),
 			Argon2Parallelism: r.integer("ARGON2_PARALLELISM", 1),
@@ -193,6 +219,11 @@ func Load() (*Config, error) {
 			Exchange:       r.str("RABBITMQ_EXCHANGE", defaultEventsExchange),
 			Producer:       r.str("RABBITMQ_PRODUCER", defaultEventsProducer),
 			PublishTimeout: r.duration("RABBITMQ_PUBLISH_TIMEOUT", defaultEventsPublishTimeut),
+		},
+
+		Token: TokenConfig{
+			AccessTokenTTL:  time.Duration(r.integer("ACCESS_TOKEN_TTL_MINUTES", defaultAccessTokenTTLMinutes)) * time.Minute,
+			RefreshTokenTTL: time.Duration(r.integer("REFRESH_TOKEN_TTL_DAYS", defaultRefreshTokenTTLDays)) * 24 * time.Hour,
 		},
 	}
 
@@ -256,6 +287,13 @@ func (c *Config) validate() error {
 		r.fail("config: ARGON2_PARALLELISM debe estar entre 1 y 255")
 	}
 
+	if c.Token.AccessTokenTTL <= 0 {
+		r.fail("config: ACCESS_TOKEN_TTL_MINUTES debe ser positivo")
+	}
+	if c.Token.RefreshTokenTTL <= 0 {
+		r.fail("config: REFRESH_TOKEN_TTL_DAYS debe ser positivo")
+	}
+
 	if c.Events.Enabled {
 		if c.Events.URL.Reveal() == "" {
 			r.fail("config: RABBITMQ_URL es obligatoria con RABBITMQ_ENABLED=true")
@@ -270,6 +308,16 @@ func (c *Config) validate() error {
 	}
 
 	return r.err()
+}
+
+// unescapeNewlines revierte el escapado de saltos de línea de un PEM
+// almacenado en una sola línea de .env: "\n" literal (barra invertida + ene)
+// vuelve a ser un salto de línea real. El parser de .env de este servicio no
+// soporta valores multilínea, así que el material PEM viaja escapado —el
+// mismo truco que usan las variables de entorno de servicio de GCP/Firebase
+// para lo mismo— y cmd/genkeys ya lo imprime en este formato.
+func unescapeNewlines(raw string) string {
+	return strings.ReplaceAll(raw, `\n`, "\n")
 }
 
 // IsProduction informa si el servicio corre con la configuración endurecida.
@@ -293,6 +341,8 @@ func (c *Config) LogValue() slog.Value {
 		slog.Bool("events_enabled", c.Events.Enabled),
 		slog.String("events_exchange", c.Events.Exchange),
 		slog.Int("argon2_memory_kib", c.Crypto.Argon2MemoryKiB),
+		slog.Duration("access_token_ttl", c.Token.AccessTokenTTL),
+		slog.Duration("refresh_token_ttl", c.Token.RefreshTokenTTL),
 	)
 }
 

@@ -62,6 +62,24 @@ func (r *UserRepository) Create(ctx context.Context, u *domain.User) error {
 	return nil
 }
 
+// FindByDNIHashed busca un usuario por el Blind Index de su DNI. Es la única
+// vía de búsqueda del login (US-02): nunca se busca por DNI en claro, que no
+// se persiste.
+func (r *UserRepository) FindByDNIHashed(ctx context.Context, dniHashed string) (*domain.User, error) {
+	var m userModel
+	if err := r.db.WithContext(ctx).Where("dni_hashed = ?", dniHashed).Take(&m).Error; err != nil {
+		return nil, mapFindError(err)
+	}
+	return m.toDomain(), nil
+}
+
+func mapFindError(err error) error {
+	if errors.Is(err, gorm.ErrRecordNotFound) {
+		return domain.ErrUserNotFound
+	}
+	return fmt.Errorf("postgres: no se pudo buscar el usuario: %w", err)
+}
+
 func mapCreateError(err error) error {
 	// TranslateError de GORM cubre el caso normal; el chequeo de SQLSTATE es el
 	// respaldo si esa opción se desactiva o el driver cambia.
