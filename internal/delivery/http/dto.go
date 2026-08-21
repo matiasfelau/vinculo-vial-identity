@@ -58,6 +58,12 @@ type refreshResponse struct {
 	RefreshToken string `json:"refresh_token"`
 }
 
+// logoutRequest es el único dato que /logout acepta: el mismo Refresh Token
+// opaco en JSON plano que /refresh, sin el wrapper HPKE.
+type logoutRequest struct {
+	RefreshToken string `json:"refresh_token"`
+}
+
 // Códigos de error de la API. Son estables y la app decide el texto a mostrar;
 // el campo `error` es para diagnóstico humano, no para parsear.
 const (

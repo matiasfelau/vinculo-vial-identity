@@ -16,8 +16,9 @@ import (
 
 // sessionsMock implementa domain.SessionRepository. RefreshService llama a
 // FindByHash siempre, a RotateSession en la vía feliz y a RevokeAllByUserID
-// solo ante reúso (Defensa Activa); Create y RevokeByID están para satisfacer
-// la interfaz y no deberían invocarse desde este caso de uso.
+// solo ante reúso (Defensa Activa); LogoutService llama a RevokeByHash.
+// Create y RevokeByID están para satisfacer la interfaz y no deberían
+// invocarse desde ninguno de los dos casos de uso de este paquete.
 type sessionsMock struct {
 	found   *domain.Session
 	findErr error
@@ -26,14 +27,18 @@ type sessionsMock struct {
 
 	revokeAllErr error
 
-	mu             sync.Mutex
-	findCalls      int
-	findHashes     []string
-	rotateCalls    int
-	rotatedOld     uuid.UUID
-	rotatedNew     domain.Session
-	revokeAllCalls int
-	revokedUserID  uuid.UUID
+	revokeByHashErr error
+
+	mu               sync.Mutex
+	findCalls        int
+	findHashes       []string
+	rotateCalls      int
+	rotatedOld       uuid.UUID
+	rotatedNew       domain.Session
+	revokeAllCalls   int
+	revokedUserID    uuid.UUID
+	revokeHashCalls  int
+	revokedHashes    []string
 }
 
 func (m *sessionsMock) Create(context.Context, *domain.Session) error {
@@ -53,7 +58,19 @@ func (m *sessionsMock) FindByHash(_ context.Context, hash string) (*domain.Sessi
 }
 
 func (m *sessionsMock) RevokeByID(context.Context, uuid.UUID) error {
-	panic("session: RevokeByID no se usa en el refresh")
+	panic("session: RevokeByID no se usa en este paquete")
+}
+
+func (m *sessionsMock) RevokeByHash(_ context.Context, hash string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	m.revokeHashCalls++
+	m.revokedHashes = append(m.revokedHashes, hash)
+	if m.revokeByHashErr != nil {
+		return m.revokeByHashErr
+	}
+	return nil
 }
 
 func (m *sessionsMock) RevokeAllByUserID(_ context.Context, userID uuid.UUID) error {
@@ -91,6 +108,12 @@ func (m *sessionsMock) revokeAllCallCount() int {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	return m.revokeAllCalls
+}
+
+func (m *sessionsMock) revokeHashCallCount() int {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.revokeHashCalls
 }
 
 // tokensMock implementa domain.TokenGenerator. hash simula el SHA-256 real de

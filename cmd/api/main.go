@@ -149,10 +149,20 @@ func run() error {
 		return err
 	}
 
+	logoutService, err := session.NewLogoutService(session.LogoutDeps{
+		Sessions: sessions,
+		Tokens:   tokens,
+		Logger:   logger,
+	})
+	if err != nil {
+		return err
+	}
+
 	router, err := delivery.NewRouter(delivery.RouterConfig{
 		SignUp:       signUpService,
 		SignIn:       signInService,
 		Refresh:      refreshService,
+		Logout:       logoutService,
 		Logger:       logger,
 		MaxBodyBytes: cfg.HTTP.MaxBodyBytes,
 		Debug:        cfg.HTTP.Debug,

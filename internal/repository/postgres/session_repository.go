@@ -90,6 +90,19 @@ func (r *SessionRepository) RevokeByID(ctx context.Context, id uuid.UUID) error 
 	return nil
 }
 
+// RevokeByHash marca como revocada la sesión cuyo hash de Refresh Token
+// coincide. Ver la nota de domain.SessionRepository.RevokeByHash: que no
+// coincida ninguna fila no es un error.
+func (r *SessionRepository) RevokeByHash(ctx context.Context, refreshTokenHash string) error {
+	if err := r.db.WithContext(ctx).
+		Model(&sessionModel{}).
+		Where("refresh_token_hash = ?", refreshTokenHash).
+		Update("is_revoked", true).Error; err != nil {
+		return fmt.Errorf("postgres: no se pudo revocar la sesión: %w", err)
+	}
+	return nil
+}
+
 // RevokeAllByUserID marca como revocadas todas las sesiones de un usuario.
 //
 // No distingue si había alguna sesión vigente para ese user_id: revocar cero
