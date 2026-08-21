@@ -29,16 +29,16 @@ type sessionsMock struct {
 
 	revokeByHashErr error
 
-	mu               sync.Mutex
-	findCalls        int
-	findHashes       []string
-	rotateCalls      int
-	rotatedOld       uuid.UUID
-	rotatedNew       domain.Session
-	revokeAllCalls   int
-	revokedUserID    uuid.UUID
-	revokeHashCalls  int
-	revokedHashes    []string
+	mu              sync.Mutex
+	findCalls       int
+	findHashes      []string
+	rotateCalls     int
+	rotatedOld      uuid.UUID
+	rotatedNew      domain.Session
+	revokeAllCalls  int
+	revokedUserID   uuid.UUID
+	revokeHashCalls int
+	revokedHashes   []string
 }
 
 func (m *sessionsMock) Create(context.Context, *domain.Session) error {
@@ -116,10 +116,16 @@ func (m *sessionsMock) revokeHashCallCount() int {
 	return m.revokeHashCalls
 }
 
-// tokensMock implementa domain.TokenGenerator. hash simula el SHA-256 real de
-// forma determinística ("hash-de:"+token) para poder afirmar qué hash llegó
-// a FindByHash sin depender de crypto/sha256 en el test.
+// tokensMock implementa domain.TokenGenerator. Por defecto, hash simula el
+// SHA-256 real de forma determinística ("hash-de:"+token) para poder afirmar
+// qué hash llegó a FindByHash sin depender de crypto/sha256 en el test. El
+// campo hash permite fijar un valor opaco cuando un test necesita probar que
+// el log no filtra el token en claro: el valor por defecto lo incluye como
+// substring a propósito (igual que blindIndexerMock en signin), y ese test
+// necesita un hash que no lo delate.
 type tokensMock struct {
+	hash string
+
 	accessToken string
 	accessErr   error
 
@@ -135,6 +141,9 @@ type tokensMock struct {
 }
 
 func (m *tokensMock) Hash(token string) string {
+	if m.hash != "" {
+		return m.hash
+	}
 	return "hash-de:" + token
 }
 

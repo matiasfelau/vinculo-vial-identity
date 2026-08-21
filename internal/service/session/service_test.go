@@ -3,6 +3,8 @@ package session_test
 import (
 	"context"
 	"errors"
+	"log/slog"
+	"strings"
 	"testing"
 	"time"
 
@@ -25,11 +27,13 @@ func vigenteSession() *domain.Session {
 	}
 }
 
-// harness agrupa los dos dobles de RefreshService, para que cada test arme la
-// vía feliz completa y degrade solo lo que le interesa ejercitar.
+// harness agrupa los dos dobles de RefreshService y el logger, para que cada
+// test arme la vía feliz completa y degrade solo lo que le interesa
+// ejercitar.
 type harness struct {
 	sessions *sessionsMock
 	tokens   *tokensMock
+	logs     *strings.Builder
 	now      time.Time
 }
 
@@ -43,7 +47,8 @@ func newHarness() *harness {
 			refreshHash:      "hash-del-refresh-token-rotado",
 			refreshExpiresAt: now.Add(30 * 24 * time.Hour),
 		},
-		now: now,
+		logs: &strings.Builder{},
+		now:  now,
 	}
 }
 
@@ -53,6 +58,7 @@ func (h *harness) service(t *testing.T) *session.RefreshService {
 	svc, err := session.NewRefreshService(session.RefreshDeps{
 		Sessions: h.sessions,
 		Tokens:   h.tokens,
+		Logger:   slog.New(slog.NewTextHandler(h.logs, &slog.HandlerOptions{Level: slog.LevelDebug})),
 		Now:      func() time.Time { return h.now },
 	})
 	if err != nil {
@@ -133,6 +139,13 @@ func TestRefreshSesionInexistente(t *testing.T) {
 	if h.sessions.rotateCallCount() != 0 {
 		t.Error("un refresh rechazado no debe intentar rotar nada")
 	}
+
+	logs := h.logs.String()
+	for _, esperado := range []string{"WARN", "intento de refresh rechazado", "sesión inexistente", "refresh_token_hash"} {
+		if !strings.Contains(logs, esperado) {
+			t.Errorf("el log debería incluir %q: %s", esperado, logs)
+		}
+	}
 }
 
 func TestRefreshSesionExpirada(t *testing.T) {
@@ -153,6 +166,13 @@ func TestRefreshSesionExpirada(t *testing.T) {
 	}
 	if h.tokens.accessCalls != 0 {
 		t.Error("un refresh token expirado no debe emitir un access token")
+	}
+
+	logs := h.logs.String()
+	for _, esperado := range []string{"WARN", "intento de refresh rechazado", "sesión expirada", h.sessions.found.UserID.String()} {
+		if !strings.Contains(logs, esperado) {
+			t.Errorf("el log debería incluir %q: %s", esperado, logs)
+		}
 	}
 }
 
@@ -180,6 +200,50 @@ func TestRefreshSesionYaRevocadaDisparaLaDefensaActiva(t *testing.T) {
 	}
 	if h.sessions.revokedUserID != h.sessions.found.UserID {
 		t.Errorf("se revocó al usuario %v, se esperaba %v", h.sessions.revokedUserID, h.sessions.found.UserID)
+	}
+
+	logs := h.logs.String()
+	for _, esperado := range []string{"WARN", "reúso de refresh token detectado", "defensa activa ejecutada", h.sessions.found.UserID.String()} {
+		if !strings.Contains(logs, esperado) {
+			t.Errorf("el log debería incluir %q: %s", esperado, logs)
+		}
+	}
+}
+
+// Ninguno de los tres motivos de rechazo de /refresh debe filtrar el Refresh
+// Token en claro en el log del servidor: el hash y el user_id alcanzan para
+// diagnosticar sin exponer una credencial reutilizable.
+//
+// El hash se fija a un valor opaco (en vez del "hash-de:"+token por defecto
+// del doble) por el mismo motivo que en signin: el hash por defecto incluye
+// el token como substring a propósito para poder afirmar qué se buscó en
+// otros tests, y probaría un artefacto del doble en vez del comportamiento
+// real del servicio.
+func TestLosIntentosRechazadosNoFiltranElTokenEnClaro(t *testing.T) {
+	const token = "el-refresh-token-secreto-del-cliente"
+	const hashOpaco = "5f4dcc3b5aa765d61d8327deb882cf99"
+
+	cases := map[string]func(*harness){
+		"sesión inexistente": func(h *harness) { h.sessions.findErr = domain.ErrSessionNotFound },
+		"sesión expirada":    func(h *harness) { h.sessions.found.ExpiresAt = h.now.Add(-time.Second) },
+		"sesión reusada":     func(h *harness) { h.sessions.found.IsRevoked = true },
+	}
+
+	for name, degradar := range cases {
+		t.Run(name, func(t *testing.T) {
+			h := newHarness()
+			h.tokens.hash = hashOpaco
+			degradar(h)
+			svc := h.service(t)
+
+			if _, _, err := svc.Refresh(context.Background(), token); err == nil {
+				t.Fatal("se esperaba un error")
+			}
+
+			if strings.Contains(h.logs.String(), token) {
+				t.Errorf("el log filtra el refresh token en claro: %s", h.logs.String())
+			}
+		})
 	}
 }
 
