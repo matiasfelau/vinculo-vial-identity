@@ -157,9 +157,9 @@ func TestRefreshSesionExpirada(t *testing.T) {
 }
 
 // El reúso de un Refresh Token ya rotado no debe, bajo ninguna circunstancia,
-// terminar en una rotación exitosa: es exactamente el escenario que la
-// Defensa Activa (agregada en un cambio posterior) tiene que interceptar.
-func TestRefreshSesionYaRevocadaNoRota(t *testing.T) {
+// terminar en una rotación exitosa: es la Defensa Activa, que además revoca
+// toda la familia de sesiones del usuario, no solo la sesión reusada.
+func TestRefreshSesionYaRevocadaDisparaLaDefensaActiva(t *testing.T) {
 	h := newHarness()
 	h.sessions.found.IsRevoked = true
 	svc := h.service(t)
@@ -171,6 +171,38 @@ func TestRefreshSesionYaRevocadaNoRota(t *testing.T) {
 	}
 	if access != "" || refresh != "" {
 		t.Error("un refresh token reusado no debe emitir tokens")
+	}
+	if h.sessions.rotateCallCount() != 0 {
+		t.Error("un refresh token reusado no debe intentar rotar nada")
+	}
+	if h.sessions.revokeAllCallCount() != 1 {
+		t.Fatalf("RevokeAllByUserID se llamó %d veces, se esperaba 1", h.sessions.revokeAllCallCount())
+	}
+	if h.sessions.revokedUserID != h.sessions.found.UserID {
+		t.Errorf("se revocó al usuario %v, se esperaba %v", h.sessions.revokedUserID, h.sessions.found.UserID)
+	}
+}
+
+// Si la propia Defensa Activa no se puede persistir, el pedido igual debe
+// rechazarse —nunca debe llegar a rotar— aunque el error ya no sea
+// ErrSessionReused: hay que poder distinguir "se rechazó y se contuvo el
+// incidente" de "se rechazó pero la contención falló".
+func TestRefreshSiFallaLaDefensaActivaNoRotaYPropagaElError(t *testing.T) {
+	h := newHarness()
+	h.sessions.found.IsRevoked = true
+	h.sessions.revokeAllErr = errors.New("la base no responde")
+	svc := h.service(t)
+
+	access, refresh, err := svc.Refresh(context.Background(), validRefreshToken)
+
+	if err == nil {
+		t.Fatal("se esperaba un error")
+	}
+	if errors.Is(err, domain.ErrSessionReused) {
+		t.Error("si la defensa activa falla, el error no debería colapsar en ErrSessionReused")
+	}
+	if access != "" || refresh != "" {
+		t.Error("un refresh token reusado no debe emitir tokens aunque falle la defensa activa")
 	}
 	if h.sessions.rotateCallCount() != 0 {
 		t.Error("un refresh token reusado no debe intentar rotar nada")
