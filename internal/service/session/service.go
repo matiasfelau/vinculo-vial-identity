@@ -71,12 +71,14 @@ func (s *RefreshService) Refresh(ctx context.Context, refreshToken string) (acce
 	found, err := s.deps.Sessions.FindByHash(ctx, hash)
 	if err != nil {
 		if errors.Is(err, domain.ErrSessionNotFound) {
+			s.logFailedAttempt(ctx, "sesión inexistente", slog.String("refresh_token_hash", hash))
 			return "", "", domain.ErrSessionNotFound
 		}
 		return "", "", fmt.Errorf("session: no se pudo buscar la sesión: %w", err)
 	}
 
 	if s.deps.Now().After(found.ExpiresAt) {
+		s.logFailedAttempt(ctx, "sesión expirada", slog.String("user_id", found.UserID.String()))
 		return "", "", domain.ErrSessionExpired
 	}
 
@@ -88,6 +90,9 @@ func (s *RefreshService) Refresh(ctx context.Context, refreshToken string) (acce
 		if err := s.deps.Sessions.RevokeAllByUserID(ctx, found.UserID); err != nil {
 			return "", "", fmt.Errorf("session: no se pudo ejecutar la defensa activa: %w", err)
 		}
+		s.deps.Logger.WarnContext(ctx, "reúso de refresh token detectado: defensa activa ejecutada",
+			slog.String("user_id", found.UserID.String()),
+		)
 		return "", "", domain.ErrSessionReused
 	}
 
@@ -113,6 +118,21 @@ func (s *RefreshService) Refresh(ctx context.Context, refreshToken string) (acce
 	s.deps.Logger.InfoContext(ctx, "sesión rotada", slog.String("user_id", found.UserID.String()))
 
 	return accessToken, newRefreshToken, nil
+}
+
+// logFailedAttempt deja constancia de un intento de refresh rechazado.
+//
+// Se identifica la sesión por el atributo que esté disponible en cada
+// caso —el hash del Refresh Token cuando ninguna sesión coincidió, el
+// user_id cuando sí— pero nunca por el token en claro ni por ningún otro
+// dato personal. El motivo sí se distingue acá porque es un log interno del
+// servidor: la respuesta HTTP es la misma (401) tanto si la sesión no
+// existe como si ya venció.
+func (s *RefreshService) logFailedAttempt(ctx context.Context, motivo string, identificador slog.Attr) {
+	s.deps.Logger.LogAttrs(ctx, slog.LevelWarn, "intento de refresh rechazado",
+		identificador,
+		slog.String("motivo", motivo),
+	)
 }
 
 // LogoutDeps son las dependencias de LogoutService. Todas son puertos de
