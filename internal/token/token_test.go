@@ -229,6 +229,33 @@ func TestNewRefreshTokenGeneraValoresDistintosEnCadaLlamada(t *testing.T) {
 	}
 }
 
+// Hash tiene que recomputar exactamente el mismo hash que NewRefreshToken
+// persistió: es lo que /refresh (US-03) necesita para encontrar la sesión a
+// partir del token que le devuelve el cliente.
+func TestHashCoincideConElHashQueDevuelveNewRefreshToken(t *testing.T) {
+	g, _ := nuevoGenerador(t)
+
+	tok, hash, _, err := g.NewRefreshToken()
+	if err != nil {
+		t.Fatalf("error inesperado: %v", err)
+	}
+
+	if got := g.Hash(tok); got != hash {
+		t.Errorf("Generator.Hash(tok) = %q, se esperaba %q", got, hash)
+	}
+	if got := token.Hash(tok); got != hash {
+		t.Errorf("token.Hash(tok) = %q, se esperaba %q", got, hash)
+	}
+}
+
+func TestHashEsDeterministico(t *testing.T) {
+	const tok = "un-refresh-token-cualquiera"
+
+	if token.Hash(tok) != token.Hash(tok) {
+		t.Error("Hash del mismo token debería producir siempre el mismo resultado")
+	}
+}
+
 func TestNewAceptaPKCS1YPKCS8(t *testing.T) {
 	key, err := rsa.GenerateKey(rand.Reader, token.MinRSAKeyBits)
 	if err != nil {
