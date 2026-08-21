@@ -1,7 +1,7 @@
 // Package session implementa los casos de uso de gestión de sesión de US-03:
-// la rotación de Refresh Token (RefreshService) y, más adelante, el cierre de
-// sesión (LogoutService). Depende únicamente de los puertos de domain, igual
-// que internal/service/signin, para poder ejercitarse entero con dobles, sin
+// la rotación de Refresh Token (RefreshService) y el cierre de sesión
+// (LogoutService). Depende únicamente de los puertos de domain, igual que
+// internal/service/signin, para poder ejercitarse entero con dobles, sin
 // Postgres.
 package session
 
@@ -113,4 +113,51 @@ func (s *RefreshService) Refresh(ctx context.Context, refreshToken string) (acce
 	s.deps.Logger.InfoContext(ctx, "sesión rotada", slog.String("user_id", found.UserID.String()))
 
 	return accessToken, newRefreshToken, nil
+}
+
+// LogoutDeps son las dependencias de LogoutService. Todas son puertos de
+// domain.
+type LogoutDeps struct {
+	Sessions domain.SessionRepository
+	Tokens   domain.TokenGenerator
+	Logger   *slog.Logger
+}
+
+// LogoutService es el caso de uso de cierre de sesión de /logout.
+type LogoutService struct {
+	deps LogoutDeps
+}
+
+// NewLogoutService valida que estén todas las dependencias y construye el
+// servicio.
+func NewLogoutService(d LogoutDeps) (*LogoutService, error) {
+	switch {
+	case d.Sessions == nil:
+		return nil, errors.New("session: falta el repositorio de sesiones")
+	case d.Tokens == nil:
+		return nil, errors.New("session: falta el generador de tokens")
+	}
+
+	if d.Logger == nil {
+		d.Logger = slog.Default()
+	}
+
+	return &LogoutService{deps: d}, nil
+}
+
+// Logout revoca la sesión asociada al Refresh Token recibido.
+//
+// Siempre termina en éxito desde la perspectiva del llamador —exista o no
+// una sesión con ese hash, esté o no ya revocada, no hay forma de
+// distinguirlo desde afuera (anti-enumeración)— salvo que la propia
+// revocación no se pueda persistir, que es un fallo de infraestructura, no
+// un caso del contrato de /logout.
+func (s *LogoutService) Logout(ctx context.Context, refreshToken string) error {
+	hash := s.deps.Tokens.Hash(refreshToken)
+
+	if err := s.deps.Sessions.RevokeByHash(ctx, hash); err != nil {
+		return fmt.Errorf("session: no se pudo revocar la sesión: %w", err)
+	}
+
+	return nil
 }

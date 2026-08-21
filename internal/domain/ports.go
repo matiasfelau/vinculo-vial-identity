@@ -38,9 +38,15 @@ type SessionRepository interface {
 	// (envuelto o no) cuando ninguna sesión tiene ese hash.
 	FindByHash(ctx context.Context, refreshTokenHash string) (*Session, error)
 
-	// RevokeByID marca como revocada una única sesión. La usan tanto la
-	// rotación (revoca la sesión vieja al emitir el par nuevo) como el logout.
+	// RevokeByID marca como revocada una única sesión. La usa la rotación para
+	// revocar la sesión vieja al emitir el par nuevo.
 	RevokeByID(ctx context.Context, id uuid.UUID) error
+
+	// RevokeByHash marca como revocada la sesión cuyo hash de Refresh Token
+	// coincide. Que ninguna fila coincida no es un error: es exactamente lo
+	// que permite que /logout (US-03) responda 200 siempre, exista o no la
+	// sesión, sin que el repositorio tenga que distinguir los casos.
+	RevokeByHash(ctx context.Context, refreshTokenHash string) error
 
 	// RevokeAllByUserID marca como revocadas todas las sesiones de un usuario,
 	// vigentes o no. Es la Defensa Activa de US-03: se dispara al detectar el

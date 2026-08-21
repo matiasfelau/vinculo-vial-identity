@@ -39,17 +39,25 @@ type RefreshService interface {
 	Refresh(ctx context.Context, refreshToken string) (accessToken, newRefreshToken string, err error)
 }
 
-// Handler atiende el alta, el inicio de sesión y la rotación de sesión de
+// LogoutService es el puerto que necesita el handler para el cierre de
+// sesión (US-03), declarado del lado del consumidor por el mismo motivo que
+// SignUpService.
+type LogoutService interface {
+	Logout(ctx context.Context, refreshToken string) error
+}
+
+// Handler atiende el alta, el inicio de sesión y la gestión de sesión de
 // vecinos.
 type Handler struct {
 	signUp  SignUpService
 	signIn  SignInService
 	refresh RefreshService
+	logout  LogoutService
 	logger  *slog.Logger
 }
 
 // NewHandler construye el handler.
-func NewHandler(signUp SignUpService, signIn SignInService, refresh RefreshService, logger *slog.Logger) (*Handler, error) {
+func NewHandler(signUp SignUpService, signIn SignInService, refresh RefreshService, logout LogoutService, logger *slog.Logger) (*Handler, error) {
 	if signUp == nil {
 		return nil, errors.New("http: falta el servicio de registro")
 	}
@@ -59,10 +67,13 @@ func NewHandler(signUp SignUpService, signIn SignInService, refresh RefreshServi
 	if refresh == nil {
 		return nil, errors.New("http: falta el servicio de refresh")
 	}
+	if logout == nil {
+		return nil, errors.New("http: falta el servicio de logout")
+	}
 	if logger == nil {
 		logger = slog.Default()
 	}
-	return &Handler{signUp: signUp, signIn: signIn, refresh: refresh, logger: logger}, nil
+	return &Handler{signUp: signUp, signIn: signIn, refresh: refresh, logout: logout, logger: logger}, nil
 }
 
 // SignUp atiende POST /api/v1/auth/signup.
@@ -217,6 +228,40 @@ func (h *Handler) abortRefreshError(c *gin.Context, err error) {
 		)
 		h.abort(c, http.StatusInternalServerError, codeInternal, "error interno", nil)
 	}
+}
+
+// Logout atiende POST /api/v1/auth/logout.
+//
+//	200 — siempre, exista o no una sesión con ese Refresh Token, esté o no ya
+//	      revocada (anti-enumeración): nunca 401, nunca 404.
+//	400 — el cuerpo no es JSON interpretable.
+//	500 — falla algo interno (la revocación no se pudo persistir).
+//
+// A diferencia de /refresh, este endpoint no exige X-App-Attestation: si la
+// atestación de la app falla, el usuario tiene que poder cerrar sesión igual
+// y no quedar atrapado sin forma de terminarla (decisión del gateway).
+func (h *Handler) Logout(c *gin.Context) {
+	var req logoutRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		h.logger.WarnContext(c.Request.Context(), "cuerpo del logout no es JSON interpretable",
+			slog.String("request_id", requestIDOf(c)),
+			slog.String("error", err.Error()),
+		)
+		h.abort(c, http.StatusBadRequest, codeInvalidRequest,
+			"el cuerpo debe ser un JSON con el campo refresh_token", nil)
+		return
+	}
+
+	if err := h.logout.Logout(c.Request.Context(), req.RefreshToken); err != nil {
+		h.logger.ErrorContext(c.Request.Context(), "fallo no esperado en el logout",
+			slog.String("request_id", requestIDOf(c)),
+			slog.String("error", err.Error()),
+		)
+		h.abort(c, http.StatusInternalServerError, codeInternal, "error interno", nil)
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{})
 }
 
 // decodeField exige que el campo esté presente y sea base64, y aborta la

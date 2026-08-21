@@ -162,6 +162,10 @@ func (m *sessionsMock) RevokeByID(context.Context, uuid.UUID) error {
 	panic("signin: RevokeByID no se usa en el login")
 }
 
+func (m *sessionsMock) RevokeByHash(context.Context, string) error {
+	panic("signin: RevokeByHash no se usa en el login")
+}
+
 func (m *sessionsMock) RevokeAllByUserID(context.Context, uuid.UUID) error {
 	panic("signin: RevokeAllByUserID no se usa en el login")
 }
