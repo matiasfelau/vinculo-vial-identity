@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 
+	"github.com/google/uuid"
 	"gorm.io/gorm"
 
 	"github.com/matiasfelau/vinculo-vial-identity/internal/domain"
@@ -67,4 +68,45 @@ func (r *SessionRepository) Create(ctx context.Context, s *domain.Session) error
 		return fmt.Errorf("postgres: no se pudo crear la sesión: %w", err)
 	}
 	return nil
+}
+
+// FindByHash busca una sesión por el SHA-256 de su Refresh Token.
+func (r *SessionRepository) FindByHash(ctx context.Context, refreshTokenHash string) (*domain.Session, error) {
+	var m sessionModel
+	if err := r.db.WithContext(ctx).Where("refresh_token_hash = ?", refreshTokenHash).Take(&m).Error; err != nil {
+		return nil, mapSessionFindError(err)
+	}
+	return m.toDomain(), nil
+}
+
+// RevokeByID marca como revocada una única sesión.
+func (r *SessionRepository) RevokeByID(ctx context.Context, id uuid.UUID) error {
+	if err := r.db.WithContext(ctx).
+		Model(&sessionModel{}).
+		Where("id = ?", id).
+		Update("is_revoked", true).Error; err != nil {
+		return fmt.Errorf("postgres: no se pudo revocar la sesión: %w", err)
+	}
+	return nil
+}
+
+// RevokeAllByUserID marca como revocadas todas las sesiones de un usuario.
+//
+// No distingue si había alguna sesión vigente para ese user_id: revocar cero
+// filas no es un error, es simplemente que no había nada que revocar.
+func (r *SessionRepository) RevokeAllByUserID(ctx context.Context, userID uuid.UUID) error {
+	if err := r.db.WithContext(ctx).
+		Model(&sessionModel{}).
+		Where("user_id = ?", userID).
+		Update("is_revoked", true).Error; err != nil {
+		return fmt.Errorf("postgres: no se pudo revocar las sesiones del usuario: %w", err)
+	}
+	return nil
+}
+
+func mapSessionFindError(err error) error {
+	if errors.Is(err, gorm.ErrRecordNotFound) {
+		return domain.ErrSessionNotFound
+	}
+	return fmt.Errorf("postgres: no se pudo buscar la sesión: %w", err)
 }

@@ -154,6 +154,18 @@ func (m *sessionsMock) Create(_ context.Context, s *domain.Session) error {
 	return nil
 }
 
+func (m *sessionsMock) FindByHash(context.Context, string) (*domain.Session, error) {
+	panic("signin: FindByHash no se usa en el login")
+}
+
+func (m *sessionsMock) RevokeByID(context.Context, uuid.UUID) error {
+	panic("signin: RevokeByID no se usa en el login")
+}
+
+func (m *sessionsMock) RevokeAllByUserID(context.Context, uuid.UUID) error {
+	panic("signin: RevokeAllByUserID no se usa en el login")
+}
+
 func (m *sessionsMock) last() domain.Session {
 	m.mu.Lock()
 	defer m.mu.Unlock()
