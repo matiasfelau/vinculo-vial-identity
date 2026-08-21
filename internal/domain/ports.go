@@ -47,6 +47,18 @@ type SessionRepository interface {
 	// reúso de un Refresh Token ya revocado, y asume que toda la familia de
 	// sesiones del usuario puede estar comprometida.
 	RevokeAllByUserID(ctx context.Context, userID uuid.UUID) error
+
+	// RotateSession revoca la sesión vieja e inserta la sesión rotada como una
+	// única operación atómica: si un paso falla, el otro se deshace.
+	//
+	// No es una optimización: un fallo parcial dejaría al usuario sin sesión
+	// válida sosteniendo un Refresh Token que el siguiente intento leería como
+	// reúso, disparando la Defensa Activa sobre una cuenta legítima. Por eso
+	// se modela como una única llamada de la interfaz en lugar de exponer
+	// RevokeByID + Create por separado para este flujo: la atomicidad queda
+	// garantizada por la forma del puerto, no por una convención que el
+	// llamador podría romper sin darse cuenta.
+	RotateSession(ctx context.Context, oldSessionID uuid.UUID, newSession *Session) error
 }
 
 // TokenGenerator emite el par de tokens de una sesión nueva tras un login
@@ -58,6 +70,12 @@ type TokenGenerator interface {
 	// NewRefreshToken genera un token opaco criptográficamente aleatorio, su
 	// SHA-256 —la única forma en que se persiste— y su vencimiento absoluto.
 	NewRefreshToken() (token, hash string, expiresAt time.Time, err error)
+
+	// Hash calcula el SHA-256 en hexadecimal minúscula de un Refresh Token
+	// opaco: la misma cuenta que persiste NewRefreshToken. La usa /refresh
+	// (US-03) para recomputar el hash del token que envía el cliente y
+	// buscarlo en sessions.
+	Hash(refreshToken string) string
 }
 
 // EventPublisher publica eventos de dominio hacia el broker de la plataforma.

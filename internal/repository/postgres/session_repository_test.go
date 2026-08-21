@@ -52,6 +52,14 @@ func TestSessionCreateRechazaSesionNula(t *testing.T) {
 	}
 }
 
+func TestRotateSessionRechazaSesionNula(t *testing.T) {
+	r := &SessionRepository{}
+
+	if err := r.RotateSession(t.Context(), uuid.New(), nil); err == nil {
+		t.Error("se esperaba un error al rotar hacia una sesión nula")
+	}
+}
+
 func TestMapSessionFindErrorTraduceRegistroNoEncontrado(t *testing.T) {
 	got := mapSessionFindError(gorm.ErrRecordNotFound)
 	if !errors.Is(got, domain.ErrSessionNotFound) {

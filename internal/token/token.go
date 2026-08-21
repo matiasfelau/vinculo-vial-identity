@@ -155,11 +155,6 @@ func (g *Generator) NewAccessToken(userID uuid.UUID) (string, error) {
 // entropía, codificado en base64 URL-safe sin relleno, junto con su SHA-256 en
 // hexadecimal minúscula —la representación que exige refresh_token_hash— y su
 // vencimiento absoluto.
-//
-// El hash se calcula sobre la representación textual del token, no sobre los
-// bytes crudos: es exactamente lo que US-03 vuelve a calcular al recibir el
-// token de vuelta del cliente, y las dos cuentas tienen que coincidir byte a
-// byte.
 func (g *Generator) NewRefreshToken() (token, hash string, expiresAt time.Time, err error) {
 	raw := make([]byte, RefreshTokenBytes)
 	if _, err := rand.Read(raw); err != nil {
@@ -167,9 +162,23 @@ func (g *Generator) NewRefreshToken() (token, hash string, expiresAt time.Time, 
 	}
 
 	token = base64.RawURLEncoding.EncodeToString(raw)
-	sum := sha256.Sum256([]byte(token))
+	return token, Hash(token), time.Now().UTC().Add(g.refreshTTL), nil
+}
 
-	return token, hex.EncodeToString(sum[:]), time.Now().UTC().Add(g.refreshTTL), nil
+// Hash calcula el SHA-256 en hexadecimal minúscula de un Refresh Token opaco.
+// NewRefreshToken usa esta misma función para derivar el hash que persiste,
+// así que /refresh (US-03) recomputa acá exactamente la misma cuenta al
+// recibir el token de vuelta del cliente: se hashea la representación
+// textual, no bytes crudos, y las dos cuentas coinciden byte a byte.
+func Hash(refreshToken string) string {
+	sum := sha256.Sum256([]byte(refreshToken))
+	return hex.EncodeToString(sum[:])
+}
+
+// Hash implementa domain.TokenGenerator.Hash delegando en la función Hash de
+// este paquete.
+func (g *Generator) Hash(refreshToken string) string {
+	return Hash(refreshToken)
 }
 
 // GenerateKeyPair genera un par RSA de MinRSAKeyBits bits y lo devuelve en PEM

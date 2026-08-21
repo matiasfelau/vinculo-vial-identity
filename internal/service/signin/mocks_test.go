@@ -166,6 +166,10 @@ func (m *sessionsMock) RevokeAllByUserID(context.Context, uuid.UUID) error {
 	panic("signin: RevokeAllByUserID no se usa en el login")
 }
 
+func (m *sessionsMock) RotateSession(context.Context, uuid.UUID, *domain.Session) error {
+	panic("signin: RotateSession no se usa en el login")
+}
+
 func (m *sessionsMock) last() domain.Session {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -208,4 +212,8 @@ func (m *tokensMock) NewRefreshToken() (token, hash string, expiresAt time.Time,
 		return "", "", time.Time{}, m.refreshErr
 	}
 	return m.refreshToken, m.refreshHash, m.refreshExpiresAt, nil
+}
+
+func (m *tokensMock) Hash(string) string {
+	panic("signin: Hash no se usa en el login")
 }

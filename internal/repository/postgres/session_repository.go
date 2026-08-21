@@ -104,6 +104,34 @@ func (r *SessionRepository) RevokeAllByUserID(ctx context.Context, userID uuid.U
 	return nil
 }
 
+// RotateSession revoca la sesión vieja e inserta la sesión rotada dentro de
+// una única transacción de GORM: si la inserción falla, la revocación se
+// deshace. Ver la nota de domain.SessionRepository.RotateSession — no es una
+// optimización, es requisito de corrección.
+func (r *SessionRepository) RotateSession(ctx context.Context, oldSessionID uuid.UUID, newSession *domain.Session) error {
+	if newSession == nil {
+		return errors.New("postgres: se requiere la sesión rotada")
+	}
+
+	err := r.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		if err := tx.Model(&sessionModel{}).
+			Where("id = ?", oldSessionID).
+			Update("is_revoked", true).Error; err != nil {
+			return fmt.Errorf("no se pudo revocar la sesión anterior: %w", err)
+		}
+
+		if err := tx.Create(toSessionModel(newSession)).Error; err != nil {
+			return fmt.Errorf("no se pudo crear la sesión rotada: %w", err)
+		}
+
+		return nil
+	})
+	if err != nil {
+		return fmt.Errorf("postgres: no se pudo rotar la sesión: %w", err)
+	}
+	return nil
+}
+
 func mapSessionFindError(err error) error {
 	if errors.Is(err, gorm.ErrRecordNotFound) {
 		return domain.ErrSessionNotFound
