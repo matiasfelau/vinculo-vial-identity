@@ -41,6 +41,23 @@ type signInResponse struct {
 	RefreshToken string `json:"refresh_token"`
 }
 
+// refreshRequest es el único dato que /refresh acepta: el Refresh Token
+// opaco en JSON plano, sin el wrapper HPKE de dos piezas que sí usan
+// /signup y /signin.
+//
+// Es una diferencia deliberada del contrato de US-03: el token es de un
+// solo uso y la confidencialidad la aporta HTTPS, no un cifrado de
+// aplicación adicional.
+type refreshRequest struct {
+	RefreshToken string `json:"refresh_token"`
+}
+
+// refreshResponse acompaña al 200: el par de tokens rotado.
+type refreshResponse struct {
+	AccessToken  string `json:"access_token"`
+	RefreshToken string `json:"refresh_token"`
+}
+
 // Códigos de error de la API. Son estables y la app decide el texto a mostrar;
 // el campo `error` es para diagnóstico humano, no para parsear.
 const (
@@ -52,6 +69,12 @@ const (
 	// un DNI inexistente como para una contraseña incorrecta: distinguirlos
 	// habilitaría enumerar qué DNIs están registrados.
 	codeInvalidCredentials = "credenciales_invalidas"
+	// codeInvalidSession es el código único del 401 de /refresh, tanto para un
+	// Refresh Token inexistente como para uno expirado.
+	codeInvalidSession = "sesion_invalida"
+	// codeSessionCompromised es el código del 403 que produce la Defensa
+	// Activa de /refresh ante el reúso de un Refresh Token ya rotado.
+	codeSessionCompromised = "sesion_comprometida"
 	codeInternal           = "error_interno"
 )
 

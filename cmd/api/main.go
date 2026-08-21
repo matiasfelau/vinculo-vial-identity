@@ -24,6 +24,7 @@ import (
 	"github.com/matiasfelau/vinculo-vial-identity/internal/domain"
 	"github.com/matiasfelau/vinculo-vial-identity/internal/renaper"
 	"github.com/matiasfelau/vinculo-vial-identity/internal/repository/postgres"
+	"github.com/matiasfelau/vinculo-vial-identity/internal/service/session"
 	"github.com/matiasfelau/vinculo-vial-identity/internal/service/signin"
 	"github.com/matiasfelau/vinculo-vial-identity/internal/service/signup"
 	"github.com/matiasfelau/vinculo-vial-identity/internal/token"
@@ -139,9 +140,19 @@ func run() error {
 		return err
 	}
 
+	refreshService, err := session.NewRefreshService(session.RefreshDeps{
+		Sessions: sessions,
+		Tokens:   tokens,
+		Logger:   logger,
+	})
+	if err != nil {
+		return err
+	}
+
 	router, err := delivery.NewRouter(delivery.RouterConfig{
 		SignUp:       signUpService,
 		SignIn:       signInService,
+		Refresh:      refreshService,
 		Logger:       logger,
 		MaxBodyBytes: cfg.HTTP.MaxBodyBytes,
 		Debug:        cfg.HTTP.Debug,
