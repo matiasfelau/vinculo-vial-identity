@@ -56,9 +56,11 @@ func NewRefreshService(d RefreshDeps) (*RefreshService, error) {
 // Devuelve, ante fallos, uno de los centinelas de domain: ErrSessionNotFound
 // si ningún hash coincide, ErrSessionExpired si la sesión encontrada ya
 // venció, o ErrSessionReused si el Refresh Token ya había sido rotado
-// (is_revoked = true) — la Defensa Activa completa sobre este último caso
-// (revocar toda la familia de sesiones del usuario) se agrega en un cambio
-// posterior.
+// (is_revoked = true). Este último caso es Defensa Activa: un cliente
+// legítimo nunca reutiliza un Refresh Token después de rotarlo, así que su
+// reaparición es la señal de un posible robo de sesión, y la respuesta es
+// revocar de una vez toda la familia de sesiones del usuario —no solo la
+// comprometida— para forzar una reautenticación completa con credenciales.
 //
 // La rotación en sí —revocar la sesión vieja e insertar la nueva— se delega
 // enteramente a SessionRepository.RotateSession, que la ejecuta como una
@@ -79,6 +81,13 @@ func (s *RefreshService) Refresh(ctx context.Context, refreshToken string) (acce
 	}
 
 	if found.IsRevoked {
+		// Defensa Activa: se prefiere el falso positivo (un cliente mal
+		// implementado que reintenta un token ya rotado paga un re-login) al
+		// falso negativo (una cuenta secuestrada), así que la revocación
+		// alcanza a todas las sesiones del usuario, vigentes o no.
+		if err := s.deps.Sessions.RevokeAllByUserID(ctx, found.UserID); err != nil {
+			return "", "", fmt.Errorf("session: no se pudo ejecutar la defensa activa: %w", err)
+		}
 		return "", "", domain.ErrSessionReused
 	}
 

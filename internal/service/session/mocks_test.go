@@ -14,22 +14,26 @@ import (
 // interfaces de uno o dos métodos y así el comportamiento de cada caso queda a
 // la vista en el propio test.
 
-// sessionsMock implementa domain.SessionRepository, pero RefreshService solo
-// llama a FindByHash y RotateSession: Create, RevokeByID y RevokeAllByUserID
-// están para satisfacer la interfaz y no deberían invocarse desde este caso
-// de uso todavía.
+// sessionsMock implementa domain.SessionRepository. RefreshService llama a
+// FindByHash siempre, a RotateSession en la vía feliz y a RevokeAllByUserID
+// solo ante reúso (Defensa Activa); Create y RevokeByID están para satisfacer
+// la interfaz y no deberían invocarse desde este caso de uso.
 type sessionsMock struct {
 	found   *domain.Session
 	findErr error
 
 	rotateErr error
 
-	mu          sync.Mutex
-	findCalls   int
-	findHashes  []string
-	rotateCalls int
-	rotatedOld  uuid.UUID
-	rotatedNew  domain.Session
+	revokeAllErr error
+
+	mu             sync.Mutex
+	findCalls      int
+	findHashes     []string
+	rotateCalls    int
+	rotatedOld     uuid.UUID
+	rotatedNew     domain.Session
+	revokeAllCalls int
+	revokedUserID  uuid.UUID
 }
 
 func (m *sessionsMock) Create(context.Context, *domain.Session) error {
@@ -52,8 +56,16 @@ func (m *sessionsMock) RevokeByID(context.Context, uuid.UUID) error {
 	panic("session: RevokeByID no se usa en el refresh")
 }
 
-func (m *sessionsMock) RevokeAllByUserID(context.Context, uuid.UUID) error {
-	panic("session: RevokeAllByUserID todavía no se usa (Defensa Activa)")
+func (m *sessionsMock) RevokeAllByUserID(_ context.Context, userID uuid.UUID) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	m.revokeAllCalls++
+	m.revokedUserID = userID
+	if m.revokeAllErr != nil {
+		return m.revokeAllErr
+	}
+	return nil
 }
 
 func (m *sessionsMock) RotateSession(_ context.Context, oldSessionID uuid.UUID, newSession *domain.Session) error {
@@ -73,6 +85,12 @@ func (m *sessionsMock) rotateCallCount() int {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	return m.rotateCalls
+}
+
+func (m *sessionsMock) revokeAllCallCount() int {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.revokeAllCalls
 }
 
 // tokensMock implementa domain.TokenGenerator. hash simula el SHA-256 real de
