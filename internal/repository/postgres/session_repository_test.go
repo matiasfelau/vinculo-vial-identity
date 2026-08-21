@@ -5,10 +5,12 @@
 package postgres
 
 import (
+	"errors"
 	"testing"
 	"time"
 
 	"github.com/google/uuid"
+	"gorm.io/gorm"
 
 	"github.com/matiasfelau/vinculo-vial-identity/internal/domain"
 )
@@ -47,5 +49,24 @@ func TestSessionCreateRechazaSesionNula(t *testing.T) {
 
 	if err := r.Create(t.Context(), nil); err == nil {
 		t.Error("se esperaba un error al crear una sesión nula")
+	}
+}
+
+func TestMapSessionFindErrorTraduceRegistroNoEncontrado(t *testing.T) {
+	got := mapSessionFindError(gorm.ErrRecordNotFound)
+	if !errors.Is(got, domain.ErrSessionNotFound) {
+		t.Errorf("error = %v, se esperaba ErrSessionNotFound", got)
+	}
+}
+
+func TestMapSessionFindErrorNoTraduceOtrosFallos(t *testing.T) {
+	original := errors.New("connection reset by peer")
+	got := mapSessionFindError(original)
+
+	if errors.Is(got, domain.ErrSessionNotFound) {
+		t.Errorf("%v no debería traducirse a ErrSessionNotFound", original)
+	}
+	if !errors.Is(got, original) {
+		t.Errorf("el error original debe quedar envuelto para diagnóstico: %v", got)
 	}
 }

@@ -31,6 +31,22 @@ type UserRepository interface {
 type SessionRepository interface {
 	// Create inserta la sesión nueva.
 	Create(ctx context.Context, s *Session) error
+
+	// FindByHash busca una sesión por el SHA-256 de su Refresh Token. Es el
+	// único criterio de búsqueda de /refresh (US-03): nunca se busca por el
+	// token en claro, que no se persiste. Debe devolver ErrSessionNotFound
+	// (envuelto o no) cuando ninguna sesión tiene ese hash.
+	FindByHash(ctx context.Context, refreshTokenHash string) (*Session, error)
+
+	// RevokeByID marca como revocada una única sesión. La usan tanto la
+	// rotación (revoca la sesión vieja al emitir el par nuevo) como el logout.
+	RevokeByID(ctx context.Context, id uuid.UUID) error
+
+	// RevokeAllByUserID marca como revocadas todas las sesiones de un usuario,
+	// vigentes o no. Es la Defensa Activa de US-03: se dispara al detectar el
+	// reúso de un Refresh Token ya revocado, y asume que toda la familia de
+	// sesiones del usuario puede estar comprometida.
+	RevokeAllByUserID(ctx context.Context, userID uuid.UUID) error
 }
 
 // TokenGenerator emite el par de tokens de una sesión nueva tras un login

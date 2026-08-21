@@ -68,6 +68,15 @@ var (
 	// ErrInvalidSession indica que se intentó construir una sesión inconsistente.
 	// Es un error de programación, no un dato inválido del cliente. → 500.
 	ErrInvalidSession = errors.New("domain: sesión inconsistente")
+
+	// ErrSessionNotFound indica que ninguna sesión tiene el hash de Refresh
+	// Token buscado.
+	//
+	// En /refresh (US-03) esto se traduce en 401 Unauthorized: el token no
+	// existe, expiró o es inválido son, a propósito, la misma respuesta —no hay
+	// forma de distinguirlos desde afuera sin convertir el endpoint en un oráculo
+	// sobre qué tokens existieron alguna vez.
+	ErrSessionNotFound = errors.New("domain: sesión no encontrada")
 )
 
 func invalidUser(reason string) error {
