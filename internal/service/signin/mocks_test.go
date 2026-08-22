@@ -37,6 +37,13 @@ func (m *decryptorMock) Decrypt(ephemeralPublicKey, ciphertext []byte) ([]byte, 
 	return out, nil
 }
 
+// DecryptCombined no lo ejercita ningún test de signin: es parte de
+// domain.HPKEDecryptor solo porque /internal/verify-ownership (US-04) lo
+// necesita sobre el mismo descifrador.
+func (m *decryptorMock) DecryptCombined([]byte) ([]byte, error) {
+	panic("signin: DecryptCombined no se usa en el login")
+}
+
 type indexerMock struct {
 	index string
 

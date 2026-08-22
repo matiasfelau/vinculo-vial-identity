@@ -156,6 +156,25 @@ func (d *Decryptor) Decrypt(ephemeralPublicKey, ciphertext []byte) ([]byte, erro
 	return plaintext, nil
 }
 
+// DecryptCombined revierte el sellado HPKE de un criptograma que llegó como
+// un único blob —`enc` seguido del ciphertext— en lugar de las dos piezas
+// separadas que reciben /signup y /signin.
+//
+// Es el formato de dni_enc en US-04: el contrato compartido lo transporta
+// como un solo campo, así que la separación ocurre acá, usando encLen —fijo
+// para la suite configurada— para partir el prefijo del encapsulado del
+// resto, que es el ciphertext. Comparte con Decrypt las mismas dos
+// categorías de error: un blob demasiado corto para contener siquiera un
+// encapsulado es domain.ErrMalformedCryptogram, verificable sin tocar la
+// clave privada.
+func (d *Decryptor) DecryptCombined(cryptogram []byte) ([]byte, error) {
+	if len(cryptogram) < d.encLen {
+		return nil, fmt.Errorf("%w: criptograma demasiado corto para contener un encapsulado", domain.ErrMalformedCryptogram)
+	}
+
+	return d.Decrypt(cryptogram[:d.encLen], cryptogram[d.encLen:])
+}
+
 // PublicKey devuelve la clave pública correspondiente, en base64 estándar.
 // Es la que se publica para que la app la empotre y cifre contra ella.
 //
