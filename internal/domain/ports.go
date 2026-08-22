@@ -108,6 +108,16 @@ type HPKEDecryptor interface {
 	// RFC 9180) y el ciphertext sellado por el AEAD. El llamador es responsable
 	// de limpiar el buffer devuelto cuando termina de usarlo.
 	Decrypt(ephemeralPublicKey, ciphertext []byte) ([]byte, error)
+
+	// DecryptCombined revierte el mismo sellado HPKE que Decrypt, pero a
+	// partir de un único blob (`enc` seguido del ciphertext) en lugar de las
+	// dos piezas separadas. Es el formato de dni_enc en US-04: a diferencia
+	// de /signup y /signin, el contrato compartido transporta ese campo como
+	// un solo valor —Vehicle lo reenvía sin abrir, tal cual lo produjo la
+	// app—, así que la separación en sus dos piezas ocurre de este lado. El
+	// llamador es responsable de limpiar el buffer devuelto cuando termina
+	// de usarlo.
+	DecryptCombined(cryptogram []byte) ([]byte, error)
 }
 
 // SymmetricCipher cifra datos sensibles para persistirlos (cifrado at-rest).

@@ -101,6 +101,126 @@ func TestDecryptRoundTrip(t *testing.T) {
 	}
 }
 
+// dni_enc (US-04) llega como un único blob, a diferencia de las dos piezas
+// separadas de /signup y /signin: DecryptCombined tiene que partirlo él mismo
+// y descifrar exactamente lo mismo que Decrypt con esas dos piezas ya separadas.
+func TestDecryptCombinedRoundTrip(t *testing.T) {
+	priv, pub, err := hpke.GenerateKeyPair()
+	if err != nil {
+		t.Fatalf("no se pudo generar el par: %v", err)
+	}
+
+	d, err := hpke.NewDecryptorFromBase64(priv, []byte(testInfo))
+	if err != nil {
+		t.Fatalf("no se pudo construir el descifrador: %v", err)
+	}
+
+	for _, payload := range []string{"30123456", "", strings.Repeat("x", 512)} {
+		enc, ct, err := hpke.Seal(pub, []byte(testInfo), []byte(payload))
+		if err != nil {
+			t.Fatalf("no se pudo sellar: %v", err)
+		}
+
+		combinado := append(append([]byte(nil), enc...), ct...)
+
+		plaintext, err := d.DecryptCombined(combinado)
+		if err != nil {
+			t.Fatalf("no se pudo descifrar el combinado (largo %d): %v", len(payload), err)
+		}
+		if string(plaintext) != payload {
+			t.Errorf("plaintext = %q, se esperaba %q", plaintext, payload)
+		}
+	}
+}
+
+// Un blob que ni siquiera alcanza para contener el encapsulado es verificable
+// sin tocar la clave privada: se rechaza igual que Decrypt rechaza una clave
+// efímera de longitud incorrecta.
+func TestDecryptCombinedRechazaBlobsDemasiadoCortos(t *testing.T) {
+	priv, pub, err := hpke.GenerateKeyPair()
+	if err != nil {
+		t.Fatalf("no se pudo generar el par: %v", err)
+	}
+	d, err := hpke.NewDecryptorFromBase64(priv, []byte(testInfo))
+	if err != nil {
+		t.Fatalf("no se pudo construir el descifrador: %v", err)
+	}
+
+	enc, _, err := hpke.Seal(pub, []byte(testInfo), []byte("30123456"))
+	if err != nil {
+		t.Fatalf("no se pudo sellar: %v", err)
+	}
+
+	cases := map[string][]byte{
+		"vacío":                            nil,
+		"un byte":                          {0x00},
+		"exactamente encLen menos un byte": enc[:len(enc)-1],
+	}
+
+	for name, blob := range cases {
+		t.Run(name, func(t *testing.T) {
+			_, err := d.DecryptCombined(blob)
+			if !errors.Is(err, domain.ErrMalformedCryptogram) {
+				t.Errorf("error = %v, se esperaba ErrMalformedCryptogram", err)
+			}
+		})
+	}
+}
+
+// Un blob que sí alcanza para el encapsulado pero cuyo ciphertext quedó vacío
+// (exactamente encLen bytes) no es un caso especial de DecryptCombined: el
+// mismo chequeo de Decrypt sobre un ciphertext vacío ya lo cubre.
+func TestDecryptCombinedConSoloElEncapsuladoDelegaEnDecrypt(t *testing.T) {
+	priv, pub, err := hpke.GenerateKeyPair()
+	if err != nil {
+		t.Fatalf("no se pudo generar el par: %v", err)
+	}
+	d, err := hpke.NewDecryptorFromBase64(priv, []byte(testInfo))
+	if err != nil {
+		t.Fatalf("no se pudo construir el descifrador: %v", err)
+	}
+
+	enc, _, err := hpke.Seal(pub, []byte(testInfo), []byte("30123456"))
+	if err != nil {
+		t.Fatalf("no se pudo sellar: %v", err)
+	}
+
+	_, err = d.DecryptCombined(enc)
+	if !errors.Is(err, domain.ErrMalformedCryptogram) {
+		t.Errorf("error = %v, se esperaba ErrMalformedCryptogram", err)
+	}
+}
+
+// DecryptCombined no introduce una tercera categoría de error: un blob bien
+// formado que no abre (clave ajena) sigue siendo ErrInvalidCryptogram, igual
+// que Decrypt con las piezas ya separadas.
+func TestDecryptCombinedPropagaLosMismosFallosQueDecrypt(t *testing.T) {
+	_, pub, err := hpke.GenerateKeyPair()
+	if err != nil {
+		t.Fatalf("no se pudo generar el par: %v", err)
+	}
+	otroPriv, _, err := hpke.GenerateKeyPair()
+	if err != nil {
+		t.Fatalf("no se pudo generar el segundo par: %v", err)
+	}
+
+	enc, ct, err := hpke.Seal(pub, []byte(testInfo), []byte("30123456"))
+	if err != nil {
+		t.Fatalf("no se pudo sellar: %v", err)
+	}
+	combinado := append(append([]byte(nil), enc...), ct...)
+
+	d, err := hpke.NewDecryptorFromBase64(otroPriv, []byte(testInfo))
+	if err != nil {
+		t.Fatalf("no se pudo construir el descifrador: %v", err)
+	}
+
+	_, err = d.DecryptCombined(combinado)
+	if !errors.Is(err, domain.ErrInvalidCryptogram) {
+		t.Errorf("error = %v, se esperaba ErrInvalidCryptogram", err)
+	}
+}
+
 // Los fallos se separan en dos categorías con destinos HTTP distintos: lo que
 // está mal formado se puede verificar sin tocar la clave privada (400), y lo que
 // está bien formado pero no abre es indistinguible entre clave equivocada y
