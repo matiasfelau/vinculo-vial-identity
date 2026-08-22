@@ -29,7 +29,10 @@ const HeaderInternalServiceToken = "X-Internal-Service-Token"
 // son independientes: aunque el puerto interno quedara mal aislado en algún
 // entorno, el secreto seguiría bloqueando a un contenedor que no lo conozca.
 type InternalRouterConfig struct {
-	Logger *slog.Logger
+	// VerifyOwnership es el caso de uso de POST /internal/verify-ownership
+	// (US-04).
+	VerifyOwnership VerifyOwnershipService
+	Logger          *slog.Logger
 	// ServiceToken es el secreto que toda petición a /internal/* debe traer
 	// en HeaderInternalServiceToken. Es obligatorio: sin él, este router
 	// sería exactamente el oráculo de verificación de DNI por fuerza bruta
@@ -54,6 +57,11 @@ func NewInternalRouter(cfg InternalRouterConfig) (*gin.Engine, error) {
 	logger := cfg.Logger
 	if logger == nil {
 		logger = slog.Default()
+	}
+
+	handler, err := NewInternalHandler(cfg.VerifyOwnership, logger)
+	if err != nil {
+		return nil, err
 	}
 
 	maxBody := cfg.MaxBodyBytes
@@ -83,9 +91,7 @@ func NewInternalRouter(cfg InternalRouterConfig) (*gin.Engine, error) {
 		c.JSON(http.StatusOK, gin.H{"status": "ok"})
 	})
 
-	// Las rutas propias del caso de uso de US-04 (POST /internal/verify-ownership)
-	// se agregan en feature/verify-ownership-endpoint, ya cubiertas por el
-	// requireServiceToken de arriba.
+	r.POST("/internal/verify-ownership", handler.VerifyOwnership)
 
 	r.NoRoute(func(c *gin.Context) {
 		c.JSON(http.StatusNotFound, errorResponse{Code: codeInvalidRequest, Error: "recurso no encontrado", RequestID: requestIDOf(c)})

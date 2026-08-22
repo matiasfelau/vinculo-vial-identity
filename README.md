@@ -198,10 +198,17 @@ no verifica los tokens que él mismo emite—.
 
 Además del router público (`HTTP_PORT`), el servicio levanta un segundo
 `*http.Server` en `HTTP_INTERNAL_PORT` con las rutas `/internal/*` que otros
-componentes de la plataforma consumen directo por red interna —por ejemplo,
-`POST /internal/verify-ownership` que usará `vinculo-vial-vehicle` para
-confirmar la titularidad de un DNI sin verlo nunca en claro—. Kong nunca
+componentes de la plataforma consumen directo por red interna. Kong nunca
 enruta hacia acá.
+
+Hoy expone una sola ruta: `POST /internal/verify-ownership`, que usa
+`vinculo-vial-vehicle` para confirmar si el DNI de una cédula (recibido
+cifrado como `dni_enc`, un único blob HPKE `enc || ciphertext`) corresponde
+al usuario dueño de `owner_id`. Identity lo descifra, calcula su Blind Index
+y compara contra `users`, sin persistir ni loguear nunca el DNI en claro. La
+respuesta es siempre `{"match": true|false}` y nada más —ni el DNI, ni el
+email, ni por qué dio `false`—: un `owner_id` inexistente y un DNI que no
+coincide son, a propósito, indistinguibles desde afuera.
 
 Que el puerto no esté publicado (ni en Kong ni en el `docker-compose` de este
 servicio) es una condición necesaria pero no suficiente: dentro de una red

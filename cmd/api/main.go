@@ -25,6 +25,7 @@ import (
 	"github.com/matiasfelau/vinculo-vial-identity/internal/domain"
 	"github.com/matiasfelau/vinculo-vial-identity/internal/renaper"
 	"github.com/matiasfelau/vinculo-vial-identity/internal/repository/postgres"
+	"github.com/matiasfelau/vinculo-vial-identity/internal/service/ownership"
 	"github.com/matiasfelau/vinculo-vial-identity/internal/service/session"
 	"github.com/matiasfelau/vinculo-vial-identity/internal/service/signin"
 	"github.com/matiasfelau/vinculo-vial-identity/internal/service/signup"
@@ -159,6 +160,16 @@ func run() error {
 		return err
 	}
 
+	verifyOwnershipService, err := ownership.New(ownership.Deps{
+		Decryptor: decryptor,
+		Indexer:   indexer,
+		Users:     users,
+		Logger:    logger,
+	})
+	if err != nil {
+		return err
+	}
+
 	router, err := delivery.NewRouter(delivery.RouterConfig{
 		SignUp:       signUpService,
 		SignIn:       signInService,
@@ -176,10 +187,11 @@ func run() error {
 	}
 
 	internalRouter, err := delivery.NewInternalRouter(delivery.InternalRouterConfig{
-		Logger:       logger,
-		ServiceToken: cfg.Internal.ServiceToken.Reveal(),
-		MaxBodyBytes: cfg.HTTP.MaxBodyBytes,
-		Debug:        cfg.HTTP.Debug,
+		VerifyOwnership: verifyOwnershipService,
+		Logger:          logger,
+		ServiceToken:    cfg.Internal.ServiceToken.Reveal(),
+		MaxBodyBytes:    cfg.HTTP.MaxBodyBytes,
+		Debug:           cfg.HTTP.Debug,
 	})
 	if err != nil {
 		return err
