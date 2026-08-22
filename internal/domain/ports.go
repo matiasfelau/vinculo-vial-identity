@@ -24,6 +24,17 @@ type UserRepository interface {
 	// se persiste. Debe devolver ErrUserNotFound (envuelto o no) cuando ningún
 	// usuario tiene ese índice.
 	FindByDNIHashed(ctx context.Context, dniHashed string) (*User, error)
+
+	// FindByOwnerAndDNIHash busca el usuario cuyo id es ownerID Y cuyo Blind
+	// Index de DNI es dniHashed. La usa /internal/verify-ownership (US-04)
+	// para confirmar que el DNI del QR corresponde al dueño de la sesión
+	// activa, sin decir nunca cuál de las dos condiciones falló: que el
+	// predicado combine ambas con AND en una sola consulta es lo que impide
+	// distinguir "ese owner_id no existe" de "existe, pero ese no es su
+	// DNI" — las dos devuelven, indistinguiblemente, ErrUserNotFound
+	// (envuelto o no). Nunca se usa para autenticar ni para nada que no sea
+	// esa comparación puntual.
+	FindByOwnerAndDNIHash(ctx context.Context, ownerID uuid.UUID, dniHashed string) (*User, error)
 }
 
 // SessionRepository persiste sesiones: el registro de cada Refresh Token

@@ -134,6 +134,13 @@ func (m *usersMock) FindByDNIHashed(_ context.Context, dniHashed string) (*domai
 	return m.user, nil
 }
 
+// FindByOwnerAndDNIHash no lo ejercita ningún test de signin: es parte de
+// domain.UserRepository solo porque /internal/verify-ownership (US-04) lo
+// necesita sobre el mismo repositorio.
+func (m *usersMock) FindByOwnerAndDNIHash(context.Context, uuid.UUID, string) (*domain.User, error) {
+	panic("signin: FindByOwnerAndDNIHash no se usa en el login")
+}
+
 type sessionsMock struct {
 	err error
 
