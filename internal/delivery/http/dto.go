@@ -64,6 +64,21 @@ type logoutRequest struct {
 	RefreshToken string `json:"refresh_token"`
 }
 
+// verifyOwnershipRequest es el payload interno de US-04 que envía
+// vinculo-vial-vehicle: el contrato compartido lo transporta tal cual, sin
+// que Vehicle lo abra. DNIEnc es un único blob HPKE (enc || ciphertext), a
+// diferencia de las dos piezas separadas de /signup y /signin.
+type verifyOwnershipRequest struct {
+	OwnerID string `json:"owner_id"`
+	DNIEnc  string `json:"dni_enc"`
+}
+
+// verifyOwnershipResponse es la única forma de respuesta de
+// /internal/verify-ownership: un booleano y nada más.
+type verifyOwnershipResponse struct {
+	Match bool `json:"match"`
+}
+
 // Códigos de error de la API. Son estables y la app decide el texto a mostrar;
 // el campo `error` es para diagnóstico humano, no para parsear.
 const (
