@@ -34,6 +34,7 @@ type Config struct {
 	LogLevel slog.Level
 
 	HTTP     HTTPConfig
+	Internal InternalConfig
 	Postgres PostgresConfig
 	Crypto   CryptoConfig
 	Events   EventsConfig
@@ -57,6 +58,25 @@ type HTTPConfig struct {
 
 // Addr es la dirección de escucha.
 func (c HTTPConfig) Addr() string { return fmt.Sprintf(":%d", c.Port) }
+
+// InternalConfig son los parámetros del router interno de US-04 (rutas
+// /internal/*, como POST /internal/verify-ownership). Se sirve en un
+// *http.Server separado del público, en su propio puerto, que ni Kong ni el
+// docker-compose de este servicio publican fuera de la red interna.
+//
+// Esa separación de puerto es una condición necesaria pero no suficiente:
+// dentro de la red Docker cualquier contenedor puede alcanzar cualquier
+// puerto de otro. ServiceToken es la segunda capa —un secreto compartido de
+// servicio a servicio que vinculo-vial-vehicle debe presentar en cada
+// petición— y las dos capas son independientes entre sí (ver el comentario
+// de InternalRouterConfig en internal/delivery/http).
+type InternalConfig struct {
+	Port         int
+	ServiceToken Secret
+}
+
+// Addr es la dirección de escucha del router interno.
+func (c InternalConfig) Addr() string { return fmt.Sprintf(":%d", c.Port) }
 
 // PostgresConfig son los parámetros de la base.
 type PostgresConfig struct {
@@ -141,7 +161,13 @@ type EventsConfig struct {
 // Valores por defecto pensados para que el entorno local levante sin definir
 // más que los secretos.
 const (
-	defaultHTTPPort        = 8080
+	defaultHTTPPort     = 8080
+	defaultInternalPort = 8081
+	// minServiceTokenLength es el piso de entropía admitido para
+	// INTERNAL_SERVICE_TOKEN: es un secreto compartido comparado byte a byte
+	// (no una contraseña con Argon2 detrás), así que su propia longitud es
+	// toda la defensa contra que alguien lo adivine.
+	minServiceTokenLength  = 32
 	defaultReadTimeout     = 10 * time.Second
 	defaultWriteTimeout    = 15 * time.Second
 	defaultIdleTimeout     = 60 * time.Second
@@ -186,6 +212,11 @@ func Load() (*Config, error) {
 			IdleTimeout:     r.duration("HTTP_IDLE_TIMEOUT", defaultIdleTimeout),
 			ShutdownTimeout: r.duration("HTTP_SHUTDOWN_TIMEOUT", defaultShutdownTimeout),
 			MaxBodyBytes:    int64(r.integer("HTTP_MAX_BODY_BYTES", defaultMaxBodyBytes)),
+		},
+
+		Internal: InternalConfig{
+			Port:         r.integer("HTTP_INTERNAL_PORT", defaultInternalPort),
+			ServiceToken: Secret(r.required("INTERNAL_SERVICE_TOKEN")),
 		},
 
 		Postgres: PostgresConfig{
@@ -245,6 +276,18 @@ func (c *Config) validate() error {
 
 	if c.HTTP.Port < 1 || c.HTTP.Port > 65535 {
 		r.fail("config: HTTP_PORT fuera de rango: %d", c.HTTP.Port)
+	}
+	if c.Internal.Port < 1 || c.Internal.Port > 65535 {
+		r.fail("config: HTTP_INTERNAL_PORT fuera de rango: %d", c.Internal.Port)
+	}
+	if c.HTTP.Port == c.Internal.Port {
+		// No es solo una advertencia: dos *http.Server no pueden escuchar el
+		// mismo puerto, y si pudieran, dejaría de existir el aislamiento que
+		// esta variable existe para garantizar.
+		r.fail("config: HTTP_INTERNAL_PORT no puede coincidir con HTTP_PORT (%d): el router interno perdería su puerto propio", c.HTTP.Port)
+	}
+	if len(c.Internal.ServiceToken.Reveal()) < minServiceTokenLength {
+		r.fail("config: INTERNAL_SERVICE_TOKEN debe tener al menos %d caracteres", minServiceTokenLength)
 	}
 	if c.HTTP.MaxBodyBytes <= 0 {
 		r.fail("config: HTTP_MAX_BODY_BYTES debe ser positivo")
@@ -334,6 +377,7 @@ func (c *Config) LogValue() slog.Value {
 		slog.String("log_level", c.LogLevel.String()),
 		slog.Int("http_port", c.HTTP.Port),
 		slog.Bool("http_debug", c.HTTP.Debug),
+		slog.Int("internal_port", c.Internal.Port),
 		slog.String("postgres_host", c.Postgres.Host),
 		slog.Int("postgres_port", c.Postgres.Port),
 		slog.String("postgres_db", c.Postgres.Database),

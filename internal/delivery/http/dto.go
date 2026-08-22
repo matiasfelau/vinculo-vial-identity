@@ -81,7 +81,11 @@ const (
 	// codeSessionCompromised es el código del 403 que produce la Defensa
 	// Activa de /refresh ante el reúso de un Refresh Token ya rotado.
 	codeSessionCompromised = "sesion_comprometida"
-	codeInternal           = "error_interno"
+	// codeUnauthorizedService es el código del 401 que produce el router
+	// interno de US-04 (/internal/*) cuando la petición no trae el secreto
+	// de servicio a servicio configurado en INTERNAL_SERVICE_TOKEN.
+	codeUnauthorizedService = "servicio_no_autorizado"
+	codeInternal            = "error_interno"
 )
 
 // errorResponse es la forma única de todos los errores de la API.

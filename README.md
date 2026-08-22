@@ -194,6 +194,24 @@ RSASSA-PKCS1-v1_5 sobre SHA-256, algo que la librería estándar cubre por
 completo y que este servicio nunca necesita volver a interpretar —firma, pero
 no verifica los tokens que él mismo emite—.
 
+## Router interno (US-04)
+
+Además del router público (`HTTP_PORT`), el servicio levanta un segundo
+`*http.Server` en `HTTP_INTERNAL_PORT` con las rutas `/internal/*` que otros
+componentes de la plataforma consumen directo por red interna —por ejemplo,
+`POST /internal/verify-ownership` que usará `vinculo-vial-vehicle` para
+confirmar la titularidad de un DNI sin verlo nunca en claro—. Kong nunca
+enruta hacia acá.
+
+Que el puerto no esté publicado (ni en Kong ni en el `docker-compose` de este
+servicio) es una condición necesaria pero no suficiente: dentro de una red
+Docker compartida, cualquier contenedor puede alcanzar igual cualquier
+puerto de otro. Por eso toda petición a `/internal/*`, sin excepción, exige
+además el secreto `INTERNAL_SERVICE_TOKEN` en la cabecera
+`X-Internal-Service-Token`, comparado a tiempo constante. Sin ese secreto (o
+con uno incorrecto), el servidor responde `401` — incluso para una ruta que
+no existe, para no delatar por el status qué rutas expone.
+
 ## Puesta en marcha
 
 ```bash

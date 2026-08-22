@@ -45,6 +45,10 @@ services:
       POSTGRES_SSLMODE: disable
     ports:
       - "127.0.0.1:${HTTP_PORT:-8080}:8080"
+    # Deliberadamente sin publicar HTTP_INTERNAL_PORT: las rutas /internal/*
+    # (US-04) no se exponen fuera de la red interna. Vehicle las alcanza igual
+    # dentro de la red `vinculo-vial`, sin necesidad de un `ports:` acá —eso es
+    # justamente lo que INTERNAL_SERVICE_TOKEN protege (ver CLAUDE.md).
     depends_on:
       postgres:
         condition: service_healthy
