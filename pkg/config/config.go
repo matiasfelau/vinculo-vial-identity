@@ -141,7 +141,8 @@ type CryptoConfig struct {
 	Argon2Parallelism int
 }
 
-// TokenConfig son los TTL de los tokens de sesión que emite el login (US-02).
+// TokenConfig son los parámetros de los tokens de sesión que emite el login
+// (US-02).
 type TokenConfig struct {
 	// AccessTokenTTL es la vida del JWT de acceso. El contrato compartido fija
 	// la variable en minutos (ACCESS_TOKEN_TTL_MINUTES), no como duración de Go.
@@ -149,6 +150,9 @@ type TokenConfig struct {
 	// RefreshTokenTTL es la vida del Refresh Token opaco. El contrato compartido
 	// fija la variable en días (REFRESH_TOKEN_TTL_DAYS).
 	RefreshTokenTTL time.Duration
+	// Issuer es el claim `iss` que lleva el Access Token. Kong lo exige para
+	// mapear el token al Consumer correcto antes de validar la firma RS256.
+	Issuer string
 }
 
 // EventsConfig son los parámetros del broker.
@@ -201,6 +205,9 @@ const (
 	// asume estos mismos TTL del lado de la verificación.
 	defaultAccessTokenTTLMinutes = 15
 	defaultRefreshTokenTTLDays   = 30
+	// defaultJWTIssuer es el nombre de este servicio en el claim `iss`, el que
+	// Kong espera cuando no se sobrescribe con JWT_ISSUER.
+	defaultJWTIssuer = "vinculo-vial-identity"
 )
 
 // Load lee la configuración del entorno y la valida.
@@ -261,6 +268,7 @@ func Load() (*Config, error) {
 		Token: TokenConfig{
 			AccessTokenTTL:  time.Duration(r.integer("ACCESS_TOKEN_TTL_MINUTES", defaultAccessTokenTTLMinutes)) * time.Minute,
 			RefreshTokenTTL: time.Duration(r.integer("REFRESH_TOKEN_TTL_DAYS", defaultRefreshTokenTTLDays)) * 24 * time.Hour,
+			Issuer:          r.str("JWT_ISSUER", defaultJWTIssuer),
 		},
 	}
 
@@ -401,6 +409,7 @@ func (c *Config) LogValue() slog.Value {
 		slog.Int("argon2_memory_kib", c.Crypto.Argon2MemoryKiB),
 		slog.Duration("access_token_ttl", c.Token.AccessTokenTTL),
 		slog.Duration("refresh_token_ttl", c.Token.RefreshTokenTTL),
+		slog.String("jwt_issuer", c.Token.Issuer),
 	)
 }
 

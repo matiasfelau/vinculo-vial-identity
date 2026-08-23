@@ -48,7 +48,7 @@ func aplicar(t *testing.T, env map[string]string) {
 		"POSTGRES_DB", "POSTGRES_SSLMODE", "POSTGRES_LOG_SQL", "EPHEMERAL_DB",
 		"POSTGRES_MAX_OPEN_CONNS", "POSTGRES_MAX_IDLE_CONNS",
 		"IDENTITY_HPKE_PRIVATE_KEY", "IDENTITY_HPKE_INFO", "AES_KEY", "HMAC_SECRET",
-		"JWT_PRIVATE_KEY", "ACCESS_TOKEN_TTL_MINUTES", "REFRESH_TOKEN_TTL_DAYS",
+		"JWT_PRIVATE_KEY", "JWT_ISSUER", "ACCESS_TOKEN_TTL_MINUTES", "REFRESH_TOKEN_TTL_DAYS",
 		"ARGON2_MEMORY_KIB", "ARGON2_ITERATIONS", "ARGON2_PARALLELISM",
 		"RABBITMQ_ENABLED", "RABBITMQ_URL", "RABBITMQ_EXCHANGE",
 	} {
@@ -140,6 +140,34 @@ func TestLoadRechazaTTLNoPositivos(t *testing.T) {
 				t.Error("se esperaba un error de configuración")
 			}
 		})
+	}
+}
+
+// Kong exige el claim `iss` para mapear el token al Consumer correcto: sin un
+// default, un .env sin JWT_ISSUER emitiría tokens que el gateway rechaza.
+func TestLoadUsaElIssuerPorDefecto(t *testing.T) {
+	aplicar(t, entornoMinimo())
+
+	cfg, err := config.Load()
+	if err != nil {
+		t.Fatalf("error inesperado: %v", err)
+	}
+	if cfg.Token.Issuer != "vinculo-vial-identity" {
+		t.Errorf("issuer = %q, se esperaba %q", cfg.Token.Issuer, "vinculo-vial-identity")
+	}
+}
+
+func TestLoadAceptaUnIssuerPersonalizado(t *testing.T) {
+	env := entornoMinimo()
+	env["JWT_ISSUER"] = "otro-issuer"
+	aplicar(t, env)
+
+	cfg, err := config.Load()
+	if err != nil {
+		t.Fatalf("error inesperado: %v", err)
+	}
+	if cfg.Token.Issuer != "otro-issuer" {
+		t.Errorf("issuer = %q, se esperaba %q", cfg.Token.Issuer, "otro-issuer")
 	}
 }
 
