@@ -273,7 +273,7 @@ func TestRefreshSiFallaLaDefensaActivaNoRotaYPropagaElError(t *testing.T) {
 	}
 }
 
-// Requisito de atomicidad de CLAUDE.md: revocar la sesión vieja e insertar la
+// Requisito de atomicidad de US-03: revocar la sesión vieja e insertar la
 // nueva es una única operación (RotateSession) precisamente para que un fallo
 // a mitad de camino no pueda dejar al servicio en un estado a medias — no hay
 // ningún otro punto del código en el que pudiera "revocar y no insertar" por

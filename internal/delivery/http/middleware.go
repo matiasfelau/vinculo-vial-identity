@@ -46,6 +46,18 @@ func requestIDOf(c *gin.Context) string {
 // Deliberadamente no toca el cuerpo: en /signup el cuerpo es el criptograma y,
 // más allá de estar cifrado, loguearlo dejaría material criptográfico en el
 // agregador de logs sin ninguna utilidad para diagnosticar.
+//
+// Se registran dos campos distintos para la ubicación de la petición, porque
+// responden preguntas distintas:
+//
+//   - `path`: la URL que pidió el cliente, siempre presente.
+//   - `route`: el patrón de ruta que matcheó Gin, vacío cuando ninguno lo hizo.
+//
+// Registrar solo `route` —como se hacía antes— dejaba en blanco justo las
+// peticiones que más hace falta diagnosticar: un 404 o un 405 no matchean
+// ninguna ruta, así que el log no decía qué se había pedido. Ese vacío es lo
+// que obliga a descubrir por prueba y error si el problema es un typo en el
+// path, un puerto equivocado o un método incorrecto.
 func accessLog(logger *slog.Logger) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		start := time.Now()
@@ -55,7 +67,8 @@ func accessLog(logger *slog.Logger) gin.HandlerFunc {
 		attrs := []slog.Attr{
 			slog.String("request_id", requestIDOf(c)),
 			slog.String("method", c.Request.Method),
-			slog.String("path", c.FullPath()),
+			slog.String("path", requestPath(c)),
+			slog.String("route", c.FullPath()),
 			slog.Int("status", c.Writer.Status()),
 			slog.Duration("latency", time.Since(start)),
 		}
@@ -69,6 +82,26 @@ func accessLog(logger *slog.Logger) gin.HandlerFunc {
 	}
 }
 
+// maxLoggedPathLength acota lo que se registra del path pedido. Las rutas
+// reales de este servicio no llegan a 40 caracteres, así que este tope solo
+// alcanza a un cliente que pide una URL desmesurada —un escáner, típicamente—
+// y evita que eso infle el agregador de logs. El mismo criterio que aplica
+// requestID sobre el valor de X-Request-ID.
+const maxLoggedPathLength = 256
+
+// requestPath devuelve la ruta pedida por el cliente, acotada.
+//
+// Se toma URL.Path y no RequestURI: Path excluye la query string, que este
+// servicio no usa en ningún endpoint y que no tiene por qué terminar en un
+// log si alguna vez se agrega un endpoint que sí la reciba.
+func requestPath(c *gin.Context) string {
+	path := c.Request.URL.Path
+	if len(path) > maxLoggedPathLength {
+		return path[:maxLoggedPathLength] + "…"
+	}
+	return path
+}
+
 // recovery convierte un panic en un 500 genérico y deja el stack en el log.
 //
 // El stack nunca viaja en la respuesta: expone rutas de archivos y estructura
@@ -77,7 +110,8 @@ func recovery(logger *slog.Logger) gin.HandlerFunc {
 	return gin.CustomRecoveryWithWriter(nil, func(c *gin.Context, recovered any) {
 		logger.ErrorContext(c.Request.Context(), "panic atendiendo la petición",
 			slog.String("request_id", requestIDOf(c)),
-			slog.String("path", c.FullPath()),
+			slog.String("path", requestPath(c)),
+			slog.String("route", c.FullPath()),
 			slog.Any("panic", recovered),
 		)
 

@@ -196,19 +196,42 @@ no verifica los tokens que él mismo emite—.
 
 ## Router interno (US-04)
 
-Además del router público (`HTTP_PORT`), el servicio levanta un segundo
-`*http.Server` en `HTTP_INTERNAL_PORT` con las rutas `/internal/*` que otros
-componentes de la plataforma consumen directo por red interna. Kong nunca
-enruta hacia acá.
+Además del router público (`HTTP_PORT`, default `8080`), el servicio levanta
+un segundo `*http.Server` en `HTTP_INTERNAL_PORT` (default **`8081`**) con las
+rutas `/internal/*` que otros componentes de la plataforma consumen directo
+por red interna. Kong nunca enruta hacia acá.
+
+Desde otro contenedor de la red `vinculo-vial`, la llamada completa es:
+
+```bash
+curl -X POST http://vinculo-vial-identity:8081/internal/verify-ownership \
+  -H "X-Internal-Service-Token: $INTERNAL_SERVICE_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"owner_id":"<UUID>","dni_enc":"<base64 de enc||ciphertext>"}'
+```
 
 Hoy expone una sola ruta: `POST /internal/verify-ownership`, que usa
-`vinculo-vial-vehicle` para confirmar si el DNI de una cédula (recibido
-cifrado como `dni_enc`, un único blob HPKE `enc || ciphertext`) corresponde
-al usuario dueño de `owner_id`. Identity lo descifra, calcula su Blind Index
-y compara contra `users`, sin persistir ni loguear nunca el DNI en claro. La
-respuesta es siempre `{"match": true|false}` y nada más —ni el DNI, ni el
-email, ni por qué dio `false`—: un `owner_id` inexistente y un DNI que no
-coincide son, a propósito, indistinguibles desde afuera.
+`vinculo-vial-vehicle` para confirmar si un DNI corresponde al usuario dueño
+de `owner_id`. Identity lo descifra, calcula su Blind Index y compara contra
+`users`, sin persistir ni loguear nunca el DNI en claro.
+
+`owner_id` viaja en el **body**, no en un header: es el mismo UUID que Kong
+le inyectó a Vehicle como `X-User-Id`, reenviado como campo del JSON.
+
+`dni_enc` es un **único blob** `enc || ciphertext` en base64 —los primeros 32
+bytes son la clave pública efímera del KEM (X25519), el resto el ciphertext
+del AEAD—, **no las dos piezas separadas** que usan `/signup` y `/signin` en
+sus campos `ephemeral_public_key` y `ciphertext`. Se aceptan las cuatro
+variantes de base64. Desde el ajuste de arquitectura de agosto 2026 lo cifra
+Vehicle contra `IDENTITY_HPKE_PUBLIC_KEY`, con el DNI que obtiene de su
+integración con la DNRPA; antes reenviaba sin abrir uno producido por la app.
+
+| Código | Cuándo |
+|---|---|
+| `200` | `{"match": true}` o `{"match": false}`, y nada más. Que el `owner_id` no exista y que el DNI no le corresponda son **indistinguibles**: ambos son `false`, para no convertir el endpoint en un oráculo de verificación de DNI. |
+| `400` | Cuerpo no interpretable, `owner_id` que no es UUID, `dni_enc` que no es base64, o criptograma sin forma de mensaje HPKE. |
+| `401` | Falta `X-Internal-Service-Token` o es incorrecto. |
+| `500` | El criptograma no descifra (clave desincronizada o manipulación), o falla algo interno. |
 
 Que el puerto no esté publicado (ni en Kong ni en el `docker-compose` de este
 servicio) es una condición necesaria pero no suficiente: dentro de una red
