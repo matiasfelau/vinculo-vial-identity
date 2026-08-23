@@ -243,7 +243,7 @@ func buildCrypto(cfg *config.Config) (domain.HPKEDecryptor, domain.BlindIndexer,
 // clave se valida acá —formato PEM, algoritmo, largo mínimo— y no en el primer
 // login.
 func buildTokenGenerator(cfg *config.Config) (domain.TokenGenerator, error) {
-	return token.New(cfg.Crypto.JWTPrivateKey.Reveal(), cfg.Token.AccessTokenTTL, cfg.Token.RefreshTokenTTL)
+	return token.New(cfg.Crypto.JWTPrivateKey.Reveal(), cfg.Token.AccessTokenTTL, cfg.Token.RefreshTokenTTL, cfg.Token.Issuer)
 }
 
 // buildPublisher elige entre el publisher real y el inerte.

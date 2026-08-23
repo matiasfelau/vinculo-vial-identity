@@ -19,6 +19,11 @@ import (
 	"github.com/matiasfelau/vinculo-vial-identity/internal/token"
 )
 
+// testIssuer es el issuer que usan los tests que no ejercitan el claim `iss`
+// en sí: cualquier valor no vacío sirve, y usar siempre el mismo simplifica
+// las aserciones de los que sí lo verifican.
+const testIssuer = "vinculo-vial-identity"
+
 // generar produce un par de claves de prueba una sola vez por paquete: RSA es
 // caro de generar y ningún test necesita una clave distinta de otro.
 func generar(t *testing.T) (privateKeyPEM, publicKeyPEM string) {
@@ -35,7 +40,7 @@ func nuevoGenerador(t *testing.T) (*token.Generator, string) {
 	t.Helper()
 
 	privPEM, pubPEM := generar(t)
-	g, err := token.New(privPEM, 15*time.Minute, 30*24*time.Hour)
+	g, err := token.New(privPEM, 15*time.Minute, 30*24*time.Hour, testIssuer)
 	if err != nil {
 		t.Fatalf("error inesperado al construir el generador: %v", err)
 	}
@@ -128,7 +133,8 @@ func TestNewAccessTokenEmiteUnJWTRS256Verificable(t *testing.T) {
 	}
 }
 
-// El Access Token nunca lleva PII: solo sub, iat y exp.
+// El Access Token nunca lleva PII: solo sub, iat, exp e iss (este último
+// obligatorio para que Kong mapee el token al Consumer correcto).
 func TestNewAccessTokenNoLlevaMasClaimsQueLosMinimos(t *testing.T) {
 	g, pubPEM := nuevoGenerador(t)
 	pub := parsePublicKey(t, pubPEM)
@@ -139,20 +145,23 @@ func TestNewAccessTokenNoLlevaMasClaimsQueLosMinimos(t *testing.T) {
 	}
 
 	claims := verificar(t, jwt, pub)
-	if len(claims) != 3 {
-		t.Errorf("claims = %v, se esperaban exactamente sub, iat y exp", claims)
+	if len(claims) != 4 {
+		t.Errorf("claims = %v, se esperaban exactamente sub, iat, exp e iss", claims)
 	}
-	for _, campo := range []string{"sub", "iat", "exp"} {
+	for _, campo := range []string{"sub", "iat", "exp", "iss"} {
 		if _, ok := claims[campo]; !ok {
 			t.Errorf("falta el claim %q", campo)
 		}
+	}
+	if claims["iss"] != testIssuer {
+		t.Errorf("iss = %v, se esperaba %q", claims["iss"], testIssuer)
 	}
 }
 
 func TestNewAccessTokenExpiraSegunElTTLConfigurado(t *testing.T) {
 	privPEM, pubPEM := generar(t)
 	const ttl = 15 * time.Minute
-	g, err := token.New(privPEM, ttl, 30*24*time.Hour)
+	g, err := token.New(privPEM, ttl, 30*24*time.Hour, testIssuer)
 	if err != nil {
 		t.Fatalf("error inesperado: %v", err)
 	}
@@ -271,7 +280,7 @@ func TestNewAceptaPKCS1YPKCS8(t *testing.T) {
 
 	for name, pemStr := range map[string]string{"PKCS#1": pkcs1, "PKCS#8": pkcs8} {
 		t.Run(name, func(t *testing.T) {
-			if _, err := token.New(pemStr, 15*time.Minute, 30*24*time.Hour); err != nil {
+			if _, err := token.New(pemStr, 15*time.Minute, 30*24*time.Hour, testIssuer); err != nil {
 				t.Errorf("error inesperado con %s: %v", name, err)
 			}
 		})
@@ -295,19 +304,21 @@ func TestNewRechazaEntradasInvalidas(t *testing.T) {
 		pemStr     string
 		accessTTL  time.Duration
 		refreshTTL time.Duration
+		issuer     string
 	}{
-		"PEM vacío":                {"", 15 * time.Minute, 30 * 24 * time.Hour},
-		"PEM basura":               {"esto no es un PEM", 15 * time.Minute, 30 * 24 * time.Hour},
-		"clave por debajo del piso": {debilPEM, 15 * time.Minute, 30 * 24 * time.Hour},
-		"access TTL cero":          {privPEM, 0, 30 * 24 * time.Hour},
-		"access TTL negativo":      {privPEM, -time.Minute, 30 * 24 * time.Hour},
-		"refresh TTL cero":         {privPEM, 15 * time.Minute, 0},
-		"refresh TTL negativo":     {privPEM, 15 * time.Minute, -time.Hour},
+		"PEM vacío":                 {"", 15 * time.Minute, 30 * 24 * time.Hour, testIssuer},
+		"PEM basura":                {"esto no es un PEM", 15 * time.Minute, 30 * 24 * time.Hour, testIssuer},
+		"clave por debajo del piso": {debilPEM, 15 * time.Minute, 30 * 24 * time.Hour, testIssuer},
+		"access TTL cero":           {privPEM, 0, 30 * 24 * time.Hour, testIssuer},
+		"access TTL negativo":       {privPEM, -time.Minute, 30 * 24 * time.Hour, testIssuer},
+		"refresh TTL cero":          {privPEM, 15 * time.Minute, 0, testIssuer},
+		"refresh TTL negativo":      {privPEM, 15 * time.Minute, -time.Hour, testIssuer},
+		"issuer vacío":              {privPEM, 15 * time.Minute, 30 * 24 * time.Hour, ""},
 	}
 
 	for name, tc := range cases {
 		t.Run(name, func(t *testing.T) {
-			if _, err := token.New(tc.pemStr, tc.accessTTL, tc.refreshTTL); err == nil {
+			if _, err := token.New(tc.pemStr, tc.accessTTL, tc.refreshTTL, tc.issuer); err == nil {
 				t.Error("se esperaba un error")
 			}
 		})
@@ -321,7 +332,7 @@ func TestGenerateKeyPairProduceUnParUtilizable(t *testing.T) {
 		t.Fatal("se esperaban ambas claves no vacías")
 	}
 
-	g, err := token.New(privPEM, 15*time.Minute, 30*24*time.Hour)
+	g, err := token.New(privPEM, 15*time.Minute, 30*24*time.Hour, testIssuer)
 	if err != nil {
 		t.Fatalf("la clave generada debería ser aceptada por New: %v", err)
 	}

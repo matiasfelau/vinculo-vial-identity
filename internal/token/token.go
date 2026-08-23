@@ -44,15 +44,19 @@ type Generator struct {
 	privateKey *rsa.PrivateKey
 	accessTTL  time.Duration
 	refreshTTL time.Duration
+	// issuer es el claim `iss` que lleva cada Access Token. Kong lo exige para
+	// mapear el token al Consumer correcto antes de validar la firma RS256.
+	issuer string
 }
 
 // New construye el generador a partir de la clave privada RSA en PEM
-// (PKCS#1 o PKCS#8, se prueban en ese orden) y los TTL de cada token.
+// (PKCS#1 o PKCS#8, se prueban en ese orden), los TTL de cada token y el
+// issuer que lleva el claim `iss` del Access Token.
 //
 // Identity es el único custodio de esta clave: firma acá y en ningún otro
 // lugar. Gateway y el resto de la plataforma reciben solo la Public Key
 // correspondiente, para verificar.
-func New(privateKeyPEM string, accessTTL, refreshTTL time.Duration) (*Generator, error) {
+func New(privateKeyPEM string, accessTTL, refreshTTL time.Duration, issuer string) (*Generator, error) {
 	key, err := parsePrivateKey(privateKeyPEM)
 	if err != nil {
 		return nil, err
@@ -66,8 +70,11 @@ func New(privateKeyPEM string, accessTTL, refreshTTL time.Duration) (*Generator,
 	if refreshTTL <= 0 {
 		return nil, errors.New("token: REFRESH_TOKEN_TTL_DAYS debe ser positivo")
 	}
+	if issuer == "" {
+		return nil, errors.New("token: JWT_ISSUER es obligatorio")
+	}
 
-	return &Generator{privateKey: key, accessTTL: accessTTL, refreshTTL: refreshTTL}, nil
+	return &Generator{privateKey: key, accessTTL: accessTTL, refreshTTL: refreshTTL, issuer: issuer}, nil
 }
 
 // parsePrivateKey prueba PKCS#1 y, si no matchea, PKCS#8: son los dos
@@ -118,18 +125,23 @@ func mustMarshalHeader() []byte {
 // accessClaims son los únicos claims del Access Token. Deliberadamente no
 // lleva nada más: ni DNI, ni email, ni el Blind Index. Sub es el UUID interno
 // del usuario, el único identificador transversal que el resto de la
-// plataforma puede usar sin comprometer PII.
+// plataforma puede usar sin comprometer PII. Iss es el nombre de este
+// servicio, que Kong exige para mapear el token al Consumer correcto antes de
+// validar la firma.
 type accessClaims struct {
+	Iss string `json:"iss"`
 	Sub string `json:"sub"`
 	Iat int64  `json:"iat"`
 	Exp int64  `json:"exp"`
 }
 
 // NewAccessToken firma un JWT RS256 con TTL accessTTL. El claim `sub` es
-// userID en su representación canónica de UUID.
+// userID en su representación canónica de UUID; `iss` es el issuer fijado en
+// New.
 func (g *Generator) NewAccessToken(userID uuid.UUID) (string, error) {
 	now := time.Now().UTC()
 	claims := accessClaims{
+		Iss: g.issuer,
 		Sub: userID.String(),
 		Iat: now.Unix(),
 		Exp: now.Add(g.accessTTL).Unix(),
