@@ -92,6 +92,11 @@ type PostgresConfig struct {
 	ConnMaxLifetime time.Duration
 	ConnMaxIdleTime time.Duration
 	LogSQL          bool
+	// EphemeralDB borra y recrea el esquema `public` en cada arranque, antes
+	// de AutoMigrate, para que un despliegue efímero de pruebas E2E siempre
+	// levante con una base vacía. Es destructivo por diseño: nunca admisible
+	// con APP_ENV=production (ver (*Config).validate()).
+	EphemeralDB bool
 }
 
 // DSN arma la cadena de conexión.
@@ -231,6 +236,7 @@ func Load() (*Config, error) {
 			ConnMaxLifetime: r.duration("POSTGRES_CONN_MAX_LIFETIME", defaultConnMaxLifetime),
 			ConnMaxIdleTime: r.duration("POSTGRES_CONN_MAX_IDLE_TIME", defaultConnMaxIdleTime),
 			LogSQL:          r.boolean("POSTGRES_LOG_SQL", false),
+			EphemeralDB:     r.boolean("EPHEMERAL_DB", false),
 		},
 
 		Crypto: CryptoConfig{
@@ -319,6 +325,13 @@ func (c *Config) validate() error {
 	if c.IsProduction() && c.Postgres.LogSQL {
 		r.fail("config: POSTGRES_LOG_SQL registraría el DNI cifrado y el hash de contraseña; no es admisible en producción")
 	}
+	if c.IsProduction() && c.Postgres.EphemeralDB {
+		// No es un descuido a documentar: EPHEMERAL_DB borra el esquema entero
+		// en cada arranque. Pensado para levantar despliegues efímeros de
+		// pruebas E2E con una base siempre limpia, jamás para un entorno con
+		// datos reales.
+		r.fail("config: EPHEMERAL_DB=true borraría el esquema completo en cada arranque; no es admisible con APP_ENV=production")
+	}
 
 	if c.Crypto.Argon2MemoryKiB < 19*1024 {
 		r.fail("config: ARGON2_MEMORY_KIB debe ser al menos 19456")
@@ -382,6 +395,7 @@ func (c *Config) LogValue() slog.Value {
 		slog.Int("postgres_port", c.Postgres.Port),
 		slog.String("postgres_db", c.Postgres.Database),
 		slog.String("postgres_sslmode", c.Postgres.SSLMode),
+		slog.Bool("postgres_ephemeral_db", c.Postgres.EphemeralDB),
 		slog.Bool("events_enabled", c.Events.Enabled),
 		slog.String("events_exchange", c.Events.Exchange),
 		slog.Int("argon2_memory_kib", c.Crypto.Argon2MemoryKiB),

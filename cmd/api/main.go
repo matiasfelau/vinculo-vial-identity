@@ -76,6 +76,7 @@ func run() error {
 		ConnMaxLifetime: cfg.Postgres.ConnMaxLifetime,
 		ConnMaxIdleTime: cfg.Postgres.ConnMaxIdleTime,
 		LogSQL:          cfg.Postgres.LogSQL,
+		EphemeralDB:     cfg.Postgres.EphemeralDB,
 	})
 	if err != nil {
 		return err

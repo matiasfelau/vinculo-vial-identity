@@ -45,7 +45,7 @@ func aplicar(t *testing.T, env map[string]string) {
 		"APP_ENV", "LOG_LEVEL", "HTTP_PORT", "HTTP_DEBUG", "HTTP_MAX_BODY_BYTES",
 		"HTTP_INTERNAL_PORT", "INTERNAL_SERVICE_TOKEN",
 		"POSTGRES_HOST", "POSTGRES_PORT", "POSTGRES_USER", "POSTGRES_PASSWORD",
-		"POSTGRES_DB", "POSTGRES_SSLMODE", "POSTGRES_LOG_SQL",
+		"POSTGRES_DB", "POSTGRES_SSLMODE", "POSTGRES_LOG_SQL", "EPHEMERAL_DB",
 		"POSTGRES_MAX_OPEN_CONNS", "POSTGRES_MAX_IDLE_CONNS",
 		"IDENTITY_HPKE_PRIVATE_KEY", "IDENTITY_HPKE_INFO", "AES_KEY", "HMAC_SECRET",
 		"JWT_PRIVATE_KEY", "ACCESS_TOKEN_TTL_MINUTES", "REFRESH_TOKEN_TTL_DAYS",
@@ -312,6 +312,7 @@ func TestProduccionRechazaConfiguracionesInseguras(t *testing.T) {
 		"tráfico a la base en claro": {"POSTGRES_SSLMODE": "disable"},
 		"log de SQL encendido":       {"POSTGRES_SSLMODE": "require", "POSTGRES_LOG_SQL": "true"},
 		"eventos descartados":        {"POSTGRES_SSLMODE": "require", "RABBITMQ_ENABLED": "false"},
+		"base efímera":               {"POSTGRES_SSLMODE": "require", "EPHEMERAL_DB": "true"},
 	}
 
 	for name, override := range cases {
@@ -329,6 +330,37 @@ func TestProduccionRechazaConfiguracionesInseguras(t *testing.T) {
 				t.Errorf("se esperaba que %q fuera rechazado en producción", name)
 			}
 		})
+	}
+}
+
+// EPHEMERAL_DB borra el esquema completo en cada arranque: por defecto tiene
+// que estar apagado, para que un .env sin esa variable nunca arranque en modo
+// destructivo por accidente.
+func TestLoadEphemeralDBApagadaPorDefecto(t *testing.T) {
+	aplicar(t, entornoMinimo())
+
+	cfg, err := config.Load()
+	if err != nil {
+		t.Fatalf("error inesperado: %v", err)
+	}
+	if cfg.Postgres.EphemeralDB {
+		t.Error("EphemeralDB debería ser false por defecto")
+	}
+}
+
+// Fuera de producción, EPHEMERAL_DB=true es exactamente el caso de uso que
+// pide (despliegues efímeros de pruebas E2E) y tiene que aceptarse.
+func TestLoadEphemeralDBSeAceptaFueraDeProduccion(t *testing.T) {
+	env := entornoMinimo()
+	env["EPHEMERAL_DB"] = "true"
+	aplicar(t, env)
+
+	cfg, err := config.Load()
+	if err != nil {
+		t.Fatalf("error inesperado: %v", err)
+	}
+	if !cfg.Postgres.EphemeralDB {
+		t.Error("EphemeralDB debería ser true")
 	}
 }
 
