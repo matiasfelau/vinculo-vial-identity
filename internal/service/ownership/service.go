@@ -70,7 +70,7 @@ func New(d Deps) (*Service, error) {
 //
 // El DNI en claro existe únicamente durante esta función, como []byte, y se
 // limpia con defer antes de volver, tanto si la verificación falla como si
-// termina en éxito (Zero-Retention, ver CLAUDE.md). Nunca se convierte a
+// termina en éxito (Zero-Retention). Nunca se convierte a
 // string ni se loguea.
 func (s *Service) VerifyOwnership(ctx context.Context, ownerID uuid.UUID, cryptogram []byte) (match bool, err error) {
 	plaintext, err := s.deps.Decryptor.DecryptCombined(cryptogram)
@@ -100,8 +100,8 @@ func (s *Service) VerifyOwnership(ctx context.Context, ownerID uuid.UUID, crypto
 }
 
 // logResult deja constancia de cada verificación, exista o no coincidencia:
-// es el endpoint que CLAUDE.md señala como un oráculo potencial de fuerza
-// bruta sobre el DNI, y un registro por owner_id (nunca por DNI ni por el
+// este endpoint es un oráculo potencial de fuerza bruta sobre el DNI, y un
+// registro por owner_id (nunca por DNI ni por el
 // motivo de un false) es lo que permite detectar un volumen de consultas
 // anómalo desde el lado de Identity.
 func (s *Service) logResult(ctx context.Context, ownerID uuid.UUID, match bool) {

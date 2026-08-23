@@ -244,8 +244,8 @@ func TestNewValidaLasDependencias(t *testing.T) {
 
 // El registro deja constancia de toda verificación —con y sin match— por
 // owner_id: es la señal que permite detectar un volumen anómalo de consultas
-// sobre este endpoint, que CLAUDE.md señala como un oráculo potencial de
-// fuerza bruta. El DNI en claro nunca debe aparecer en el log.
+// sobre este endpoint, que es un oráculo potencial de fuerza bruta. El DNI
+// en claro nunca debe aparecer en el log.
 func TestVerifyOwnershipRegistraElResultadoSinFiltrarElDNI(t *testing.T) {
 	ownerID := uuid.New()
 	h := newHarness(ownerID)

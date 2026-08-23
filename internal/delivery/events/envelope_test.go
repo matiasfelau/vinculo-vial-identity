@@ -1,6 +1,6 @@
 // Tests internos: ejercitan el armado del sobre y la configuración, que es la
 // lógica propia del paquete. La conversación AMQP queda fuera de los tests
-// unitarios, según lo acordado en CLAUDE.md.
+// unitarios: requiere un broker real.
 package events
 
 import (

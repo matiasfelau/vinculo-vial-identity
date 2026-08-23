@@ -123,7 +123,7 @@ func requireServiceToken(token string, logger *slog.Logger) gin.HandlerFunc {
 		if len(got) != len(want) || subtle.ConstantTimeCompare(got, want) != 1 {
 			logger.WarnContext(c.Request.Context(), "petición a una ruta interna sin secreto de servicio válido",
 				slog.String("request_id", requestIDOf(c)),
-				slog.String("path", c.Request.URL.Path),
+				slog.String("path", requestPath(c)),
 			)
 			c.AbortWithStatusJSON(http.StatusUnauthorized, errorResponse{
 				Code:      codeUnauthorizedService,
