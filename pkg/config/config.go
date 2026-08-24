@@ -34,6 +34,7 @@ type Config struct {
 	LogLevel slog.Level
 
 	HTTP     HTTPConfig
+	Internal InternalConfig
 	Postgres PostgresConfig
 	Crypto   CryptoConfig
 	Events   EventsConfig
@@ -58,6 +59,25 @@ type HTTPConfig struct {
 // Addr es la dirección de escucha.
 func (c HTTPConfig) Addr() string { return fmt.Sprintf(":%d", c.Port) }
 
+// InternalConfig son los parámetros del router interno de US-04 (rutas
+// /internal/*, como POST /internal/verify-ownership). Se sirve en un
+// *http.Server separado del público, en su propio puerto, que ni Kong ni el
+// docker-compose de este servicio publican fuera de la red interna.
+//
+// Esa separación de puerto es una condición necesaria pero no suficiente:
+// dentro de la red Docker cualquier contenedor puede alcanzar cualquier
+// puerto de otro. ServiceToken es la segunda capa —un secreto compartido de
+// servicio a servicio que vinculo-vial-vehicle debe presentar en cada
+// petición— y las dos capas son independientes entre sí (ver el comentario
+// de InternalRouterConfig en internal/delivery/http).
+type InternalConfig struct {
+	Port         int
+	ServiceToken Secret
+}
+
+// Addr es la dirección de escucha del router interno.
+func (c InternalConfig) Addr() string { return fmt.Sprintf(":%d", c.Port) }
+
 // PostgresConfig son los parámetros de la base.
 type PostgresConfig struct {
 	Host     string
@@ -72,6 +92,11 @@ type PostgresConfig struct {
 	ConnMaxLifetime time.Duration
 	ConnMaxIdleTime time.Duration
 	LogSQL          bool
+	// EphemeralDB borra y recrea el esquema `public` en cada arranque, antes
+	// de AutoMigrate, para que un despliegue efímero de pruebas E2E siempre
+	// levante con una base vacía. Es destructivo por diseño: nunca admisible
+	// con APP_ENV=production (ver (*Config).validate()).
+	EphemeralDB bool
 }
 
 // DSN arma la cadena de conexión.
@@ -116,7 +141,8 @@ type CryptoConfig struct {
 	Argon2Parallelism int
 }
 
-// TokenConfig son los TTL de los tokens de sesión que emite el login (US-02).
+// TokenConfig son los parámetros de los tokens de sesión que emite el login
+// (US-02).
 type TokenConfig struct {
 	// AccessTokenTTL es la vida del JWT de acceso. El contrato compartido fija
 	// la variable en minutos (ACCESS_TOKEN_TTL_MINUTES), no como duración de Go.
@@ -124,6 +150,9 @@ type TokenConfig struct {
 	// RefreshTokenTTL es la vida del Refresh Token opaco. El contrato compartido
 	// fija la variable en días (REFRESH_TOKEN_TTL_DAYS).
 	RefreshTokenTTL time.Duration
+	// Issuer es el claim `iss` que lleva el Access Token. Kong lo exige para
+	// mapear el token al Consumer correcto antes de validar la firma RS256.
+	Issuer string
 }
 
 // EventsConfig son los parámetros del broker.
@@ -141,7 +170,13 @@ type EventsConfig struct {
 // Valores por defecto pensados para que el entorno local levante sin definir
 // más que los secretos.
 const (
-	defaultHTTPPort        = 8080
+	defaultHTTPPort     = 8080
+	defaultInternalPort = 8081
+	// minServiceTokenLength es el piso de entropía admitido para
+	// INTERNAL_SERVICE_TOKEN: es un secreto compartido comparado byte a byte
+	// (no una contraseña con Argon2 detrás), así que su propia longitud es
+	// toda la defensa contra que alguien lo adivine.
+	minServiceTokenLength  = 32
 	defaultReadTimeout     = 10 * time.Second
 	defaultWriteTimeout    = 15 * time.Second
 	defaultIdleTimeout     = 60 * time.Second
@@ -170,6 +205,9 @@ const (
 	// asume estos mismos TTL del lado de la verificación.
 	defaultAccessTokenTTLMinutes = 15
 	defaultRefreshTokenTTLDays   = 30
+	// defaultJWTIssuer es el nombre de este servicio en el claim `iss`, el que
+	// Kong espera cuando no se sobrescribe con JWT_ISSUER.
+	defaultJWTIssuer = "vinculo-vial-identity"
 )
 
 // Load lee la configuración del entorno y la valida.
@@ -188,6 +226,11 @@ func Load() (*Config, error) {
 			MaxBodyBytes:    int64(r.integer("HTTP_MAX_BODY_BYTES", defaultMaxBodyBytes)),
 		},
 
+		Internal: InternalConfig{
+			Port:         r.integer("HTTP_INTERNAL_PORT", defaultInternalPort),
+			ServiceToken: Secret(r.required("INTERNAL_SERVICE_TOKEN")),
+		},
+
 		Postgres: PostgresConfig{
 			Host:            r.str("POSTGRES_HOST", "localhost"),
 			Port:            r.integer("POSTGRES_PORT", 5432),
@@ -200,6 +243,7 @@ func Load() (*Config, error) {
 			ConnMaxLifetime: r.duration("POSTGRES_CONN_MAX_LIFETIME", defaultConnMaxLifetime),
 			ConnMaxIdleTime: r.duration("POSTGRES_CONN_MAX_IDLE_TIME", defaultConnMaxIdleTime),
 			LogSQL:          r.boolean("POSTGRES_LOG_SQL", false),
+			EphemeralDB:     r.boolean("EPHEMERAL_DB", false),
 		},
 
 		Crypto: CryptoConfig{
@@ -224,6 +268,7 @@ func Load() (*Config, error) {
 		Token: TokenConfig{
 			AccessTokenTTL:  time.Duration(r.integer("ACCESS_TOKEN_TTL_MINUTES", defaultAccessTokenTTLMinutes)) * time.Minute,
 			RefreshTokenTTL: time.Duration(r.integer("REFRESH_TOKEN_TTL_DAYS", defaultRefreshTokenTTLDays)) * 24 * time.Hour,
+			Issuer:          r.str("JWT_ISSUER", defaultJWTIssuer),
 		},
 	}
 
@@ -245,6 +290,18 @@ func (c *Config) validate() error {
 
 	if c.HTTP.Port < 1 || c.HTTP.Port > 65535 {
 		r.fail("config: HTTP_PORT fuera de rango: %d", c.HTTP.Port)
+	}
+	if c.Internal.Port < 1 || c.Internal.Port > 65535 {
+		r.fail("config: HTTP_INTERNAL_PORT fuera de rango: %d", c.Internal.Port)
+	}
+	if c.HTTP.Port == c.Internal.Port {
+		// No es solo una advertencia: dos *http.Server no pueden escuchar el
+		// mismo puerto, y si pudieran, dejaría de existir el aislamiento que
+		// esta variable existe para garantizar.
+		r.fail("config: HTTP_INTERNAL_PORT no puede coincidir con HTTP_PORT (%d): el router interno perdería su puerto propio", c.HTTP.Port)
+	}
+	if len(c.Internal.ServiceToken.Reveal()) < minServiceTokenLength {
+		r.fail("config: INTERNAL_SERVICE_TOKEN debe tener al menos %d caracteres", minServiceTokenLength)
 	}
 	if c.HTTP.MaxBodyBytes <= 0 {
 		r.fail("config: HTTP_MAX_BODY_BYTES debe ser positivo")
@@ -275,6 +332,13 @@ func (c *Config) validate() error {
 	}
 	if c.IsProduction() && c.Postgres.LogSQL {
 		r.fail("config: POSTGRES_LOG_SQL registraría el DNI cifrado y el hash de contraseña; no es admisible en producción")
+	}
+	if c.IsProduction() && c.Postgres.EphemeralDB {
+		// No es un descuido a documentar: EPHEMERAL_DB borra el esquema entero
+		// en cada arranque. Pensado para levantar despliegues efímeros de
+		// pruebas E2E con una base siempre limpia, jamás para un entorno con
+		// datos reales.
+		r.fail("config: EPHEMERAL_DB=true borraría el esquema completo en cada arranque; no es admisible con APP_ENV=production")
 	}
 
 	if c.Crypto.Argon2MemoryKiB < 19*1024 {
@@ -334,15 +398,18 @@ func (c *Config) LogValue() slog.Value {
 		slog.String("log_level", c.LogLevel.String()),
 		slog.Int("http_port", c.HTTP.Port),
 		slog.Bool("http_debug", c.HTTP.Debug),
+		slog.Int("internal_port", c.Internal.Port),
 		slog.String("postgres_host", c.Postgres.Host),
 		slog.Int("postgres_port", c.Postgres.Port),
 		slog.String("postgres_db", c.Postgres.Database),
 		slog.String("postgres_sslmode", c.Postgres.SSLMode),
+		slog.Bool("postgres_ephemeral_db", c.Postgres.EphemeralDB),
 		slog.Bool("events_enabled", c.Events.Enabled),
 		slog.String("events_exchange", c.Events.Exchange),
 		slog.Int("argon2_memory_kib", c.Crypto.Argon2MemoryKiB),
 		slog.Duration("access_token_ttl", c.Token.AccessTokenTTL),
 		slog.Duration("refresh_token_ttl", c.Token.RefreshTokenTTL),
+		slog.String("jwt_issuer", c.Token.Issuer),
 	)
 }
 

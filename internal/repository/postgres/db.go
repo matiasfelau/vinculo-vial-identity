@@ -30,6 +30,11 @@ type Config struct {
 	// las sentencias llevan los parámetros interpolados, incluidos el hash de
 	// contraseña y el DNI cifrado, que no deben terminar en un agregador de logs.
 	LogSQL bool
+	// EphemeralDB borra y recrea el esquema `public` antes de AutoMigrate, para
+	// que un despliegue efímero de pruebas E2E siempre arranque con una base
+	// vacía. pkg/config ya impide que llegue en true con APP_ENV=production;
+	// Open no vuelve a chequear el entorno, solo ejecuta lo que se le pide.
+	EphemeralDB bool
 }
 
 // Open abre la conexión, ajusta el pool y verifica que la base responda.
@@ -67,6 +72,15 @@ func Open(ctx context.Context, cfg Config) (*gorm.DB, error) {
 	if err := sqlDB.PingContext(ctx); err != nil {
 		_ = sqlDB.Close()
 		return nil, fmt.Errorf("postgres: la base no responde: %w", sanitizeDSN(err, cfg.DSN))
+	}
+
+	// Antes de AutoMigrate: si se recreara el esquema después, borraría las
+	// tablas que AutoMigrate acaba de crear en la misma corrida.
+	if cfg.EphemeralDB {
+		if err := db.WithContext(ctx).Exec("DROP SCHEMA public CASCADE; CREATE SCHEMA public;").Error; err != nil {
+			_ = sqlDB.Close()
+			return nil, fmt.Errorf("postgres: no se pudo recrear el esquema efímero: %w", sanitizeDSN(err, cfg.DSN))
+		}
 	}
 
 	return db, nil

@@ -4,6 +4,8 @@ import (
 	"context"
 	"sync"
 
+	"github.com/google/uuid"
+
 	"github.com/matiasfelau/vinculo-vial-identity/internal/domain"
 )
 
@@ -31,6 +33,13 @@ func (m *decryptorMock) Decrypt(ephemeralPublicKey, ciphertext []byte) ([]byte, 
 	out := make([]byte, len(m.plaintext))
 	copy(out, m.plaintext)
 	return out, nil
+}
+
+// DecryptCombined no lo ejercita ningún test de signup: es parte de
+// domain.HPKEDecryptor solo porque /internal/verify-ownership (US-04) lo
+// necesita sobre el mismo descifrador.
+func (m *decryptorMock) DecryptCombined([]byte) ([]byte, error) {
+	panic("signup: DecryptCombined no se usa en el alta")
 }
 
 type indexerMock struct {
@@ -148,6 +157,13 @@ func (m *repositoryMock) Create(_ context.Context, u *domain.User) error {
 // corresponde.
 func (m *repositoryMock) FindByDNIHashed(context.Context, string) (*domain.User, error) {
 	panic("signup: FindByDNIHashed no se usa en el alta")
+}
+
+// FindByOwnerAndDNIHash tampoco lo ejercita ningún test de signup: es parte
+// de domain.UserRepository solo porque /internal/verify-ownership (US-04) lo
+// necesita sobre el mismo repositorio.
+func (m *repositoryMock) FindByOwnerAndDNIHash(context.Context, uuid.UUID, string) (*domain.User, error) {
+	panic("signup: FindByOwnerAndDNIHash no se usa en el alta")
 }
 
 func (m *repositoryMock) last() domain.User {

@@ -25,6 +25,7 @@ func entornoMinimo() map[string]string {
 		"AES_KEY":                   clave,
 		"HMAC_SECRET":               clave,
 		"JWT_PRIVATE_KEY":           clavePEMDePrueba,
+		"INTERNAL_SERVICE_TOKEN":    strings.Repeat("a", 32),
 	}
 }
 
@@ -42,11 +43,12 @@ func aplicar(t *testing.T, env map[string]string) {
 	// Setenv restaura el valor previo al terminar el test.
 	for _, k := range []string{
 		"APP_ENV", "LOG_LEVEL", "HTTP_PORT", "HTTP_DEBUG", "HTTP_MAX_BODY_BYTES",
+		"HTTP_INTERNAL_PORT", "INTERNAL_SERVICE_TOKEN",
 		"POSTGRES_HOST", "POSTGRES_PORT", "POSTGRES_USER", "POSTGRES_PASSWORD",
-		"POSTGRES_DB", "POSTGRES_SSLMODE", "POSTGRES_LOG_SQL",
+		"POSTGRES_DB", "POSTGRES_SSLMODE", "POSTGRES_LOG_SQL", "EPHEMERAL_DB",
 		"POSTGRES_MAX_OPEN_CONNS", "POSTGRES_MAX_IDLE_CONNS",
 		"IDENTITY_HPKE_PRIVATE_KEY", "IDENTITY_HPKE_INFO", "AES_KEY", "HMAC_SECRET",
-		"JWT_PRIVATE_KEY", "ACCESS_TOKEN_TTL_MINUTES", "REFRESH_TOKEN_TTL_DAYS",
+		"JWT_PRIVATE_KEY", "JWT_ISSUER", "ACCESS_TOKEN_TTL_MINUTES", "REFRESH_TOKEN_TTL_DAYS",
 		"ARGON2_MEMORY_KIB", "ARGON2_ITERATIONS", "ARGON2_PARALLELISM",
 		"RABBITMQ_ENABLED", "RABBITMQ_URL", "RABBITMQ_EXCHANGE",
 	} {
@@ -120,9 +122,9 @@ func TestLoadDesescapaLosSaltosDeLineaDeLaClaveJWT(t *testing.T) {
 
 func TestLoadRechazaTTLNoPositivos(t *testing.T) {
 	cases := map[string]map[string]string{
-		"access token ttl cero":     {"ACCESS_TOKEN_TTL_MINUTES": "0"},
-		"access token ttl negativo": {"ACCESS_TOKEN_TTL_MINUTES": "-1"},
-		"refresh token ttl cero":    {"REFRESH_TOKEN_TTL_DAYS": "0"},
+		"access token ttl cero":      {"ACCESS_TOKEN_TTL_MINUTES": "0"},
+		"access token ttl negativo":  {"ACCESS_TOKEN_TTL_MINUTES": "-1"},
+		"refresh token ttl cero":     {"REFRESH_TOKEN_TTL_DAYS": "0"},
 		"refresh token ttl negativo": {"REFRESH_TOKEN_TTL_DAYS": "-1"},
 	}
 
@@ -138,6 +140,34 @@ func TestLoadRechazaTTLNoPositivos(t *testing.T) {
 				t.Error("se esperaba un error de configuración")
 			}
 		})
+	}
+}
+
+// Kong exige el claim `iss` para mapear el token al Consumer correcto: sin un
+// default, un .env sin JWT_ISSUER emitiría tokens que el gateway rechaza.
+func TestLoadUsaElIssuerPorDefecto(t *testing.T) {
+	aplicar(t, entornoMinimo())
+
+	cfg, err := config.Load()
+	if err != nil {
+		t.Fatalf("error inesperado: %v", err)
+	}
+	if cfg.Token.Issuer != "vinculo-vial-identity" {
+		t.Errorf("issuer = %q, se esperaba %q", cfg.Token.Issuer, "vinculo-vial-identity")
+	}
+}
+
+func TestLoadAceptaUnIssuerPersonalizado(t *testing.T) {
+	env := entornoMinimo()
+	env["JWT_ISSUER"] = "otro-issuer"
+	aplicar(t, env)
+
+	cfg, err := config.Load()
+	if err != nil {
+		t.Fatalf("error inesperado: %v", err)
+	}
+	if cfg.Token.Issuer != "otro-issuer" {
+		t.Errorf("issuer = %q, se esperaba %q", cfg.Token.Issuer, "otro-issuer")
 	}
 }
 
@@ -163,6 +193,7 @@ func TestLoadExigeLosSecretos(t *testing.T) {
 	obligatorias := []string{
 		"POSTGRES_USER", "POSTGRES_PASSWORD", "POSTGRES_DB",
 		"IDENTITY_HPKE_PRIVATE_KEY", "AES_KEY", "HMAC_SECRET", "JWT_PRIVATE_KEY",
+		"INTERNAL_SERVICE_TOKEN",
 	}
 
 	for _, faltante := range obligatorias {
@@ -192,7 +223,7 @@ func TestLoadAcumulaLosErrores(t *testing.T) {
 		t.Fatal("se esperaba un error")
 	}
 
-	for _, faltante := range []string{"POSTGRES_USER", "IDENTITY_HPKE_PRIVATE_KEY", "AES_KEY", "HMAC_SECRET", "JWT_PRIVATE_KEY"} {
+	for _, faltante := range []string{"POSTGRES_USER", "IDENTITY_HPKE_PRIVATE_KEY", "AES_KEY", "HMAC_SECRET", "JWT_PRIVATE_KEY", "INTERNAL_SERVICE_TOKEN"} {
 		if !strings.Contains(err.Error(), faltante) {
 			t.Errorf("el error debería mencionar %s: %v", faltante, err)
 		}
@@ -201,14 +232,15 @@ func TestLoadAcumulaLosErrores(t *testing.T) {
 
 func TestLoadRechazaValoresMalFormados(t *testing.T) {
 	cases := map[string]map[string]string{
-		"puerto no numérico":      {"HTTP_PORT": "ocho-mil"},
-		"puerto fuera de rango":   {"HTTP_PORT": "70000"},
-		"duración inválida":       {"HTTP_READ_TIMEOUT": "diez segundos"},
-		"booleano inválido":       {"RABBITMQ_ENABLED": "quizás"},
-		"nivel de log inválido":   {"LOG_LEVEL": "verboso"},
-		"memoria Argon2 baja":     {"ARGON2_MEMORY_KIB": "1024"},
-		"iteraciones Argon2 cero": {"ARGON2_ITERATIONS": "0"},
-		"pool ocioso mayor":       {"POSTGRES_MAX_OPEN_CONNS": "5", "POSTGRES_MAX_IDLE_CONNS": "10"},
+		"puerto no numérico":            {"HTTP_PORT": "ocho-mil"},
+		"puerto fuera de rango":         {"HTTP_PORT": "70000"},
+		"puerto interno fuera de rango": {"HTTP_INTERNAL_PORT": "70000"},
+		"duración inválida":             {"HTTP_READ_TIMEOUT": "diez segundos"},
+		"booleano inválido":             {"RABBITMQ_ENABLED": "quizás"},
+		"nivel de log inválido":         {"LOG_LEVEL": "verboso"},
+		"memoria Argon2 baja":           {"ARGON2_MEMORY_KIB": "1024"},
+		"iteraciones Argon2 cero":       {"ARGON2_ITERATIONS": "0"},
+		"pool ocioso mayor":             {"POSTGRES_MAX_OPEN_CONNS": "5", "POSTGRES_MAX_IDLE_CONNS": "10"},
 		// El valor real que causó el incidente: el default de antes de la
 		// selfie, olvidado en un .env que nunca se sincronizó con .env.example.
 		"tope de body demasiado bajo para una selfie": {"HTTP_MAX_BODY_BYTES": "8192"},
@@ -226,6 +258,56 @@ func TestLoadRechazaValoresMalFormados(t *testing.T) {
 				t.Error("se esperaba un error de configuración")
 			}
 		})
+	}
+}
+
+// El router interno de US-04 pierde su aislamiento de puerto si comparte el
+// mismo número que el público: dos *http.Server no pueden escuchar el mismo
+// puerto, y si pudieran, ya no habría separación que defender.
+func TestLoadRechazaElPuertoInternoIgualAlPublico(t *testing.T) {
+	env := entornoMinimo()
+	env["HTTP_PORT"] = "9000"
+	env["HTTP_INTERNAL_PORT"] = "9000"
+	aplicar(t, env)
+
+	_, err := config.Load()
+	if err == nil {
+		t.Fatal("se esperaba un error de configuración")
+	}
+	if !strings.Contains(err.Error(), "HTTP_INTERNAL_PORT") {
+		t.Errorf("el error debería nombrar la variable: %v", err)
+	}
+}
+
+// INTERNAL_SERVICE_TOKEN es un secreto comparado byte a byte, sin ningún
+// derivador de clave (Argon2) que compense un valor corto: su propia
+// longitud es la única defensa contra que alguien lo adivine.
+func TestLoadRechazaElSecretoDeServicioDemasiadoCorto(t *testing.T) {
+	env := entornoMinimo()
+	env["INTERNAL_SERVICE_TOKEN"] = strings.Repeat("a", 31)
+	aplicar(t, env)
+
+	_, err := config.Load()
+	if err == nil {
+		t.Fatal("se esperaba un error de configuración")
+	}
+	if !strings.Contains(err.Error(), "INTERNAL_SERVICE_TOKEN") {
+		t.Errorf("el error debería nombrar la variable: %v", err)
+	}
+}
+
+func TestLoadUsaElPuertoInternoPorDefecto(t *testing.T) {
+	aplicar(t, entornoMinimo())
+
+	cfg, err := config.Load()
+	if err != nil {
+		t.Fatalf("error inesperado: %v", err)
+	}
+	if cfg.Internal.Port != 8081 {
+		t.Errorf("puerto interno = %d, se esperaba 8081", cfg.Internal.Port)
+	}
+	if cfg.Internal.Addr() != ":8081" {
+		t.Errorf("addr = %q, se esperaba \":8081\"", cfg.Internal.Addr())
 	}
 }
 
@@ -258,6 +340,7 @@ func TestProduccionRechazaConfiguracionesInseguras(t *testing.T) {
 		"tráfico a la base en claro": {"POSTGRES_SSLMODE": "disable"},
 		"log de SQL encendido":       {"POSTGRES_SSLMODE": "require", "POSTGRES_LOG_SQL": "true"},
 		"eventos descartados":        {"POSTGRES_SSLMODE": "require", "RABBITMQ_ENABLED": "false"},
+		"base efímera":               {"POSTGRES_SSLMODE": "require", "EPHEMERAL_DB": "true"},
 	}
 
 	for name, override := range cases {
@@ -275,6 +358,37 @@ func TestProduccionRechazaConfiguracionesInseguras(t *testing.T) {
 				t.Errorf("se esperaba que %q fuera rechazado en producción", name)
 			}
 		})
+	}
+}
+
+// EPHEMERAL_DB borra el esquema completo en cada arranque: por defecto tiene
+// que estar apagado, para que un .env sin esa variable nunca arranque en modo
+// destructivo por accidente.
+func TestLoadEphemeralDBApagadaPorDefecto(t *testing.T) {
+	aplicar(t, entornoMinimo())
+
+	cfg, err := config.Load()
+	if err != nil {
+		t.Fatalf("error inesperado: %v", err)
+	}
+	if cfg.Postgres.EphemeralDB {
+		t.Error("EphemeralDB debería ser false por defecto")
+	}
+}
+
+// Fuera de producción, EPHEMERAL_DB=true es exactamente el caso de uso que
+// pide (despliegues efímeros de pruebas E2E) y tiene que aceptarse.
+func TestLoadEphemeralDBSeAceptaFueraDeProduccion(t *testing.T) {
+	env := entornoMinimo()
+	env["EPHEMERAL_DB"] = "true"
+	aplicar(t, env)
+
+	cfg, err := config.Load()
+	if err != nil {
+		t.Fatalf("error inesperado: %v", err)
+	}
+	if !cfg.Postgres.EphemeralDB {
+		t.Error("EphemeralDB debería ser true")
 	}
 }
 

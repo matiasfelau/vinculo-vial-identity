@@ -24,6 +24,17 @@ type UserRepository interface {
 	// se persiste. Debe devolver ErrUserNotFound (envuelto o no) cuando ningún
 	// usuario tiene ese índice.
 	FindByDNIHashed(ctx context.Context, dniHashed string) (*User, error)
+
+	// FindByOwnerAndDNIHash busca el usuario cuyo id es ownerID Y cuyo Blind
+	// Index de DNI es dniHashed. La usa /internal/verify-ownership (US-04)
+	// para confirmar que el DNI del QR corresponde al dueño de la sesión
+	// activa, sin decir nunca cuál de las dos condiciones falló: que el
+	// predicado combine ambas con AND en una sola consulta es lo que impide
+	// distinguir "ese owner_id no existe" de "existe, pero ese no es su
+	// DNI" — las dos devuelven, indistinguiblemente, ErrUserNotFound
+	// (envuelto o no). Nunca se usa para autenticar ni para nada que no sea
+	// esa comparación puntual.
+	FindByOwnerAndDNIHash(ctx context.Context, ownerID uuid.UUID, dniHashed string) (*User, error)
 }
 
 // SessionRepository persiste sesiones: el registro de cada Refresh Token
@@ -31,6 +42,40 @@ type UserRepository interface {
 type SessionRepository interface {
 	// Create inserta la sesión nueva.
 	Create(ctx context.Context, s *Session) error
+
+	// FindByHash busca una sesión por el SHA-256 de su Refresh Token. Es el
+	// único criterio de búsqueda de /refresh (US-03): nunca se busca por el
+	// token en claro, que no se persiste. Debe devolver ErrSessionNotFound
+	// (envuelto o no) cuando ninguna sesión tiene ese hash.
+	FindByHash(ctx context.Context, refreshTokenHash string) (*Session, error)
+
+	// RevokeByID marca como revocada una única sesión. La usa la rotación para
+	// revocar la sesión vieja al emitir el par nuevo.
+	RevokeByID(ctx context.Context, id uuid.UUID) error
+
+	// RevokeByHash marca como revocada la sesión cuyo hash de Refresh Token
+	// coincide. Que ninguna fila coincida no es un error: es exactamente lo
+	// que permite que /logout (US-03) responda 200 siempre, exista o no la
+	// sesión, sin que el repositorio tenga que distinguir los casos.
+	RevokeByHash(ctx context.Context, refreshTokenHash string) error
+
+	// RevokeAllByUserID marca como revocadas todas las sesiones de un usuario,
+	// vigentes o no. Es la Defensa Activa de US-03: se dispara al detectar el
+	// reúso de un Refresh Token ya revocado, y asume que toda la familia de
+	// sesiones del usuario puede estar comprometida.
+	RevokeAllByUserID(ctx context.Context, userID uuid.UUID) error
+
+	// RotateSession revoca la sesión vieja e inserta la sesión rotada como una
+	// única operación atómica: si un paso falla, el otro se deshace.
+	//
+	// No es una optimización: un fallo parcial dejaría al usuario sin sesión
+	// válida sosteniendo un Refresh Token que el siguiente intento leería como
+	// reúso, disparando la Defensa Activa sobre una cuenta legítima. Por eso
+	// se modela como una única llamada de la interfaz en lugar de exponer
+	// RevokeByID + Create por separado para este flujo: la atomicidad queda
+	// garantizada por la forma del puerto, no por una convención que el
+	// llamador podría romper sin darse cuenta.
+	RotateSession(ctx context.Context, oldSessionID uuid.UUID, newSession *Session) error
 }
 
 // TokenGenerator emite el par de tokens de una sesión nueva tras un login
@@ -42,6 +87,12 @@ type TokenGenerator interface {
 	// NewRefreshToken genera un token opaco criptográficamente aleatorio, su
 	// SHA-256 —la única forma en que se persiste— y su vencimiento absoluto.
 	NewRefreshToken() (token, hash string, expiresAt time.Time, err error)
+
+	// Hash calcula el SHA-256 en hexadecimal minúscula de un Refresh Token
+	// opaco: la misma cuenta que persiste NewRefreshToken. La usa /refresh
+	// (US-03) para recomputar el hash del token que envía el cliente y
+	// buscarlo en sessions.
+	Hash(refreshToken string) string
 }
 
 // EventPublisher publica eventos de dominio hacia el broker de la plataforma.
@@ -57,6 +108,16 @@ type HPKEDecryptor interface {
 	// RFC 9180) y el ciphertext sellado por el AEAD. El llamador es responsable
 	// de limpiar el buffer devuelto cuando termina de usarlo.
 	Decrypt(ephemeralPublicKey, ciphertext []byte) ([]byte, error)
+
+	// DecryptCombined revierte el mismo sellado HPKE que Decrypt, pero a
+	// partir de un único blob (`enc` seguido del ciphertext) en lugar de las
+	// dos piezas separadas. Es el formato de dni_enc en US-04: a diferencia
+	// de /signup y /signin, el contrato compartido transporta ese campo como
+	// un solo valor —Vehicle lo reenvía sin abrir, tal cual lo produjo la
+	// app—, así que la separación en sus dos piezas ocurre de este lado. El
+	// llamador es responsable de limpiar el buffer devuelto cuando termina
+	// de usarlo.
+	DecryptCombined(cryptogram []byte) ([]byte, error)
 }
 
 // SymmetricCipher cifra datos sensibles para persistirlos (cifrado at-rest).

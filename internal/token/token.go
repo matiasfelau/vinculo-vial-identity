@@ -44,15 +44,19 @@ type Generator struct {
 	privateKey *rsa.PrivateKey
 	accessTTL  time.Duration
 	refreshTTL time.Duration
+	// issuer es el claim `iss` que lleva cada Access Token. Kong lo exige para
+	// mapear el token al Consumer correcto antes de validar la firma RS256.
+	issuer string
 }
 
 // New construye el generador a partir de la clave privada RSA en PEM
-// (PKCS#1 o PKCS#8, se prueban en ese orden) y los TTL de cada token.
+// (PKCS#1 o PKCS#8, se prueban en ese orden), los TTL de cada token y el
+// issuer que lleva el claim `iss` del Access Token.
 //
 // Identity es el único custodio de esta clave: firma acá y en ningún otro
 // lugar. Gateway y el resto de la plataforma reciben solo la Public Key
 // correspondiente, para verificar.
-func New(privateKeyPEM string, accessTTL, refreshTTL time.Duration) (*Generator, error) {
+func New(privateKeyPEM string, accessTTL, refreshTTL time.Duration, issuer string) (*Generator, error) {
 	key, err := parsePrivateKey(privateKeyPEM)
 	if err != nil {
 		return nil, err
@@ -66,8 +70,11 @@ func New(privateKeyPEM string, accessTTL, refreshTTL time.Duration) (*Generator,
 	if refreshTTL <= 0 {
 		return nil, errors.New("token: REFRESH_TOKEN_TTL_DAYS debe ser positivo")
 	}
+	if issuer == "" {
+		return nil, errors.New("token: JWT_ISSUER es obligatorio")
+	}
 
-	return &Generator{privateKey: key, accessTTL: accessTTL, refreshTTL: refreshTTL}, nil
+	return &Generator{privateKey: key, accessTTL: accessTTL, refreshTTL: refreshTTL, issuer: issuer}, nil
 }
 
 // parsePrivateKey prueba PKCS#1 y, si no matchea, PKCS#8: son los dos
@@ -118,18 +125,23 @@ func mustMarshalHeader() []byte {
 // accessClaims son los únicos claims del Access Token. Deliberadamente no
 // lleva nada más: ni DNI, ni email, ni el Blind Index. Sub es el UUID interno
 // del usuario, el único identificador transversal que el resto de la
-// plataforma puede usar sin comprometer PII.
+// plataforma puede usar sin comprometer PII. Iss es el nombre de este
+// servicio, que Kong exige para mapear el token al Consumer correcto antes de
+// validar la firma.
 type accessClaims struct {
+	Iss string `json:"iss"`
 	Sub string `json:"sub"`
 	Iat int64  `json:"iat"`
 	Exp int64  `json:"exp"`
 }
 
 // NewAccessToken firma un JWT RS256 con TTL accessTTL. El claim `sub` es
-// userID en su representación canónica de UUID.
+// userID en su representación canónica de UUID; `iss` es el issuer fijado en
+// New.
 func (g *Generator) NewAccessToken(userID uuid.UUID) (string, error) {
 	now := time.Now().UTC()
 	claims := accessClaims{
+		Iss: g.issuer,
 		Sub: userID.String(),
 		Iat: now.Unix(),
 		Exp: now.Add(g.accessTTL).Unix(),
@@ -155,11 +167,6 @@ func (g *Generator) NewAccessToken(userID uuid.UUID) (string, error) {
 // entropía, codificado en base64 URL-safe sin relleno, junto con su SHA-256 en
 // hexadecimal minúscula —la representación que exige refresh_token_hash— y su
 // vencimiento absoluto.
-//
-// El hash se calcula sobre la representación textual del token, no sobre los
-// bytes crudos: es exactamente lo que US-03 vuelve a calcular al recibir el
-// token de vuelta del cliente, y las dos cuentas tienen que coincidir byte a
-// byte.
 func (g *Generator) NewRefreshToken() (token, hash string, expiresAt time.Time, err error) {
 	raw := make([]byte, RefreshTokenBytes)
 	if _, err := rand.Read(raw); err != nil {
@@ -167,9 +174,23 @@ func (g *Generator) NewRefreshToken() (token, hash string, expiresAt time.Time, 
 	}
 
 	token = base64.RawURLEncoding.EncodeToString(raw)
-	sum := sha256.Sum256([]byte(token))
+	return token, Hash(token), time.Now().UTC().Add(g.refreshTTL), nil
+}
 
-	return token, hex.EncodeToString(sum[:]), time.Now().UTC().Add(g.refreshTTL), nil
+// Hash calcula el SHA-256 en hexadecimal minúscula de un Refresh Token opaco.
+// NewRefreshToken usa esta misma función para derivar el hash que persiste,
+// así que /refresh (US-03) recomputa acá exactamente la misma cuenta al
+// recibir el token de vuelta del cliente: se hashea la representación
+// textual, no bytes crudos, y las dos cuentas coinciden byte a byte.
+func Hash(refreshToken string) string {
+	sum := sha256.Sum256([]byte(refreshToken))
+	return hex.EncodeToString(sum[:])
+}
+
+// Hash implementa domain.TokenGenerator.Hash delegando en la función Hash de
+// este paquete.
+func (g *Generator) Hash(refreshToken string) string {
+	return Hash(refreshToken)
 }
 
 // GenerateKeyPair genera un par RSA de MinRSAKeyBits bits y lo devuelve en PEM

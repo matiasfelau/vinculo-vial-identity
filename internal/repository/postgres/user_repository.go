@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 
+	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgconn"
 	"gorm.io/gorm"
 
@@ -68,6 +69,20 @@ func (r *UserRepository) Create(ctx context.Context, u *domain.User) error {
 func (r *UserRepository) FindByDNIHashed(ctx context.Context, dniHashed string) (*domain.User, error) {
 	var m userModel
 	if err := r.db.WithContext(ctx).Where("dni_hashed = ?", dniHashed).Take(&m).Error; err != nil {
+		return nil, mapFindError(err)
+	}
+	return m.toDomain(), nil
+}
+
+// FindByOwnerAndDNIHash busca el usuario cuyo id y Blind Index de DNI
+// coinciden a la vez. El predicado combina las dos condiciones con AND en
+// una sola consulta a propósito: así "ese owner_id no existe" y "existe,
+// pero el DNI no es el suyo" producen el mismo gorm.ErrRecordNotFound —y por
+// lo tanto el mismo domain.ErrUserNotFound— sin que este repositorio tenga
+// que distinguirlos.
+func (r *UserRepository) FindByOwnerAndDNIHash(ctx context.Context, ownerID uuid.UUID, dniHashed string) (*domain.User, error) {
+	var m userModel
+	if err := r.db.WithContext(ctx).Where("id = ? AND dni_hashed = ?", ownerID, dniHashed).Take(&m).Error; err != nil {
 		return nil, mapFindError(err)
 	}
 	return m.toDomain(), nil

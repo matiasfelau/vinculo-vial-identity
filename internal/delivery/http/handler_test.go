@@ -60,11 +60,44 @@ func (m *signInServiceMock) SignIn(_ context.Context, ephemeralPublicKey, cipher
 	return m.accessToken, m.refreshToken, nil
 }
 
+type refreshServiceMock struct {
+	accessToken  string
+	refreshToken string
+	err          error
+
+	calls         int
+	receivedToken string
+}
+
+func (m *refreshServiceMock) Refresh(_ context.Context, refreshToken string) (string, string, error) {
+	m.calls++
+	m.receivedToken = refreshToken
+	if m.err != nil {
+		return "", "", m.err
+	}
+	return m.accessToken, m.refreshToken, nil
+}
+
+type logoutServiceMock struct {
+	err error
+
+	calls         int
+	receivedToken string
+}
+
+func (m *logoutServiceMock) Logout(_ context.Context, refreshToken string) error {
+	m.calls++
+	m.receivedToken = refreshToken
+	return m.err
+}
+
 type testServer struct {
-	handler   http.Handler
-	svc       *serviceMock
-	signInSvc *signInServiceMock
-	logs      *strings.Builder
+	handler    http.Handler
+	svc        *serviceMock
+	signInSvc  *signInServiceMock
+	refreshSvc *refreshServiceMock
+	logoutSvc  *logoutServiceMock
+	logs       *strings.Builder
 }
 
 func newTestServer(t *testing.T, ready func(context.Context) error) *testServer {
@@ -72,11 +105,15 @@ func newTestServer(t *testing.T, ready func(context.Context) error) *testServer 
 
 	svc := &serviceMock{userID: uuid.New()}
 	signInSvc := &signInServiceMock{accessToken: "access-token", refreshToken: "refresh-token"}
+	refreshSvc := &refreshServiceMock{accessToken: "access-token-rotado", refreshToken: "refresh-token-rotado"}
+	logoutSvc := &logoutServiceMock{}
 	logs := &strings.Builder{}
 
 	router, err := delivery.NewRouter(delivery.RouterConfig{
 		SignUp:         svc,
 		SignIn:         signInSvc,
+		Refresh:        refreshSvc,
+		Logout:         logoutSvc,
 		Logger:         slog.New(slog.NewTextHandler(logs, &slog.HandlerOptions{Level: slog.LevelDebug})),
 		ReadinessCheck: ready,
 	})
@@ -84,7 +121,7 @@ func newTestServer(t *testing.T, ready func(context.Context) error) *testServer 
 		t.Fatalf("no se pudo armar el router: %v", err)
 	}
 
-	return &testServer{handler: router, svc: svc, signInSvc: signInSvc, logs: logs}
+	return &testServer{handler: router, svc: svc, signInSvc: signInSvc, refreshSvc: refreshSvc, logoutSvc: logoutSvc, logs: logs}
 }
 
 func (ts *testServer) post(t *testing.T, path, body string) *httptest.ResponseRecorder {
@@ -124,6 +161,13 @@ func signInBodyCon(ephemeralPublicKey, ciphertext string) string {
 		"ephemeral_public_key": base64.StdEncoding.EncodeToString([]byte(ephemeralPublicKey)),
 		"ciphertext":           base64.StdEncoding.EncodeToString([]byte(ciphertext)),
 	})
+	return string(payload)
+}
+
+// refreshBody arma el cuerpo de /refresh: JSON plano con el Refresh Token
+// opaco, sin el wrapper HPKE que sí usan /signup y /signin.
+func refreshBody(refreshToken string) string {
+	payload, _ := json.Marshal(map[string]string{"refresh_token": refreshToken})
 	return string(payload)
 }
 
@@ -656,8 +700,10 @@ func TestRutasYMetodosNoSoportados(t *testing.T) {
 func TestNewRouterExigeElServicio(t *testing.T) {
 	t.Run("sin servicio de registro", func(t *testing.T) {
 		cfg := delivery.RouterConfig{
-			SignIn: &signInServiceMock{},
-			Logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
+			SignIn:  &signInServiceMock{},
+			Refresh: &refreshServiceMock{},
+			Logout:  &logoutServiceMock{},
+			Logger:  slog.New(slog.NewTextHandler(io.Discard, nil)),
 		}
 		if _, err := delivery.NewRouter(cfg); err == nil {
 			t.Error("se esperaba un error al armar el router sin servicio de registro")
@@ -666,11 +712,37 @@ func TestNewRouterExigeElServicio(t *testing.T) {
 
 	t.Run("sin servicio de login", func(t *testing.T) {
 		cfg := delivery.RouterConfig{
-			SignUp: &serviceMock{},
-			Logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
+			SignUp:  &serviceMock{},
+			Refresh: &refreshServiceMock{},
+			Logout:  &logoutServiceMock{},
+			Logger:  slog.New(slog.NewTextHandler(io.Discard, nil)),
 		}
 		if _, err := delivery.NewRouter(cfg); err == nil {
 			t.Error("se esperaba un error al armar el router sin servicio de login")
+		}
+	})
+
+	t.Run("sin servicio de refresh", func(t *testing.T) {
+		cfg := delivery.RouterConfig{
+			SignUp: &serviceMock{},
+			SignIn: &signInServiceMock{},
+			Logout: &logoutServiceMock{},
+			Logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
+		}
+		if _, err := delivery.NewRouter(cfg); err == nil {
+			t.Error("se esperaba un error al armar el router sin servicio de refresh")
+		}
+	})
+
+	t.Run("sin servicio de logout", func(t *testing.T) {
+		cfg := delivery.RouterConfig{
+			SignUp:  &serviceMock{},
+			SignIn:  &signInServiceMock{},
+			Refresh: &refreshServiceMock{},
+			Logger:  slog.New(slog.NewTextHandler(io.Discard, nil)),
+		}
+		if _, err := delivery.NewRouter(cfg); err == nil {
+			t.Error("se esperaba un error al armar el router sin servicio de logout")
 		}
 	})
 }
@@ -810,6 +882,245 @@ func TestSignInRespuestaNoSeCachea(t *testing.T) {
 	ts := newTestServer(t, nil)
 
 	rec := ts.post(t, "/api/v1/auth/signin", signInBody("criptograma"))
+
+	if got := rec.Header().Get("Cache-Control"); got != "no-store" {
+		t.Errorf("Cache-Control = %q, se esperaba no-store", got)
+	}
+}
+
+func TestRefreshDevuelve200ConLosTokensRotados(t *testing.T) {
+	ts := newTestServer(t, nil)
+
+	rec := ts.post(t, "/api/v1/auth/refresh", refreshBody("el-refresh-token-del-cliente"))
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, se esperaba 200 (%s)", rec.Code, rec.Body.String())
+	}
+
+	var body struct {
+		AccessToken  string `json:"access_token"`
+		RefreshToken string `json:"refresh_token"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatalf("la respuesta no es JSON: %v", err)
+	}
+	if body.AccessToken != ts.refreshSvc.accessToken {
+		t.Errorf("access_token = %q, se esperaba %q", body.AccessToken, ts.refreshSvc.accessToken)
+	}
+	if body.RefreshToken != ts.refreshSvc.refreshToken {
+		t.Errorf("refresh_token = %q, se esperaba %q", body.RefreshToken, ts.refreshSvc.refreshToken)
+	}
+	if ts.refreshSvc.receivedToken != "el-refresh-token-del-cliente" {
+		t.Errorf("se delegó %q, se esperaba el refresh_token recibido", ts.refreshSvc.receivedToken)
+	}
+}
+
+// A diferencia de /signup y /signin, /refresh no lleva ephemeral_public_key
+// ni ciphertext: el cuerpo es JSON plano con el Refresh Token opaco.
+func TestRefreshDevuelve400AnteCuerposInvalidos(t *testing.T) {
+	cases := map[string]string{
+		"cuerpo vacío":                ``,
+		"JSON malformado":             `{"refresh_token":`,
+		"cuerpo no es mapa":           `["token"]`,
+		"refresh_token no es cadena":  `{"refresh_token":42}`,
+	}
+
+	for name, body := range cases {
+		t.Run(name, func(t *testing.T) {
+			ts := newTestServer(t, nil)
+
+			rec := ts.post(t, "/api/v1/auth/refresh", body)
+
+			if rec.Code != http.StatusBadRequest {
+				t.Fatalf("status = %d, se esperaba 400 (%s)", rec.Code, rec.Body.String())
+			}
+			if ts.refreshSvc.calls != 0 {
+				t.Error("el servicio no debería invocarse con un cuerpo inválido")
+			}
+		})
+	}
+}
+
+// refresh_token ausente o vacío es JSON válido: se delega igual al servicio,
+// que lo va a rechazar como una sesión inexistente (401), no como un 400. No
+// hay motivo para distinguir el caso a nivel HTTP.
+func TestRefreshConTokenVacioSeDelegaAlServicio(t *testing.T) {
+	ts := newTestServer(t, nil)
+	ts.refreshSvc.err = domain.ErrSessionNotFound
+
+	rec := ts.post(t, "/api/v1/auth/refresh", `{}`)
+
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("status = %d, se esperaba 401 (%s)", rec.Code, rec.Body.String())
+	}
+	if ts.refreshSvc.calls != 1 {
+		t.Error("un refresh_token ausente debería delegarse igual al servicio")
+	}
+}
+
+func TestRefreshMapeaLosErroresDeDominio(t *testing.T) {
+	cases := map[string]struct {
+		err    error
+		status int
+		code   string
+	}{
+		"sesión inexistente": {domain.ErrSessionNotFound, http.StatusUnauthorized, "sesion_invalida"},
+		"sesión expirada":    {domain.ErrSessionExpired, http.StatusUnauthorized, "sesion_invalida"},
+		"sesión reusada":     {domain.ErrSessionReused, http.StatusForbidden, "sesion_comprometida"},
+		"fallo inesperado":   {errors.New("la base no responde"), http.StatusInternalServerError, "error_interno"},
+	}
+
+	for name, tc := range cases {
+		t.Run(name, func(t *testing.T) {
+			ts := newTestServer(t, nil)
+			ts.refreshSvc.err = tc.err
+
+			rec := ts.post(t, "/api/v1/auth/refresh", refreshBody("un-refresh-token"))
+
+			if rec.Code != tc.status {
+				t.Fatalf("status = %d, se esperaba %d (%s)", rec.Code, tc.status, rec.Body.String())
+			}
+			if got := decodeError(t, rec)["code"]; got != tc.code {
+				t.Errorf("code = %v, se esperaba %q", got, tc.code)
+			}
+		})
+	}
+}
+
+// El token inexistente y el expirado tienen que producir exactamente la
+// misma respuesta: no hay motivo para que el cliente distinga uno de otro.
+// requestId se excluye de la comparación porque varía en cada petición por
+// diseño (ver TestRespuestaCorrelacionaConElRequestID).
+func TestRefreshSesionInexistenteYExpiradaProducenElMismoError(t *testing.T) {
+	inexistente := newTestServer(t, nil)
+	inexistente.refreshSvc.err = domain.ErrSessionNotFound
+	rec1 := inexistente.post(t, "/api/v1/auth/refresh", refreshBody("un-refresh-token"))
+
+	expirada := newTestServer(t, nil)
+	expirada.refreshSvc.err = domain.ErrSessionExpired
+	rec2 := expirada.post(t, "/api/v1/auth/refresh", refreshBody("un-refresh-token"))
+
+	body1, body2 := decodeError(t, rec1), decodeError(t, rec2)
+	delete(body1, "requestId")
+	delete(body2, "requestId")
+
+	if rec1.Code != rec2.Code {
+		t.Fatalf("status difiere: %d vs %d", rec1.Code, rec2.Code)
+	}
+	if !reflect.DeepEqual(body1, body2) {
+		t.Errorf("los cuerpos difieren y permiten distinguir los casos: %+v vs %+v", body1, body2)
+	}
+}
+
+func TestRefreshCuerpoDesmesuradoSeRechaza(t *testing.T) {
+	ts := newTestServer(t, nil)
+
+	rec := ts.post(t, "/api/v1/auth/refresh", refreshBody(strings.Repeat("a", int(delivery.DefaultMaxBodyBytes)*2)))
+
+	if rec.Code == http.StatusOK {
+		t.Errorf("un cuerpo por encima del tope no debería aceptarse (status %d)", rec.Code)
+	}
+	if ts.refreshSvc.calls != 0 {
+		t.Error("el servicio no debería invocarse con un cuerpo por encima del tope")
+	}
+}
+
+func TestRefreshRespuestaNoSeCachea(t *testing.T) {
+	ts := newTestServer(t, nil)
+
+	rec := ts.post(t, "/api/v1/auth/refresh", refreshBody("un-refresh-token"))
+
+	if got := rec.Header().Get("Cache-Control"); got != "no-store" {
+		t.Errorf("Cache-Control = %q, se esperaba no-store", got)
+	}
+}
+
+func TestLogoutDevuelve200YDelegaElToken(t *testing.T) {
+	ts := newTestServer(t, nil)
+
+	rec := ts.post(t, "/api/v1/auth/logout", refreshBody("el-refresh-token-a-cerrar"))
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, se esperaba 200 (%s)", rec.Code, rec.Body.String())
+	}
+	if ts.logoutSvc.calls != 1 {
+		t.Fatalf("el servicio se llamó %d veces, se esperaba 1", ts.logoutSvc.calls)
+	}
+	if ts.logoutSvc.receivedToken != "el-refresh-token-a-cerrar" {
+		t.Errorf("se delegó %q, se esperaba el refresh_token recibido", ts.logoutSvc.receivedToken)
+	}
+}
+
+// El contrato de US-03 es 200 siempre, exista o no la sesión: el handler no
+// tiene información para distinguir esos casos —LogoutService tampoco la
+// expone— así que un token inexistente o ya revocado también es 200.
+func TestLogoutDevuelve200AunConUnTokenInexistenteOYaRevocado(t *testing.T) {
+	ts := newTestServer(t, nil)
+
+	rec := ts.post(t, "/api/v1/auth/logout", refreshBody("token-que-no-existe-o-ya-se-revoco"))
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, se esperaba 200 siempre (%s)", rec.Code, rec.Body.String())
+	}
+}
+
+func TestLogoutDevuelve400AnteCuerposInvalidos(t *testing.T) {
+	cases := map[string]string{
+		"cuerpo vacío":               ``,
+		"JSON malformado":            `{"refresh_token":`,
+		"cuerpo no es mapa":          `["token"]`,
+		"refresh_token no es cadena": `{"refresh_token":42}`,
+	}
+
+	for name, body := range cases {
+		t.Run(name, func(t *testing.T) {
+			ts := newTestServer(t, nil)
+
+			rec := ts.post(t, "/api/v1/auth/logout", body)
+
+			if rec.Code != http.StatusBadRequest {
+				t.Fatalf("status = %d, se esperaba 400 (%s)", rec.Code, rec.Body.String())
+			}
+			if ts.logoutSvc.calls != 0 {
+				t.Error("el servicio no debería invocarse con un cuerpo inválido")
+			}
+		})
+	}
+}
+
+// El único caso en que /logout no responde 200 es un fallo real de
+// infraestructura: la revocación no se pudo persistir.
+func TestLogoutDevuelve500SiFallaLaRevocacion(t *testing.T) {
+	ts := newTestServer(t, nil)
+	ts.logoutSvc.err = errors.New("la base no responde")
+
+	rec := ts.post(t, "/api/v1/auth/logout", refreshBody("un-refresh-token"))
+
+	if rec.Code != http.StatusInternalServerError {
+		t.Fatalf("status = %d, se esperaba 500 (%s)", rec.Code, rec.Body.String())
+	}
+	if decodeError(t, rec)["code"] != "error_interno" {
+		t.Errorf("code = %v, se esperaba error_interno", decodeError(t, rec)["code"])
+	}
+}
+
+func TestLogoutCuerpoDesmesuradoSeRechaza(t *testing.T) {
+	ts := newTestServer(t, nil)
+
+	rec := ts.post(t, "/api/v1/auth/logout", refreshBody(strings.Repeat("a", int(delivery.DefaultMaxBodyBytes)*2)))
+
+	if rec.Code == http.StatusOK {
+		t.Errorf("un cuerpo por encima del tope no debería aceptarse (status %d)", rec.Code)
+	}
+	if ts.logoutSvc.calls != 0 {
+		t.Error("el servicio no debería invocarse con un cuerpo por encima del tope")
+	}
+}
+
+func TestLogoutRespuestaNoSeCachea(t *testing.T) {
+	ts := newTestServer(t, nil)
+
+	rec := ts.post(t, "/api/v1/auth/logout", refreshBody("un-refresh-token"))
 
 	if got := rec.Header().Get("Cache-Control"); got != "no-store" {
 		t.Errorf("Cache-Control = %q, se esperaba no-store", got)

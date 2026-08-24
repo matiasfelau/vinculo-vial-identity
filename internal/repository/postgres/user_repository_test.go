@@ -1,8 +1,8 @@
 // Tests internos al paquete: ejercitan el mapeo entidad↔modelo y la traducción
 // de errores del driver, que es donde vive la lógica propia del repositorio.
 //
-// Las sentencias contra PostgreSQL quedan fuera de los tests unitarios, según lo
-// acordado en CLAUDE.md; se cubren con el docker-compose local.
+// Las sentencias contra PostgreSQL quedan fuera de los tests unitarios; se
+// cubren con el docker-compose local.
 package postgres
 
 import (

@@ -14,6 +14,7 @@ import (
 	"os"
 	"os/signal"
 	"syscall"
+	"time"
 
 	"github.com/matiasfelau/vinculo-vial-identity/internal/crypto/blindindex"
 	"github.com/matiasfelau/vinculo-vial-identity/internal/crypto/hpke"
@@ -24,6 +25,8 @@ import (
 	"github.com/matiasfelau/vinculo-vial-identity/internal/domain"
 	"github.com/matiasfelau/vinculo-vial-identity/internal/renaper"
 	"github.com/matiasfelau/vinculo-vial-identity/internal/repository/postgres"
+	"github.com/matiasfelau/vinculo-vial-identity/internal/service/ownership"
+	"github.com/matiasfelau/vinculo-vial-identity/internal/service/session"
 	"github.com/matiasfelau/vinculo-vial-identity/internal/service/signin"
 	"github.com/matiasfelau/vinculo-vial-identity/internal/service/signup"
 	"github.com/matiasfelau/vinculo-vial-identity/internal/token"
@@ -73,6 +76,7 @@ func run() error {
 		ConnMaxLifetime: cfg.Postgres.ConnMaxLifetime,
 		ConnMaxIdleTime: cfg.Postgres.ConnMaxIdleTime,
 		LogSQL:          cfg.Postgres.LogSQL,
+		EphemeralDB:     cfg.Postgres.EphemeralDB,
 	})
 	if err != nil {
 		return err
@@ -139,9 +143,39 @@ func run() error {
 		return err
 	}
 
+	refreshService, err := session.NewRefreshService(session.RefreshDeps{
+		Sessions: sessions,
+		Tokens:   tokens,
+		Logger:   logger,
+	})
+	if err != nil {
+		return err
+	}
+
+	logoutService, err := session.NewLogoutService(session.LogoutDeps{
+		Sessions: sessions,
+		Tokens:   tokens,
+		Logger:   logger,
+	})
+	if err != nil {
+		return err
+	}
+
+	verifyOwnershipService, err := ownership.New(ownership.Deps{
+		Decryptor: decryptor,
+		Indexer:   indexer,
+		Users:     users,
+		Logger:    logger,
+	})
+	if err != nil {
+		return err
+	}
+
 	router, err := delivery.NewRouter(delivery.RouterConfig{
 		SignUp:       signUpService,
 		SignIn:       signInService,
+		Refresh:      refreshService,
+		Logout:       logoutService,
 		Logger:       logger,
 		MaxBodyBytes: cfg.HTTP.MaxBodyBytes,
 		Debug:        cfg.HTTP.Debug,
@@ -153,7 +187,18 @@ func run() error {
 		return err
 	}
 
-	return serve(ctx, cfg, router, logger)
+	internalRouter, err := delivery.NewInternalRouter(delivery.InternalRouterConfig{
+		VerifyOwnership: verifyOwnershipService,
+		Logger:          logger,
+		ServiceToken:    cfg.Internal.ServiceToken.Reveal(),
+		MaxBodyBytes:    cfg.HTTP.MaxBodyBytes,
+		Debug:           cfg.HTTP.Debug,
+	})
+	if err != nil {
+		return err
+	}
+
+	return serve(ctx, cfg, router, internalRouter, logger)
 }
 
 func newLogger(cfg *config.Config) *slog.Logger {
@@ -198,7 +243,7 @@ func buildCrypto(cfg *config.Config) (domain.HPKEDecryptor, domain.BlindIndexer,
 // clave se valida acá —formato PEM, algoritmo, largo mínimo— y no en el primer
 // login.
 func buildTokenGenerator(cfg *config.Config) (domain.TokenGenerator, error) {
-	return token.New(cfg.Crypto.JWTPrivateKey.Reveal(), cfg.Token.AccessTokenTTL, cfg.Token.RefreshTokenTTL)
+	return token.New(cfg.Crypto.JWTPrivateKey.Reveal(), cfg.Token.AccessTokenTTL, cfg.Token.RefreshTokenTTL, cfg.Token.Issuer)
 }
 
 // buildPublisher elige entre el publisher real y el inerte.
@@ -239,44 +284,73 @@ func buildRenaper(logger *slog.Logger) domain.RenaperService {
 	return &renaper.Mock{}
 }
 
-func serve(ctx context.Context, cfg *config.Config, handler http.Handler, logger *slog.Logger) error {
-	srv := &http.Server{
-		Addr:    cfg.HTTP.Addr(),
-		Handler: handler,
-		// Sin estos plazos, un cliente lento puede retener una conexión
-		// indefinidamente y agotar el servidor con muy poco esfuerzo.
-		ReadTimeout:       cfg.HTTP.ReadTimeout,
-		ReadHeaderTimeout: cfg.HTTP.ReadTimeout,
-		WriteTimeout:      cfg.HTTP.WriteTimeout,
-		IdleTimeout:       cfg.HTTP.IdleTimeout,
+// serve levanta el servidor público y el interno (US-04) a la vez, cada uno
+// en su propio puerto, y los apaga juntos: son dos superficies del mismo
+// proceso y ninguna tiene sentido sin la otra en pie.
+func serve(ctx context.Context, cfg *config.Config, publicHandler, internalHandler http.Handler, logger *slog.Logger) error {
+	newServer := func(addr string, handler http.Handler) *http.Server {
+		return &http.Server{
+			Addr:    addr,
+			Handler: handler,
+			// Sin estos plazos, un cliente lento puede retener una conexión
+			// indefinidamente y agotar el servidor con muy poco esfuerzo.
+			ReadTimeout:       cfg.HTTP.ReadTimeout,
+			ReadHeaderTimeout: cfg.HTTP.ReadTimeout,
+			WriteTimeout:      cfg.HTTP.WriteTimeout,
+			IdleTimeout:       cfg.HTTP.IdleTimeout,
+		}
 	}
 
-	errCh := make(chan error, 1)
-	go func() {
-		logger.Info("servidor escuchando", slog.String("addr", srv.Addr))
-		if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
-			errCh <- fmt.Errorf("el servidor http falló: %w", err)
-			return
-		}
-		errCh <- nil
-	}()
+	servers := map[string]*http.Server{
+		"público": newServer(cfg.HTTP.Addr(), publicHandler),
+		"interno": newServer(cfg.Internal.Addr(), internalHandler),
+	}
+
+	errCh := make(chan error, len(servers))
+	for name, srv := range servers {
+		name, srv := name, srv
+		go func() {
+			logger.Info("servidor escuchando", slog.String("servidor", name), slog.String("addr", srv.Addr))
+			if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+				errCh <- fmt.Errorf("el servidor http %s falló: %w", name, err)
+				return
+			}
+			errCh <- nil
+		}()
+	}
 
 	select {
 	case err := <-errCh:
-		return err
+		if err != nil {
+			shutdown(servers, cfg.HTTP.ShutdownTimeout, logger)
+			return err
+		}
 	case <-ctx.Done():
 		logger.Info("apagado solicitado, drenando peticiones en curso")
 	}
 
-	// Contexto nuevo: el original ya está cancelado y no serviría para acotar
-	// el drenaje.
-	shutdownCtx, cancel := context.WithTimeout(context.Background(), cfg.HTTP.ShutdownTimeout)
-	defer cancel()
-
-	if err := srv.Shutdown(shutdownCtx); err != nil {
-		return fmt.Errorf("el apagado ordenado no terminó a tiempo: %w", err)
+	if err := shutdown(servers, cfg.HTTP.ShutdownTimeout, logger); err != nil {
+		return err
 	}
 
 	logger.Info("servicio detenido")
 	return nil
+}
+
+// shutdown apaga ordenadamente todos los servidores dados, con un único
+// plazo compartido. Apagar el que ya falló es seguro: sin un listener activo,
+// Shutdown vuelve de inmediato.
+func shutdown(servers map[string]*http.Server, timeout time.Duration, logger *slog.Logger) error {
+	// Contexto nuevo: el original ya puede estar cancelado y no serviría para
+	// acotar el drenaje.
+	shutdownCtx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+
+	var errs []error
+	for name, srv := range servers {
+		if err := srv.Shutdown(shutdownCtx); err != nil {
+			errs = append(errs, fmt.Errorf("el apagado del servidor %s no terminó a tiempo: %w", name, err))
+		}
+	}
+	return errors.Join(errs...)
 }

@@ -37,6 +37,13 @@ func (m *decryptorMock) Decrypt(ephemeralPublicKey, ciphertext []byte) ([]byte, 
 	return out, nil
 }
 
+// DecryptCombined no lo ejercita ningún test de signin: es parte de
+// domain.HPKEDecryptor solo porque /internal/verify-ownership (US-04) lo
+// necesita sobre el mismo descifrador.
+func (m *decryptorMock) DecryptCombined([]byte) ([]byte, error) {
+	panic("signin: DecryptCombined no se usa en el login")
+}
+
 type indexerMock struct {
 	index string
 
@@ -134,6 +141,13 @@ func (m *usersMock) FindByDNIHashed(_ context.Context, dniHashed string) (*domai
 	return m.user, nil
 }
 
+// FindByOwnerAndDNIHash no lo ejercita ningún test de signin: es parte de
+// domain.UserRepository solo porque /internal/verify-ownership (US-04) lo
+// necesita sobre el mismo repositorio.
+func (m *usersMock) FindByOwnerAndDNIHash(context.Context, uuid.UUID, string) (*domain.User, error) {
+	panic("signin: FindByOwnerAndDNIHash no se usa en el login")
+}
+
 type sessionsMock struct {
 	err error
 
@@ -152,6 +166,26 @@ func (m *sessionsMock) Create(_ context.Context, s *domain.Session) error {
 	}
 	m.created = append(m.created, *s)
 	return nil
+}
+
+func (m *sessionsMock) FindByHash(context.Context, string) (*domain.Session, error) {
+	panic("signin: FindByHash no se usa en el login")
+}
+
+func (m *sessionsMock) RevokeByID(context.Context, uuid.UUID) error {
+	panic("signin: RevokeByID no se usa en el login")
+}
+
+func (m *sessionsMock) RevokeByHash(context.Context, string) error {
+	panic("signin: RevokeByHash no se usa en el login")
+}
+
+func (m *sessionsMock) RevokeAllByUserID(context.Context, uuid.UUID) error {
+	panic("signin: RevokeAllByUserID no se usa en el login")
+}
+
+func (m *sessionsMock) RotateSession(context.Context, uuid.UUID, *domain.Session) error {
+	panic("signin: RotateSession no se usa en el login")
 }
 
 func (m *sessionsMock) last() domain.Session {
@@ -196,4 +230,8 @@ func (m *tokensMock) NewRefreshToken() (token, hash string, expiresAt time.Time,
 		return "", "", time.Time{}, m.refreshErr
 	}
 	return m.refreshToken, m.refreshHash, m.refreshExpiresAt, nil
+}
+
+func (m *tokensMock) Hash(string) string {
+	panic("signin: Hash no se usa en el login")
 }

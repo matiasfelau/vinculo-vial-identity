@@ -32,25 +32,48 @@ type SignInService interface {
 	SignIn(ctx context.Context, ephemeralPublicKey, ciphertext []byte) (accessToken, refreshToken string, err error)
 }
 
-// Handler atiende el alta y el inicio de sesión de vecinos.
+// RefreshService es el puerto que necesita el handler para la rotación de
+// Refresh Token (US-03), declarado del lado del consumidor por el mismo
+// motivo que SignUpService.
+type RefreshService interface {
+	Refresh(ctx context.Context, refreshToken string) (accessToken, newRefreshToken string, err error)
+}
+
+// LogoutService es el puerto que necesita el handler para el cierre de
+// sesión (US-03), declarado del lado del consumidor por el mismo motivo que
+// SignUpService.
+type LogoutService interface {
+	Logout(ctx context.Context, refreshToken string) error
+}
+
+// Handler atiende el alta, el inicio de sesión y la gestión de sesión de
+// vecinos.
 type Handler struct {
-	signUp SignUpService
-	signIn SignInService
-	logger *slog.Logger
+	signUp  SignUpService
+	signIn  SignInService
+	refresh RefreshService
+	logout  LogoutService
+	logger  *slog.Logger
 }
 
 // NewHandler construye el handler.
-func NewHandler(signUp SignUpService, signIn SignInService, logger *slog.Logger) (*Handler, error) {
+func NewHandler(signUp SignUpService, signIn SignInService, refresh RefreshService, logout LogoutService, logger *slog.Logger) (*Handler, error) {
 	if signUp == nil {
 		return nil, errors.New("http: falta el servicio de registro")
 	}
 	if signIn == nil {
 		return nil, errors.New("http: falta el servicio de inicio de sesión")
 	}
+	if refresh == nil {
+		return nil, errors.New("http: falta el servicio de refresh")
+	}
+	if logout == nil {
+		return nil, errors.New("http: falta el servicio de logout")
+	}
 	if logger == nil {
 		logger = slog.Default()
 	}
-	return &Handler{signUp: signUp, signIn: signIn, logger: logger}, nil
+	return &Handler{signUp: signUp, signIn: signIn, refresh: refresh, logout: logout, logger: logger}, nil
 }
 
 // SignUp atiende POST /api/v1/auth/signup.
@@ -143,6 +166,102 @@ func (h *Handler) SignIn(c *gin.Context) {
 	}
 
 	c.JSON(http.StatusOK, signInResponse{AccessToken: accessToken, RefreshToken: refreshToken})
+}
+
+// Refresh atiende POST /api/v1/auth/refresh.
+//
+//	200 — rotación exitosa: par de tokens nuevo.
+//	401 — el refresh token no existe, expiró, o ambos casos combinados: la
+//	      misma respuesta para los dos, igual que el 401 de SignIn.
+//	403 — Defensa Activa: el refresh token ya había sido rotado (reúso
+//	      detectado), y la sesión completa del usuario quedó revocada.
+//	500 — falla algo interno, incluida la propia Defensa Activa si no se pudo
+//	      persistir la revocación masiva.
+//
+// A diferencia de SignUp y SignIn, el cuerpo es JSON plano, sin el wrapper
+// HPKE: el Refresh Token es de un solo uso y la confidencialidad la aporta
+// HTTPS, no un cifrado de aplicación adicional (ver el contrato de US-03).
+//
+// El 403 que produce una atestación de app rechazada lo genera el gateway;
+// nunca llega a este handler.
+func (h *Handler) Refresh(c *gin.Context) {
+	var req refreshRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		h.logger.WarnContext(c.Request.Context(), "cuerpo del refresh no es JSON interpretable",
+			slog.String("request_id", requestIDOf(c)),
+			slog.String("error", err.Error()),
+		)
+		h.abort(c, http.StatusBadRequest, codeInvalidRequest,
+			"el cuerpo debe ser un JSON con el campo refresh_token", nil)
+		return
+	}
+
+	accessToken, refreshToken, err := h.refresh.Refresh(c.Request.Context(), req.RefreshToken)
+	if err != nil {
+		h.abortRefreshError(c, err)
+		return
+	}
+
+	c.JSON(http.StatusOK, refreshResponse{AccessToken: accessToken, RefreshToken: refreshToken})
+}
+
+// abortRefreshError traduce los centinelas de domain que puede devolver
+// RefreshService a códigos HTTP.
+//
+// ErrSessionNotFound y ErrSessionExpired producen la misma respuesta: el
+// cliente no tiene por qué distinguir "el token no existe" de "el token
+// venció". ErrSessionReused sí se distingue con un status propio: a
+// diferencia de los otros dos, es la señal de una brecha de seguridad
+// contenida (Defensa Activa), no la de un token simplemente inválido.
+func (h *Handler) abortRefreshError(c *gin.Context, err error) {
+	switch {
+	case errors.Is(err, domain.ErrSessionNotFound), errors.Is(err, domain.ErrSessionExpired):
+		h.abort(c, http.StatusUnauthorized, codeInvalidSession, "sesión inválida", nil)
+
+	case errors.Is(err, domain.ErrSessionReused):
+		h.abort(c, http.StatusForbidden, codeSessionCompromised, "sesión comprometida", nil)
+
+	default:
+		h.logger.ErrorContext(c.Request.Context(), "fallo no esperado en el refresh",
+			slog.String("request_id", requestIDOf(c)),
+			slog.String("error", err.Error()),
+		)
+		h.abort(c, http.StatusInternalServerError, codeInternal, "error interno", nil)
+	}
+}
+
+// Logout atiende POST /api/v1/auth/logout.
+//
+//	200 — siempre, exista o no una sesión con ese Refresh Token, esté o no ya
+//	      revocada (anti-enumeración): nunca 401, nunca 404.
+//	400 — el cuerpo no es JSON interpretable.
+//	500 — falla algo interno (la revocación no se pudo persistir).
+//
+// A diferencia de /refresh, este endpoint no exige X-App-Attestation: si la
+// atestación de la app falla, el usuario tiene que poder cerrar sesión igual
+// y no quedar atrapado sin forma de terminarla (decisión del gateway).
+func (h *Handler) Logout(c *gin.Context) {
+	var req logoutRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		h.logger.WarnContext(c.Request.Context(), "cuerpo del logout no es JSON interpretable",
+			slog.String("request_id", requestIDOf(c)),
+			slog.String("error", err.Error()),
+		)
+		h.abort(c, http.StatusBadRequest, codeInvalidRequest,
+			"el cuerpo debe ser un JSON con el campo refresh_token", nil)
+		return
+	}
+
+	if err := h.logout.Logout(c.Request.Context(), req.RefreshToken); err != nil {
+		h.logger.ErrorContext(c.Request.Context(), "fallo no esperado en el logout",
+			slog.String("request_id", requestIDOf(c)),
+			slog.String("error", err.Error()),
+		)
+		h.abort(c, http.StatusInternalServerError, codeInternal, "error interno", nil)
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{})
 }
 
 // decodeField exige que el campo esté presente y sea base64, y aborta la

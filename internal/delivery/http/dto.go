@@ -41,6 +41,44 @@ type signInResponse struct {
 	RefreshToken string `json:"refresh_token"`
 }
 
+// refreshRequest es el único dato que /refresh acepta: el Refresh Token
+// opaco en JSON plano, sin el wrapper HPKE de dos piezas que sí usan
+// /signup y /signin.
+//
+// Es una diferencia deliberada del contrato de US-03: el token es de un
+// solo uso y la confidencialidad la aporta HTTPS, no un cifrado de
+// aplicación adicional.
+type refreshRequest struct {
+	RefreshToken string `json:"refresh_token"`
+}
+
+// refreshResponse acompaña al 200: el par de tokens rotado.
+type refreshResponse struct {
+	AccessToken  string `json:"access_token"`
+	RefreshToken string `json:"refresh_token"`
+}
+
+// logoutRequest es el único dato que /logout acepta: el mismo Refresh Token
+// opaco en JSON plano que /refresh, sin el wrapper HPKE.
+type logoutRequest struct {
+	RefreshToken string `json:"refresh_token"`
+}
+
+// verifyOwnershipRequest es el payload interno de US-04 que envía
+// vinculo-vial-vehicle: el contrato compartido lo transporta tal cual, sin
+// que Vehicle lo abra. DNIEnc es un único blob HPKE (enc || ciphertext), a
+// diferencia de las dos piezas separadas de /signup y /signin.
+type verifyOwnershipRequest struct {
+	OwnerID string `json:"owner_id"`
+	DNIEnc  string `json:"dni_enc"`
+}
+
+// verifyOwnershipResponse es la única forma de respuesta de
+// /internal/verify-ownership: un booleano y nada más.
+type verifyOwnershipResponse struct {
+	Match bool `json:"match"`
+}
+
 // Códigos de error de la API. Son estables y la app decide el texto a mostrar;
 // el campo `error` es para diagnóstico humano, no para parsear.
 const (
@@ -52,7 +90,17 @@ const (
 	// un DNI inexistente como para una contraseña incorrecta: distinguirlos
 	// habilitaría enumerar qué DNIs están registrados.
 	codeInvalidCredentials = "credenciales_invalidas"
-	codeInternal           = "error_interno"
+	// codeInvalidSession es el código único del 401 de /refresh, tanto para un
+	// Refresh Token inexistente como para uno expirado.
+	codeInvalidSession = "sesion_invalida"
+	// codeSessionCompromised es el código del 403 que produce la Defensa
+	// Activa de /refresh ante el reúso de un Refresh Token ya rotado.
+	codeSessionCompromised = "sesion_comprometida"
+	// codeUnauthorizedService es el código del 401 que produce el router
+	// interno de US-04 (/internal/*) cuando la petición no trae el secreto
+	// de servicio a servicio configurado en INTERNAL_SERVICE_TOKEN.
+	codeUnauthorizedService = "servicio_no_autorizado"
+	codeInternal            = "error_interno"
 )
 
 // errorResponse es la forma única de todos los errores de la API.
