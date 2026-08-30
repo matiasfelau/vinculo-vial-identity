@@ -263,6 +263,36 @@ Para correr el servicio fuera del contenedor hace falta un Postgres accesible y
 go run ./cmd/api
 ```
 
+## Nomenclatura de infraestructura
+
+Los recursos de Docker siguen la convención de nomenclatura de la plataforma,
+que fija nombres deterministas para que la resolución DNS entre microservicios
+no dependa del entorno de cada quien. Por defecto Compose deriva el nombre del
+proyecto del directorio contenedor y lo antepone a cada recurso, con lo que un
+mismo componente cambia de nombre según la máquina donde se haya clonado el
+repositorio. Para evitarlo, el proyecto se nombra de forma explícita y cada
+recurso fija su `name`.
+
+| Recurso | Nombre | Rol |
+|---|---|---|
+| Contenedor principal | `vinculo-vial-identity` | Nombre canónico del componente en toda la plataforma. Es el que resuelve por DNS desde el Gateway y desde el resto de los microservicios. |
+| Contenedor de la base | `vinculo-vial-identity-db` | Postgres exclusivo de este componente. Se nombra por el servicio que sirve, no por la tecnología. |
+| Red compartida | `vinculo-vial` (`external: true`) | Red puente general de la plataforma. La crea el compose del Gateway, así que hay que levantarlo primero (o crearla a mano con `docker network create vinculo-vial`). |
+| Red interna | `identity-internal` | Aísla el tráfico contra la base, que no atraviesa la red compartida. |
+| Volumen | `vinculo-vial-identity-data` | Datos persistentes de Postgres. |
+
+La base vive únicamente en `identity-internal`: no se asoma a la red compartida,
+porque ningún componente ajeno tiene por qué alcanzarla. El microservicio es el
+único que pertenece a las dos redes, y en la compartida se anuncia con su nombre
+completo y no con `identity` a secas, que en una red con varios componentes es
+demasiado genérico y colisiona fácil.
+
+Fijar `container_name` vuelve el nombre único en todo el daemon, no solo dentro
+del proyecto: dos instancias simultáneas de este compose colisionan, y `docker
+compose up --scale` deja de ser posible. Es el precio deliberado de tener un
+nombre DNS estable, y no representa una limitación real para un componente que
+se despliega como instancia única por entorno.
+
 ## Comandos
 
 ```bash

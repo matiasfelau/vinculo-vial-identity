@@ -1,20 +1,35 @@
 # Entorno local de vinculo-vial-identity.
 #
+# Nomenclatura: este archivo cumple la convención de infraestructura de la
+# plataforma, que fija nombres deterministas para contenedores, redes y
+# volúmenes. El objetivo es que la resolución DNS entre microservicios no
+# dependa del directorio donde cada quien haya clonado el repositorio: por
+# defecto Compose deriva el nombre del proyecto de la carpeta contenedora y lo
+# antepone a cada recurso, con lo que un mismo componente cambia de nombre según
+# la máquina. Por eso el proyecto se nombra de forma explícita y los recursos
+# fijan su `name`.
+#
 # Solo el microservicio y su base. RabbitMQ es un recurso global de la
 # plataforma y no se levanta acá: en local el servicio corre con
 # RABBITMQ_ENABLED=false y usa el publisher inerte, que deja constancia en el
 # log de cada evento que se habría publicado.
 
+name: vinculo-vial-identity
+
 services:
-  postgres:
+  identity-db:
     image: postgres:17-alpine
+    # Base exclusiva de este microservicio: se nombra por el servicio que sirve,
+    # no por la tecnología, para que dos componentes con Postgres propio no
+    # compitan por el mismo nombre en el daemon.
+    container_name: vinculo-vial-identity-db
     restart: unless-stopped
     environment:
       POSTGRES_USER: ${POSTGRES_USER}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
       POSTGRES_DB: ${POSTGRES_DB}
     volumes:
-      - postgres-data:/var/lib/postgresql/data
+      - vinculo-vial-identity-data:/var/lib/postgresql/data
     # El puerto se publica solo en loopback: la base de desarrollo no tiene por
     # qué quedar expuesta en la red donde esté la máquina.
     ports:
@@ -25,20 +40,26 @@ services:
       timeout: 5s
       retries: 10
       start_period: 10s
-    # Sin `networks`: se queda en la red por defecto del proyecto, junto con
-    # identity. No se une a `vinculo-vial` — esa red es para tráfico entre
-    # componentes de la plataforma, no para la base de datos de nadie.
+    networks:
+      # Únicamente la red interna. La base no se asoma a `vinculo-vial`: esa red
+      # es para tráfico entre componentes de la plataforma, y ningún componente
+      # ajeno tiene por qué alcanzar la base de otro.
+      - identity-internal
 
-  identity:
+  vinculo-vial-identity:
     build:
       context: .
+    # Nombre canónico del componente en toda la plataforma. Fijarlo hace que el
+    # contenedor sea alcanzable por DNS con el mismo nombre en cualquier entorno,
+    # en vez del `<proyecto>-<servicio>-<n>` que Compose genera por defecto.
+    container_name: vinculo-vial-identity
     restart: unless-stopped
     env_file:
       - .env
     environment:
       # El host de la base lo fija la red de Compose y pisa lo que diga el .env,
       # que está pensado para correr el servicio fuera del contenedor.
-      POSTGRES_HOST: postgres
+      POSTGRES_HOST: vinculo-vial-identity-db
       POSTGRES_PORT: 5432
       # Dentro de la red de Compose el tráfico no sale del host. Fuera de acá,
       # la configuración rechaza sslmode=disable con APP_ENV=production.
@@ -50,31 +71,32 @@ services:
     # dentro de la red `vinculo-vial`, sin necesidad de un `ports:` acá. El
     # secreto INTERNAL_SERVICE_TOKEN es la segunda capa de esa protección.
     depends_on:
-      postgres:
+      identity-db:
         condition: service_healthy
     networks:
-      # Su propia red, donde vive postgres. Declarar `networks` reemplaza la
-      # pertenencia implícita a `default`, así que hay que listarla a mano o el
-      # servicio pierde acceso a la base.
-      default:
-      # Red compartida de la plataforma: acá lo alcanza el Gateway. El alias es
-      # explícito y no `identity` a secas porque en una red con tres
-      # componentes ese nombre es demasiado genérico y colisiona fácil — cada
-      # componente se anuncia con su nombre completo.
-      vinculo-vial:
-        aliases:
-          - vinculo-vial-identity
+      # Red privada del componente, donde vive su base.
+      - identity-internal
+      # Red compartida de la plataforma: acá lo alcanzan el Gateway y Vehicle.
+      # La clave del servicio es el nombre completo y no `identity` a secas
+      # porque Compose publica la clave del servicio como alias DNS, y en una red
+      # con varios componentes ese nombre es demasiado genérico y colisiona fácil.
+      - vinculo-vial
     # La imagen es scratch: no hay shell ni curl con que ejecutar un healthcheck
     # de Compose. El endpoint /readyz existe igual y es el que consume el
     # orquestador en los entornos reales.
 
 volumes:
-  postgres-data:
+  vinculo-vial-identity-data:
+    # `name` explícito para que el volumen no herede el prefijo del proyecto y
+    # quede exactamente con el nombre que fija la convención.
+    name: vinculo-vial-identity-data
 
 networks:
-  # Red compartida de la plataforma. La crea el compose del Gateway, así que
-  # hay que levantarlo primero (o crearla a mano: docker network create
-  # vinculo-vial). No se declara `default` acá: Compose la crea sola para el
-  # proyecto, y postgres vive únicamente en esa red implícita.
+  identity-internal:
+    # Red privada del componente: aísla el tráfico contra la base, que no tiene
+    # por qué atravesar la red compartida de la plataforma.
+    name: identity-internal
+  # Red compartida de la plataforma. La crea el compose del Gateway, así que hay
+  # que levantarlo primero (o crearla a mano: docker network create vinculo-vial).
   vinculo-vial:
     external: true
