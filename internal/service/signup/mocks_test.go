@@ -191,3 +191,10 @@ func (m *publisherMock) PublishUserCreated(_ context.Context, evt domain.UserCre
 	m.published = append(m.published, evt)
 	return nil
 }
+
+// PublishSessionsRevoked no lo ejercita ningún test de signup: es parte de
+// domain.EventPublisher solo porque la Defensa Activa de US-03 (US-06) la
+// necesita sobre el mismo publisher.
+func (m *publisherMock) PublishSessionsRevoked(context.Context, domain.SessionsRevoked) error {
+	panic("signup: PublishSessionsRevoked no se usa en el alta")
+}

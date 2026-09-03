@@ -111,8 +111,19 @@ func NewPublisher(cfg Config, logger *slog.Logger) (*Publisher, error) {
 // exitoso solo prueba que el mensaje salió del proceso, no que el broker lo
 // haya aceptado, y un reinicio del broker lo perdería en silencio.
 func (p *Publisher) PublishUserCreated(ctx context.Context, evt domain.UserCreated) error {
-	envelope := newEnvelope(evt, p.cfg.Producer, p.now())
+	return p.publishEnvelope(ctx, newEnvelope(evt, p.cfg.Producer, p.now()))
+}
 
+// PublishSessionsRevoked emite el evento con confirmación del broker, con las
+// mismas garantías que PublishUserCreated.
+func (p *Publisher) PublishSessionsRevoked(ctx context.Context, evt domain.SessionsRevoked) error {
+	return p.publishEnvelope(ctx, newSessionsRevokedEnvelope(evt, p.cfg.Producer, p.now()))
+}
+
+// publishEnvelope serializa el sobre y lo entrega con confirmación del
+// broker. Es el cuerpo común a todo Publish*: el routing key de cada evento
+// es su propio EventType, tal como documenta cada constante EventType*.
+func (p *Publisher) publishEnvelope(ctx context.Context, envelope Envelope) error {
 	body, err := json.Marshal(envelope)
 	if err != nil {
 		return fmt.Errorf("events: no se pudo serializar el evento: %w", err)
@@ -132,7 +143,7 @@ func (p *Publisher) PublishUserCreated(ctx context.Context, evt domain.UserCreat
 		Body:         body,
 	}
 
-	if err := p.publish(ctx, msg); err != nil {
+	if err := p.publish(ctx, envelope.EventType, msg); err != nil {
 		// Un solo reintento tras reconectar: el fallo más común es una conexión
 		// que el broker cerró mientras el servicio estaba ocioso, y en ese caso
 		// el segundo intento sobre una conexión nueva funciona.
@@ -143,7 +154,7 @@ func (p *Publisher) PublishUserCreated(ctx context.Context, evt domain.UserCreat
 		if reconnectErr := p.reconnect(); reconnectErr != nil {
 			return fmt.Errorf("events: no se pudo reconectar con el broker: %w", reconnectErr)
 		}
-		if err := p.publish(ctx, msg); err != nil {
+		if err := p.publish(ctx, envelope.EventType, msg); err != nil {
 			return fmt.Errorf("events: no se pudo publicar %s: %w", envelope.EventType, err)
 		}
 	}
@@ -151,15 +162,15 @@ func (p *Publisher) PublishUserCreated(ctx context.Context, evt domain.UserCreat
 	return nil
 }
 
-func (p *Publisher) publish(ctx context.Context, msg amqp.Publishing) error {
-	confirm, err := p.send(ctx, msg)
+func (p *Publisher) publish(ctx context.Context, routingKey string, msg amqp.Publishing) error {
+	confirm, err := p.send(ctx, routingKey, msg)
 	if err != nil {
 		return err
 	}
 
 	// La espera de la confirmación queda fuera del mutex: el ack del broker
 	// tarda un ida y vuelta de red y retener el canal durante ese tiempo
-	// serializaría innecesariamente las altas concurrentes.
+	// serializaría innecesariamente las publicaciones concurrentes.
 	acked, err := confirm.WaitContext(ctx)
 	if err != nil {
 		return err
@@ -171,7 +182,7 @@ func (p *Publisher) publish(ctx context.Context, msg amqp.Publishing) error {
 }
 
 // send escribe en el canal AMQP, que no es seguro para uso concurrente.
-func (p *Publisher) send(ctx context.Context, msg amqp.Publishing) (*amqp.DeferredConfirmation, error) {
+func (p *Publisher) send(ctx context.Context, routingKey string, msg amqp.Publishing) (*amqp.DeferredConfirmation, error) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 
@@ -182,9 +193,9 @@ func (p *Publisher) send(ctx context.Context, msg amqp.Publishing) (*amqp.Deferr
 	return p.ch.PublishWithDeferredConfirmWithContext(
 		ctx,
 		p.cfg.Exchange,
-		EventTypeUserCreated,
+		routingKey,
 		// mandatory=false: que hoy no haya cola atada al routing key es una
-		// decisión de los consumidores, no un fallo del alta.
+		// decisión de los consumidores, no un fallo de la publicación.
 		false,
 		false,
 		msg,

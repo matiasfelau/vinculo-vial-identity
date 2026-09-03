@@ -35,5 +35,14 @@ func (p *NoopPublisher) PublishUserCreated(ctx context.Context, evt domain.UserC
 	return nil
 }
 
+// PublishSessionsRevoked registra el evento que se habría publicado.
+func (p *NoopPublisher) PublishSessionsRevoked(ctx context.Context, evt domain.SessionsRevoked) error {
+	p.logger.WarnContext(ctx, "publisher inerte: el evento no se publicó",
+		slog.String("event_type", EventTypeSessionsRevoked),
+		slog.String("user_id", evt.UserID.String()),
+	)
+	return nil
+}
+
 // Close no tiene nada que liberar.
 func (p *NoopPublisher) Close() error { return nil }

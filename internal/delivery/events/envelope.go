@@ -12,6 +12,10 @@ import (
 // routing key con el que se publica.
 const EventTypeUserCreated = "user.created"
 
+// EventTypeSessionsRevoked es el tipo de evento que emite la Defensa Activa
+// de US-03 (US-06). Es también el routing key con el que se publica.
+const EventTypeSessionsRevoked = "user.sessions.revoked"
+
 // Envelope es el sobre estándar de eventos de la plataforma. La forma es común
 // a todos los productores; lo específico de cada evento va en Payload.
 type Envelope struct {
@@ -57,6 +61,34 @@ func newEnvelope(evt domain.UserCreated, producer string, now time.Time) Envelop
 		Actor:     nil,
 		Payload: userCreatedPayload{
 			UserID: evt.UserID.String(),
+		},
+	}
+}
+
+// sessionsRevokedPayload es el contenido de user.sessions.revoked.
+//
+// Reason es el único campo, tal como fija el contrato: no lleva PII —ni DNI,
+// ni email, ni hashes de token—, y es un enum acotado pensado para auditoría.
+type sessionsRevokedPayload struct {
+	Reason string `json:"reason"`
+}
+
+// newSessionsRevokedEnvelope arma el sobre de una revocación masiva de
+// sesiones.
+//
+// A diferencia de newEnvelope, acá Actor sí lleva un valor: es el usuario
+// cuyas sesiones se revocaron, la referencia que Notification necesita para
+// saber de quién dar de baja los tokens FCM.
+func newSessionsRevokedEnvelope(evt domain.SessionsRevoked, producer string, now time.Time) Envelope {
+	actor := evt.UserID.String()
+	return Envelope{
+		EventID:   uuid.NewString(),
+		EventType: EventTypeSessionsRevoked,
+		Timestamp: now.UTC().Format(time.RFC3339Nano),
+		Producer:  producer,
+		Actor:     &actor,
+		Payload: sessionsRevokedPayload{
+			Reason: string(evt.Reason),
 		},
 	}
 }
