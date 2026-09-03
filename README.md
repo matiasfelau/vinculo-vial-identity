@@ -377,13 +377,17 @@ SQL crudo después de `AutoMigrate`, de forma idempotente: GORM solo la genera
 sola a partir de una asociación Go, y no hace falta cargar esa relación
 completa solo para declararla.
 
-## Evento publicado
+## Eventos publicados
 
-`user.created`, con el Event Envelope estándar de la plataforma. El payload no
-lleva PII: quien necesite datos de la persona los pide a este servicio.
+Los dos eventos usan el Event Envelope estándar de la plataforma. Ningún
+payload lleva PII: quien necesite datos de la persona los pide a este
+servicio.
 
-`actor` va en `null` porque en el signup todavía no hay sesión ni usuario
-autenticado actuando: el usuario se está creando en esa misma petición.
+### `user.created`
+
+Se publica al completar el alta (US-01). `actor` va en `null` porque todavía
+no hay sesión ni usuario autenticado actuando: el usuario se está creando en
+esa misma petición.
 
 ```json
 {
@@ -398,6 +402,29 @@ autenticado actuando: el usuario se está creando en esa misma petición.
 }
 ```
 
+### `user.sessions.revoked`
+
+Se publica exclusivamente desde la Defensa Activa de `/refresh` (US-03), al
+detectar el reúso de un Refresh Token ya rotado y revocar toda la familia de
+sesiones del usuario. Un logout normal de un solo dispositivo no lo publica:
+`vinculo-vial-notification` lo consume para dar de baja todos los tokens FCM
+del usuario, y hacerlo en cada logout apagaría las notificaciones de sus
+demás dispositivos. Acá `actor` sí lleva el UUID del usuario afectado, y
+`reason` es un enum acotado pensado para auditoría.
+
+```json
+{
+  "eventId": "…",
+  "eventType": "user.sessions.revoked",
+  "timestamp": "2026-08-12T15:30:01Z",
+  "producer": "vinculo-vial-identity",
+  "actor": "6f2a4c1e-9d3b-4f5a-8c7d-1e2f3a4b5c6d",
+  "payload": {
+    "reason": "REUSE_DETECTED"
+  }
+}
+```
+
 ## Deuda técnica conocida
 
 - **Cliente real de RENAPER.** `internal/renaper.Mock` aprueba cualquier
@@ -407,10 +434,12 @@ autenticado actuando: el usuario se está creando en esa misma petición.
 - **Contrato desincronizado con Frontend y Gateway.** El payload interno
   reemplazó `biometric_verified` por `tramite`/`sexo`/`selfie`; hasta que los
   otros dos repos repliquen el cambio, no son interoperables entre sí.
-- **Outbox transaccional.** Hoy, si RabbitMQ está caído, el alta se completa y
-  el evento se pierde con un registro de error. Es la decisión correcta para no
-  romper el registro por un problema del broker, pero hay que resolverlo antes
-  de que algún consumidor dependa del evento para algo crítico.
+- **Outbox transaccional.** Hoy, si RabbitMQ está caído, tanto el alta
+  (`user.created`) como la Defensa Activa (`user.sessions.revoked`) se
+  completan igual y el evento se pierde con un registro de error. Es la
+  decisión correcta para no romper el caso de uso que motiva cada evento por
+  un problema del broker, pero hay que resolverlo antes de que algún
+  consumidor dependa de alguno de los dos para algo crítico.
 - **Migraciones versionadas**, en lugar de `AutoMigrate`.
 - **Rate limiting** de los endpoints de alta y login. Argon2id reserva 64 MiB
   por derivación concurrente (el login también deriva uno, vía `Verify`, en

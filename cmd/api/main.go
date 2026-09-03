@@ -144,9 +144,10 @@ func run() error {
 	}
 
 	refreshService, err := session.NewRefreshService(session.RefreshDeps{
-		Sessions: sessions,
-		Tokens:   tokens,
-		Logger:   logger,
+		Sessions:  sessions,
+		Tokens:    tokens,
+		Publisher: publisher,
+		Logger:    logger,
 	})
 	if err != nil {
 		return err
