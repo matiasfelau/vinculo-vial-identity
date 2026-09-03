@@ -169,3 +169,36 @@ func (m *tokensMock) NewRefreshToken() (token, hash string, expiresAt time.Time,
 	}
 	return m.refreshToken, m.refreshHash, m.refreshExpiresAt, nil
 }
+
+// eventsMock implementa domain.EventPublisher. Solo RefreshService la usa,
+// exclusivamente en la rama de Defensa Activa; LogoutService ni siquiera
+// declara esta dependencia.
+type eventsMock struct {
+	err error
+
+	mu        sync.Mutex
+	calls     int
+	published []domain.SessionsRevoked
+}
+
+func (m *eventsMock) PublishUserCreated(context.Context, domain.UserCreated) error {
+	panic("session: PublishUserCreated no se usa en este paquete")
+}
+
+func (m *eventsMock) PublishSessionsRevoked(_ context.Context, evt domain.SessionsRevoked) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	m.calls++
+	if m.err != nil {
+		return m.err
+	}
+	m.published = append(m.published, evt)
+	return nil
+}
+
+func (m *eventsMock) callCount() int {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.calls
+}
