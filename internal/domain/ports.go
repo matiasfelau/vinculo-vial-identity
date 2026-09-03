@@ -99,6 +99,15 @@ type TokenGenerator interface {
 type EventPublisher interface {
 	// PublishUserCreated emite el evento user.created.
 	PublishUserCreated(ctx context.Context, evt UserCreated) error
+
+	// PublishSessionsRevoked emite el evento user.sessions.revoked.
+	//
+	// Se dispara únicamente desde la Defensa Activa de US-03 (revocación
+	// masiva de todas las sesiones de un usuario tras detectar el reúso de un
+	// Refresh Token), nunca desde un logout normal de un solo dispositivo:
+	// emitirlo ahí apagaría las notificaciones push de todos los dispositivos
+	// del usuario por haber cerrado sesión en uno solo.
+	PublishSessionsRevoked(ctx context.Context, evt SessionsRevoked) error
 }
 
 // HPKEDecryptor descifra el criptograma de transporte que envía la app.
