@@ -39,3 +39,24 @@ func TestNoopPublisherToleraLoggerNulo(t *testing.T) {
 		t.Errorf("error inesperado al cerrar: %v", err)
 	}
 }
+
+func TestNoopPublisherPublicaSessionsRevokedYDejaConstancia(t *testing.T) {
+	logs := &strings.Builder{}
+	p := NewNoopPublisher(slog.New(slog.NewTextHandler(logs, &slog.HandlerOptions{Level: slog.LevelDebug})))
+
+	evt := eventoDeRevocacion()
+	if err := p.PublishSessionsRevoked(t.Context(), evt); err != nil {
+		t.Fatalf("error inesperado: %v", err)
+	}
+
+	registro := logs.String()
+	if !strings.Contains(registro, EventTypeSessionsRevoked) {
+		t.Errorf("el log debería nombrar el evento descartado: %s", registro)
+	}
+	if !strings.Contains(registro, evt.UserID.String()) {
+		t.Errorf("el log debería identificar al usuario afectado: %s", registro)
+	}
+	if !strings.Contains(registro, "WARN") {
+		t.Errorf("descartar un evento merece al menos nivel WARN: %s", registro)
+	}
+}

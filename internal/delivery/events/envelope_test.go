@@ -167,6 +167,80 @@ func TestNewEnvelopeNormalizaLasMarcasDeTiempoAUTC(t *testing.T) {
 	}
 }
 
+func eventoDeRevocacion() domain.SessionsRevoked {
+	return domain.NewSessionsRevoked(
+		uuid.MustParse("6f2a4c1e-9d3b-4f5a-8c7d-1e2f3a4b5c6d"),
+		domain.SessionsRevokedReasonReuseDetected,
+	)
+}
+
+func TestNewSessionsRevokedEnvelopeCompletaElSobreEstandar(t *testing.T) {
+	env := newSessionsRevokedEnvelope(eventoDeRevocacion(), DefaultProducer, emitido)
+
+	if _, err := uuid.Parse(env.EventID); err != nil {
+		t.Errorf("eventId = %q, se esperaba un UUID: %v", env.EventID, err)
+	}
+	if env.EventType != EventTypeSessionsRevoked {
+		t.Errorf("eventType = %q, se esperaba %q", env.EventType, EventTypeSessionsRevoked)
+	}
+	if env.Producer != DefaultProducer {
+		t.Errorf("producer = %q, se esperaba %q", env.Producer, DefaultProducer)
+	}
+	if got, err := time.Parse(time.RFC3339Nano, env.Timestamp); err != nil {
+		t.Errorf("timestamp = %q, se esperaba RFC3339: %v", env.Timestamp, err)
+	} else if !got.Equal(emitido) {
+		t.Errorf("timestamp = %v, se esperaba %v", got, emitido)
+	}
+}
+
+// A diferencia de user.created, acá el actor sí lleva el UUID del usuario:
+// es la referencia que Notification necesita para dar de baja los tokens FCM
+// de la cuenta afectada.
+func TestSessionsRevokedEnvelopeLlevaElActor(t *testing.T) {
+	evt := eventoDeRevocacion()
+	env := newSessionsRevokedEnvelope(evt, DefaultProducer, emitido)
+
+	if env.Actor == nil {
+		t.Fatal("actor = nil, se esperaba el UUID del usuario")
+	}
+	if *env.Actor != evt.UserID.String() {
+		t.Errorf("actor = %q, se esperaba %q", *env.Actor, evt.UserID.String())
+	}
+}
+
+// El payload no lleva PII ni derivados del DNI: solo el motivo, acotado a un
+// enum, que es lo único que fija el contrato de US-06.
+func TestSessionsRevokedEnvelopeNoLlevaPII(t *testing.T) {
+	body, err := json.Marshal(newSessionsRevokedEnvelope(eventoDeRevocacion(), DefaultProducer, emitido))
+	if err != nil {
+		t.Fatalf("no se pudo serializar: %v", err)
+	}
+
+	var sobre map[string]json.RawMessage
+	if err := json.Unmarshal(body, &sobre); err != nil {
+		t.Fatalf("el sobre no es JSON válido: %v", err)
+	}
+
+	var payload map[string]any
+	if err := json.Unmarshal(sobre["payload"], &payload); err != nil {
+		t.Fatalf("el payload no es JSON válido: %v", err)
+	}
+
+	if len(payload) != 1 {
+		t.Errorf("el payload tiene %d campos, el contrato define solo reason: %s", len(payload), sobre["payload"])
+	}
+	if got := payload["reason"]; got != string(domain.SessionsRevokedReasonReuseDetected) {
+		t.Errorf("reason = %v, se esperaba %q", got, domain.SessionsRevokedReasonReuseDetected)
+	}
+
+	serializado := string(body)
+	for _, campo := range []string{"email", "dni", "password", "refreshtokenhash", "dnihashed"} {
+		if strings.Contains(strings.ToLower(serializado), `"`+campo) {
+			t.Errorf("el sobre expone un campo %q: %s", campo, serializado)
+		}
+	}
+}
+
 func TestConfigAplicaValoresPorDefecto(t *testing.T) {
 	cfg := Config{URL: "amqp://localhost"}
 

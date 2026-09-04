@@ -33,6 +33,7 @@ func vigenteSession() *domain.Session {
 type harness struct {
 	sessions *sessionsMock
 	tokens   *tokensMock
+	events   *eventsMock
 	logs     *strings.Builder
 	now      time.Time
 }
@@ -47,8 +48,9 @@ func newHarness() *harness {
 			refreshHash:      "hash-del-refresh-token-rotado",
 			refreshExpiresAt: now.Add(30 * 24 * time.Hour),
 		},
-		logs: &strings.Builder{},
-		now:  now,
+		events: &eventsMock{},
+		logs:   &strings.Builder{},
+		now:    now,
 	}
 }
 
@@ -56,10 +58,11 @@ func (h *harness) service(t *testing.T) *session.RefreshService {
 	t.Helper()
 
 	svc, err := session.NewRefreshService(session.RefreshDeps{
-		Sessions: h.sessions,
-		Tokens:   h.tokens,
-		Logger:   slog.New(slog.NewTextHandler(h.logs, &slog.HandlerOptions{Level: slog.LevelDebug})),
-		Now:      func() time.Time { return h.now },
+		Sessions:  h.sessions,
+		Tokens:    h.tokens,
+		Publisher: h.events,
+		Logger:    slog.New(slog.NewTextHandler(h.logs, &slog.HandlerOptions{Level: slog.LevelDebug})),
+		Now:       func() time.Time { return h.now },
 	})
 	if err != nil {
 		t.Fatalf("no se pudo construir el servicio: %v", err)
@@ -202,8 +205,89 @@ func TestRefreshSesionYaRevocadaDisparaLaDefensaActiva(t *testing.T) {
 		t.Errorf("se revocó al usuario %v, se esperaba %v", h.sessions.revokedUserID, h.sessions.found.UserID)
 	}
 
+	// La Defensa Activa publica exactamente un evento, con el UUID del usuario
+	// afectado como actor: es la referencia que Notification necesita para dar
+	// de baja los tokens FCM en todos sus dispositivos.
+	if h.events.callCount() != 1 {
+		t.Fatalf("se publicó %d veces, se esperaba exactamente 1", h.events.callCount())
+	}
+	publicado := h.events.published[0]
+	if publicado.UserID != h.sessions.found.UserID {
+		t.Errorf("actor publicado = %v, se esperaba %v", publicado.UserID, h.sessions.found.UserID)
+	}
+	if publicado.Reason != domain.SessionsRevokedReasonReuseDetected {
+		t.Errorf("reason publicado = %q, se esperaba %q", publicado.Reason, domain.SessionsRevokedReasonReuseDetected)
+	}
+
 	logs := h.logs.String()
 	for _, esperado := range []string{"WARN", "reúso de refresh token detectado", "defensa activa ejecutada", h.sessions.found.UserID.String()} {
+		if !strings.Contains(logs, esperado) {
+			t.Errorf("el log debería incluir %q: %s", esperado, logs)
+		}
+	}
+}
+
+// Un logout normal no debe publicar user.sessions.revoked bajo ninguna
+// circunstancia: LogoutService ni siquiera declara un domain.EventPublisher
+// entre sus dependencias (ver LogoutDeps), así que no hay forma de que lo
+// invoque. Emitirlo en cada logout apagaría las notificaciones de todos los
+// dispositivos del usuario por haber cerrado sesión en uno solo.
+func TestLogoutNuncaPublicaSessionsRevoked(t *testing.T) {
+	sessions := &sessionsMock{}
+	tokens := &tokensMock{}
+	svc, err := session.NewLogoutService(session.LogoutDeps{Sessions: sessions, Tokens: tokens})
+	if err != nil {
+		t.Fatalf("no se pudo construir el servicio: %v", err)
+	}
+
+	if err := svc.Logout(context.Background(), "cualquier-refresh-token"); err != nil {
+		t.Fatalf("error inesperado: %v", err)
+	}
+}
+
+// Si la propia Defensa Activa no se pudo persistir, no debe publicarse nada:
+// publicar sobre una revocación que en verdad falló le diría a Notification
+// que borre tokens FCM de una cuenta cuyas sesiones siguen vigentes.
+func TestRefreshSiFallaLaDefensaActivaNoPublicaEvento(t *testing.T) {
+	h := newHarness()
+	h.sessions.found.IsRevoked = true
+	h.sessions.revokeAllErr = errors.New("la base no responde")
+	svc := h.service(t)
+
+	if _, _, err := svc.Refresh(context.Background(), validRefreshToken); err == nil {
+		t.Fatal("se esperaba un error")
+	}
+
+	if h.events.callCount() != 0 {
+		t.Errorf("se publicó %d veces, se esperaba 0 porque la revocación falló", h.events.callCount())
+	}
+}
+
+// Un fallo del publish no debe alterar la respuesta de /refresh: la
+// revocación ya está persistida y el cliente debe recibir el mismo
+// ErrSessionReused que si el broker hubiera aceptado el mensaje. Es la misma
+// decisión, con la misma contrapartida documentada como deuda técnica, que
+// signup.Service.publish para user.created.
+func TestRefreshSiFallaElPublishNoCambiaLaRespuesta(t *testing.T) {
+	h := newHarness()
+	h.sessions.found.IsRevoked = true
+	h.events.err = errors.New("el broker no respondió")
+	svc := h.service(t)
+
+	access, refresh, err := svc.Refresh(context.Background(), validRefreshToken)
+
+	if !errors.Is(err, domain.ErrSessionReused) {
+		t.Errorf("error = %v, se esperaba ErrSessionReused pese al fallo de publish", err)
+	}
+	if access != "" || refresh != "" {
+		t.Error("un refresh token reusado no debe emitir tokens")
+	}
+	if h.events.callCount() != 1 {
+		t.Errorf("se intentó publicar %d veces, se esperaba 1", h.events.callCount())
+	}
+
+	logs := h.logs.String()
+	for _, esperado := range []string{"ERROR", "no se pudo publicar user.sessions.revoked", h.sessions.found.UserID.String()} {
 		if !strings.Contains(logs, esperado) {
 			t.Errorf("el log debería incluir %q: %s", esperado, logs)
 		}
@@ -316,13 +400,15 @@ func TestRefreshPropagaElErrorDeBusquedaSinTraducirlo(t *testing.T) {
 func TestNewRefreshServiceValidaLasDependencias(t *testing.T) {
 	h := newHarness()
 	base := session.RefreshDeps{
-		Sessions: h.sessions,
-		Tokens:   h.tokens,
+		Sessions:  h.sessions,
+		Tokens:    h.tokens,
+		Publisher: h.events,
 	}
 
 	cases := map[string]func(*session.RefreshDeps){
-		"sin sessions": func(d *session.RefreshDeps) { d.Sessions = nil },
-		"sin tokens":   func(d *session.RefreshDeps) { d.Tokens = nil },
+		"sin sessions":  func(d *session.RefreshDeps) { d.Sessions = nil },
+		"sin tokens":    func(d *session.RefreshDeps) { d.Tokens = nil },
+		"sin publisher": func(d *session.RefreshDeps) { d.Publisher = nil },
 	}
 
 	for name, degradar := range cases {
