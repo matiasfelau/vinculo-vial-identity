@@ -383,6 +383,14 @@ Los dos eventos usan el Event Envelope estándar de la plataforma. Ningún
 payload lleva PII: quien necesite datos de la persona los pide a este
 servicio.
 
+Se publican sobre `vvi.topic.exchange`. Este servicio nunca declara esa
+topología: la responsabilidad es de `vinculo-vial-core`, y `NewPublisher`
+verifica que el exchange exista con una declaración pasiva, fallando el
+arranque si no la encuentra en vez de crearla por su cuenta. Cada publicación
+va además con `mandatory=true`: si ningún binding la enruta a una cola, el
+broker la devuelve y `Publisher` lo deja en WARN, en lugar de perderse en
+silencio como podía ocurrir antes.
+
 ### `user.created`
 
 Se publica al completar el alta (US-01). `actor` va en `null` porque todavía
