@@ -197,7 +197,7 @@ const (
 	defaultConnMaxLifetime     = 30 * time.Minute
 	defaultConnMaxIdleTime     = 5 * time.Minute
 	defaultHPKEInfo            = ""
-	defaultEventsExchange      = "vinculo-vial.events"
+	defaultEventsExchange      = "vvi.topic.exchange"
 	defaultEventsProducer      = "vinculo-vial-identity"
 	defaultEventsPublishTimeut = 5 * time.Second
 	// defaultAccessTokenTTLMinutes y defaultRefreshTokenTTLDays son los valores

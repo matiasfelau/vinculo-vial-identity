@@ -23,7 +23,10 @@ import (
 
 // Valores por defecto de la configuración del publisher.
 const (
-	DefaultExchange       = "vinculo-vial.events"
+	// DefaultExchange es el topic exchange del contrato de la plataforma. Debe
+	// coincidir exactamente con el que declara vinculo-vial-core: ver la nota
+	// de declaración pasiva en connect().
+	DefaultExchange       = "vvi.topic.exchange"
 	DefaultProducer       = "vinculo-vial-identity"
 	DefaultPublishTimeout = 5 * time.Second
 	DefaultDialTimeout    = 10 * time.Second
@@ -82,11 +85,12 @@ type Publisher struct {
 	ch   *amqp.Channel
 }
 
-// NewPublisher conecta con el broker y declara el exchange.
+// NewPublisher conecta con el broker y verifica que el exchange exista.
 //
-// Se conecta en el arranque y no de forma perezosa: una URL mal configurada
-// tiene que hacer fallar el despliegue, no descubrirse recién cuando se
-// registre el primer vecino.
+// Se conecta en el arranque y no de forma perezosa: una URL mal configurada, o
+// un exchange que todavía no declaró vinculo-vial-core, tienen que hacer
+// fallar el despliegue, no descubrirse recién cuando se registre el primer
+// vecino.
 func NewPublisher(cfg Config, logger *slog.Logger) (*Publisher, error) {
 	if cfg.URL == "" {
 		return nil, errors.New("events: falta la URL del broker")
@@ -194,9 +198,12 @@ func (p *Publisher) send(ctx context.Context, routingKey string, msg amqp.Publis
 		ctx,
 		p.cfg.Exchange,
 		routingKey,
-		// mandatory=false: que hoy no haya cola atada al routing key es una
-		// decisión de los consumidores, no un fallo de la publicación.
-		false,
+		// mandatory=true: si ningún binding enruta el mensaje a una cola, el
+		// broker lo devuelve (ver watchReturns) en lugar de descartarlo sin
+		// dejar rastro. No cambia lo que confirma el publisher confirm: ese ack
+		// sigue significando "el broker aceptó el mensaje", nunca "una cola lo
+		// recibió"; mandatory es lo que expone esa segunda garantía.
+		true,
 		false,
 		msg,
 	)
@@ -232,18 +239,26 @@ func (p *Publisher) connect() error {
 		return fmt.Errorf("events: no se pudo abrir el canal: %w", err)
 	}
 
-	if err := ch.ExchangeDeclare(
+	// Declaración pasiva: este servicio solo publica, nunca declara topología
+	// (exchanges, colas, bindings) — eso es responsabilidad exclusiva de
+	// vinculo-vial-core. Antes se declaraba el exchange en modo activo, que
+	// crea silenciosamente uno propio si el nombre configurado no coincide con
+	// el que usa el resto de la plataforma: exactamente el desvío que dejaba
+	// perderse user.sessions.revoked sin que ningún log lo delatara. Con
+	// declaración pasiva, si el exchange todavía no existe, el arranque falla
+	// en lugar de crear uno nuevo.
+	if err := ch.ExchangeDeclarePassive(
 		p.cfg.Exchange,
 		amqp.ExchangeTopic,
-		true,  // durable: sobrevive al reinicio del broker
-		false, // no se autoelimina cuando no hay colas atadas
+		true,  // durable
+		false, // no se autoelimina
 		false, // no es interno
 		false, // se espera la confirmación de la declaración
 		nil,
 	); err != nil {
 		_ = ch.Close()
 		_ = conn.Close()
-		return fmt.Errorf("events: no se pudo declarar el exchange %q: %w", p.cfg.Exchange, err)
+		return fmt.Errorf("events: el exchange %q no existe: la topología la declara vinculo-vial-core, no este servicio: %w", p.cfg.Exchange, err)
 	}
 
 	if err := ch.Confirm(false); err != nil {
@@ -252,11 +267,40 @@ func (p *Publisher) connect() error {
 		return fmt.Errorf("events: el broker no aceptó el modo de confirmación: %w", err)
 	}
 
+	// Con mandatory=true (ver send) el broker devuelve acá cualquier mensaje
+	// que no pudo enrutar a ninguna cola, en vez de descartarlo en silencio.
+	// Se registra antes de publicar nada y se vuelve a registrar en cada
+	// reconexión, porque el canal AMQP anterior cierra este canal de retorno
+	// junto con él.
+	returns := make(chan amqp.Return, 8)
+	ch.NotifyReturn(returns)
+	go p.watchReturns(returns)
+
 	p.mu.Lock()
 	p.conn, p.ch = conn, ch
 	p.mu.Unlock()
 
 	return nil
+}
+
+// watchReturns deja constancia en WARN de cada evento que el broker no pudo
+// enrutar a ninguna cola. No es un error para el llamador de publishEnvelope
+// —el publisher confirm ya se recibió, el broker aceptó el mensaje— pero sí es
+// una alerta operativa: significa que Core declaró el exchange sin ningún
+// binding para ese routing key, o que el consumidor esperado todavía no
+// levantó su cola. Nunca loguea el cuerpo del mensaje, solo los identificadores
+// del sobre.
+func (p *Publisher) watchReturns(returns <-chan amqp.Return) {
+	for ret := range returns {
+		p.logger.Warn("el broker no pudo enrutar el evento: ninguna cola lo consume",
+			slog.String("event_id", ret.MessageId),
+			slog.String("event_type", ret.Type),
+			slog.String("routing_key", ret.RoutingKey),
+			slog.String("exchange", ret.Exchange),
+			slog.Int("reply_code", int(ret.ReplyCode)),
+			slog.String("reply_text", ret.ReplyText),
+		)
+	}
 }
 
 func (p *Publisher) reconnect() error {
