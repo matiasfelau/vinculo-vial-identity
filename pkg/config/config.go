@@ -39,6 +39,7 @@ type Config struct {
 	Crypto   CryptoConfig
 	Events   EventsConfig
 	Token    TokenConfig
+	Renaper  RenaperConfig
 }
 
 // HTTPConfig son los parámetros del servidor.
@@ -155,6 +156,16 @@ type TokenConfig struct {
 	Issuer string
 }
 
+// RenaperConfig son los parámetros de la consulta a RENAPER (US-01).
+type RenaperConfig struct {
+	// Timeout acota la consulta completa —conexión y lectura—. Sin este plazo
+	// propio, una llamada a RENAPER solo queda limitada por el contexto de la
+	// petición HTTP entrante, que no tiene por qué dejarle a esta única
+	// dependencia síncrona del servicio un presupuesto razonable dentro del
+	// total de /auth/signup.
+	Timeout time.Duration
+}
+
 // EventsConfig son los parámetros del broker.
 type EventsConfig struct {
 	// Enabled en false usa el publisher inerte. El broker es global y no forma
@@ -165,6 +176,13 @@ type EventsConfig struct {
 	Exchange       string
 	Producer       string
 	PublishTimeout time.Duration
+	// DialTimeout acota el establecimiento de la conexión AMQP, incluida una
+	// reconexión a mitad de un publish: ver la nota de dialWithDeadline en
+	// internal/delivery/events.
+	DialTimeout time.Duration
+	// Heartbeat es el latido de la conexión AMQP; permite detectar un broker
+	// caído sin esperar al timeout de TCP.
+	Heartbeat time.Duration
 }
 
 // Valores por defecto pensados para que el entorno local levante sin definir
@@ -191,15 +209,22 @@ const (
 	// atrapado acá, y lo bastante por debajo del default (10 MiB) como para
 	// dejarle margen real a un operador que sepa que su app produce selfies
 	// livianas y quiera ajustar el límite hacia abajo a propósito.
-	minViableMaxBodyBytes      = 512 << 10
-	defaultMaxOpenConns        = 20
-	defaultMaxIdleConns        = 5
-	defaultConnMaxLifetime     = 30 * time.Minute
-	defaultConnMaxIdleTime     = 5 * time.Minute
-	defaultHPKEInfo            = ""
+	minViableMaxBodyBytes  = 512 << 10
+	defaultMaxOpenConns    = 20
+	defaultMaxIdleConns    = 5
+	defaultConnMaxLifetime = 30 * time.Minute
+	defaultConnMaxIdleTime = 5 * time.Minute
+	defaultHPKEInfo        = ""
+	// defaultRenaperTimeout deja margen dentro del presupuesto total de
+	// /auth/signup (contrato de resiliencia: ≤ 5000 ms) para Argon2id, el
+	// cifrado/descifrado y la escritura en base, que corren antes y después de
+	// esta consulta.
+	defaultRenaperTimeout      = 3 * time.Second
 	defaultEventsExchange      = "vvi.topic.exchange"
 	defaultEventsProducer      = "vinculo-vial-identity"
 	defaultEventsPublishTimeut = 5 * time.Second
+	defaultEventsDialTimeout   = 10 * time.Second
+	defaultEventsHeartbeat     = 10 * time.Second
 	// defaultAccessTokenTTLMinutes y defaultRefreshTokenTTLDays son los valores
 	// que fija el contrato compartido de US-02, no una elección local: Gateway
 	// asume estos mismos TTL del lado de la verificación.
@@ -263,12 +288,18 @@ func Load() (*Config, error) {
 			Exchange:       r.str("RABBITMQ_EXCHANGE", defaultEventsExchange),
 			Producer:       r.str("RABBITMQ_PRODUCER", defaultEventsProducer),
 			PublishTimeout: r.duration("RABBITMQ_PUBLISH_TIMEOUT", defaultEventsPublishTimeut),
+			DialTimeout:    r.duration("RABBITMQ_DIAL_TIMEOUT", defaultEventsDialTimeout),
+			Heartbeat:      r.duration("RABBITMQ_HEARTBEAT", defaultEventsHeartbeat),
 		},
 
 		Token: TokenConfig{
 			AccessTokenTTL:  time.Duration(r.integer("ACCESS_TOKEN_TTL_MINUTES", defaultAccessTokenTTLMinutes)) * time.Minute,
 			RefreshTokenTTL: time.Duration(r.integer("REFRESH_TOKEN_TTL_DAYS", defaultRefreshTokenTTLDays)) * 24 * time.Hour,
 			Issuer:          r.str("JWT_ISSUER", defaultJWTIssuer),
+		},
+
+		Renaper: RenaperConfig{
+			Timeout: r.duration("RENAPER_TIMEOUT", defaultRenaperTimeout),
 		},
 	}
 
@@ -358,6 +389,10 @@ func (c *Config) validate() error {
 		r.fail("config: REFRESH_TOKEN_TTL_DAYS debe ser positivo")
 	}
 
+	if c.Renaper.Timeout <= 0 {
+		r.fail("config: RENAPER_TIMEOUT debe ser positivo")
+	}
+
 	if c.Events.Enabled {
 		if c.Events.URL.Reveal() == "" {
 			r.fail("config: RABBITMQ_URL es obligatoria con RABBITMQ_ENABLED=true")
@@ -406,6 +441,7 @@ func (c *Config) LogValue() slog.Value {
 		slog.Bool("postgres_ephemeral_db", c.Postgres.EphemeralDB),
 		slog.Bool("events_enabled", c.Events.Enabled),
 		slog.String("events_exchange", c.Events.Exchange),
+		slog.Duration("renaper_timeout", c.Renaper.Timeout),
 		slog.Int("argon2_memory_kib", c.Crypto.Argon2MemoryKiB),
 		slog.Duration("access_token_ttl", c.Token.AccessTokenTTL),
 		slog.Duration("refresh_token_ttl", c.Token.RefreshTokenTTL),
