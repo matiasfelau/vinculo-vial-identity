@@ -99,14 +99,23 @@ cuerpo fuera de contrato (→ `502`).
 aplicado por `renaper.WithTimeout` alrededor de la implementación activa — no
 depende únicamente del contexto de la petición HTTP entrante.
 
+Por fuera de `WithTimeout`, `renaper.WithCircuitBreaker` abre el circuito tras
+`RENAPER_BREAKER_FAILURE_THRESHOLD` fallas (`ErrUpstreamUnavailable` o
+`ErrUpstreamInvalidResponse`) dentro de `RENAPER_BREAKER_WINDOW` —defaults: 5
+fallas en 1 minuto—, y lo mantiene abierto `RENAPER_BREAKER_OPEN_DURATION`
+(30 s) antes de admitir una única llamada de prueba. Con el circuito abierto,
+`ValidateIdentity` devuelve `ErrUpstreamUnavailable` de inmediato, sin tocar la
+red. Un rechazo legítimo —`(false, nil)`— nunca cuenta como falla: es un
+resultado válido de la dependencia, no una caída suya.
+
 **Hoy solo existe `internal/renaper.Mock`**: espera ~500 ms y siempre devuelve
 `true`, sin contactar ningún servicio externo. No hay todavía credenciales ni
 contrato acordado con la API real de RENAPER. `cmd/api/main.go` lo cablea sin
 condicionarlo a ninguna variable de entorno y deja un `WARN` en cada arranque
 —**no debe usarse en producción**: aprobaría cualquier identidad sin verificar
 nada—. Cuando exista el cliente real, va a vivir en el mismo paquete, detrás del
-mismo puerto, envuelto por el mismo `WithTimeout`, sin que el resto del
-servicio se entere del cambio.
+mismo puerto, envuelto por el mismo `WithTimeout` y `WithCircuitBreaker`, sin
+que el resto del servicio se entere del cambio.
 
 ## Cómo funciona un login
 

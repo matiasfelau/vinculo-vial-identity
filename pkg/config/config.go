@@ -164,6 +164,16 @@ type RenaperConfig struct {
 	// dependencia síncrona del servicio un presupuesto razonable dentro del
 	// total de /auth/signup.
 	Timeout time.Duration
+	// BreakerFailureThreshold es la cantidad de fallas —timeout, conexión
+	// rechazada, 5xx del upstream— dentro de BreakerWindow que abren el
+	// circuito hacia RENAPER.
+	BreakerFailureThreshold int
+	// BreakerWindow es la ventana deslizante sobre la que se cuentan esas
+	// fallas.
+	BreakerWindow time.Duration
+	// BreakerOpenDuration es cuánto permanece abierto el circuito antes de
+	// admitir una única llamada de prueba (medio abierto).
+	BreakerOpenDuration time.Duration
 }
 
 // EventsConfig son los parámetros del broker.
@@ -219,8 +229,15 @@ const (
 	// /auth/signup (contrato de resiliencia: ≤ 5000 ms) para Argon2id, el
 	// cifrado/descifrado y la escritura en base, que corren antes y después de
 	// esta consulta.
-	defaultRenaperTimeout      = 3 * time.Second
-	defaultEventsExchange      = "vvi.topic.exchange"
+	defaultRenaperTimeout = 3 * time.Second
+	// Mismos valores que renaper.DefaultBreaker*: no hay un import cruzado
+	// entre este paquete y renaper —acá solo se leen variables de entorno—,
+	// así que el default se repite a propósito, igual que ya ocurre con
+	// defaultEventsExchange frente a events.DefaultExchange.
+	defaultRenaperBreakerFailureThreshold = 5
+	defaultRenaperBreakerWindow           = time.Minute
+	defaultRenaperBreakerOpenDuration     = 30 * time.Second
+	defaultEventsExchange                 = "vvi.topic.exchange"
 	defaultEventsProducer      = "vinculo-vial-identity"
 	defaultEventsPublishTimeut = 5 * time.Second
 	defaultEventsDialTimeout   = 10 * time.Second
@@ -299,7 +316,10 @@ func Load() (*Config, error) {
 		},
 
 		Renaper: RenaperConfig{
-			Timeout: r.duration("RENAPER_TIMEOUT", defaultRenaperTimeout),
+			Timeout:                 r.duration("RENAPER_TIMEOUT", defaultRenaperTimeout),
+			BreakerFailureThreshold: r.integer("RENAPER_BREAKER_FAILURE_THRESHOLD", defaultRenaperBreakerFailureThreshold),
+			BreakerWindow:           r.duration("RENAPER_BREAKER_WINDOW", defaultRenaperBreakerWindow),
+			BreakerOpenDuration:     r.duration("RENAPER_BREAKER_OPEN_DURATION", defaultRenaperBreakerOpenDuration),
 		},
 	}
 
@@ -392,6 +412,15 @@ func (c *Config) validate() error {
 	if c.Renaper.Timeout <= 0 {
 		r.fail("config: RENAPER_TIMEOUT debe ser positivo")
 	}
+	if c.Renaper.BreakerFailureThreshold <= 0 {
+		r.fail("config: RENAPER_BREAKER_FAILURE_THRESHOLD debe ser al menos 1")
+	}
+	if c.Renaper.BreakerWindow <= 0 {
+		r.fail("config: RENAPER_BREAKER_WINDOW debe ser positivo")
+	}
+	if c.Renaper.BreakerOpenDuration <= 0 {
+		r.fail("config: RENAPER_BREAKER_OPEN_DURATION debe ser positivo")
+	}
 
 	if c.Events.Enabled {
 		if c.Events.URL.Reveal() == "" {
@@ -442,6 +471,9 @@ func (c *Config) LogValue() slog.Value {
 		slog.Bool("events_enabled", c.Events.Enabled),
 		slog.String("events_exchange", c.Events.Exchange),
 		slog.Duration("renaper_timeout", c.Renaper.Timeout),
+		slog.Int("renaper_breaker_failure_threshold", c.Renaper.BreakerFailureThreshold),
+		slog.Duration("renaper_breaker_window", c.Renaper.BreakerWindow),
+		slog.Duration("renaper_breaker_open_duration", c.Renaper.BreakerOpenDuration),
 		slog.Int("argon2_memory_kib", c.Crypto.Argon2MemoryKiB),
 		slog.Duration("access_token_ttl", c.Token.AccessTokenTTL),
 		slog.Duration("refresh_token_ttl", c.Token.RefreshTokenTTL),
