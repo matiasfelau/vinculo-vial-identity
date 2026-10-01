@@ -283,12 +283,20 @@ func buildPublisher(cfg *config.Config, logger *slog.Logger) (domain.EventPublis
 // salvaguarda: que quede imposible de ignorar que ninguna identidad se está
 // verificando de verdad.
 //
-// Se envuelve con renaper.WithTimeout incluso sobre el Mock: así el límite de
-// RENAPER_TIMEOUT queda probado de punta a punta antes de que exista un
-// cliente real que lo necesite de verdad.
+// Se envuelve con renaper.WithTimeout y renaper.WithCircuitBreaker incluso
+// sobre el Mock: así ambos mecanismos quedan probados de punta a punta antes
+// de que exista un cliente real que los necesite de verdad. El breaker es la
+// capa más externa: con el circuito abierto, ValidateIdentity no debe
+// intentar nada, ni siquiera esperar el timeout.
 func buildRenaper(cfg *config.Config, logger *slog.Logger) domain.RenaperService {
 	logger.Warn("RenaperService en modo mock: ninguna identidad se verifica realmente; no usar en producción")
-	return renaper.WithTimeout(&renaper.Mock{}, cfg.Renaper.Timeout)
+
+	svc := renaper.WithTimeout(&renaper.Mock{}, cfg.Renaper.Timeout)
+	return renaper.WithCircuitBreaker(svc, renaper.BreakerConfig{
+		FailureThreshold: cfg.Renaper.BreakerFailureThreshold,
+		Window:           cfg.Renaper.BreakerWindow,
+		OpenDuration:     cfg.Renaper.BreakerOpenDuration,
+	}, logger)
 }
 
 // serve levanta el servidor público y el interno (US-04) a la vez, cada uno

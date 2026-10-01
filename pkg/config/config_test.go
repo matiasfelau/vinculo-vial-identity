@@ -52,6 +52,7 @@ func aplicar(t *testing.T, env map[string]string) {
 		"ARGON2_MEMORY_KIB", "ARGON2_ITERATIONS", "ARGON2_PARALLELISM",
 		"RABBITMQ_ENABLED", "RABBITMQ_URL", "RABBITMQ_EXCHANGE",
 		"RABBITMQ_DIAL_TIMEOUT", "RABBITMQ_HEARTBEAT", "RENAPER_TIMEOUT",
+		"RENAPER_BREAKER_FAILURE_THRESHOLD", "RENAPER_BREAKER_WINDOW", "RENAPER_BREAKER_OPEN_DURATION",
 	} {
 		t.Setenv(k, "")
 		os.Unsetenv(k)
@@ -220,6 +221,69 @@ func TestLoadRechazaRenaperTimeoutNoPositivo(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			env := entornoMinimo()
 			env["RENAPER_TIMEOUT"] = valor
+			aplicar(t, env)
+
+			if _, err := config.Load(); err == nil {
+				t.Error("se esperaba un error de configuración")
+			}
+		})
+	}
+}
+
+func TestLoadConfiguraElCircuitBreakerDeRenaperPorDefecto(t *testing.T) {
+	aplicar(t, entornoMinimo())
+
+	cfg, err := config.Load()
+	if err != nil {
+		t.Fatalf("error inesperado: %v", err)
+	}
+	if cfg.Renaper.BreakerFailureThreshold != 5 {
+		t.Errorf("breaker failure threshold = %d, se esperaban 5", cfg.Renaper.BreakerFailureThreshold)
+	}
+	if cfg.Renaper.BreakerWindow != time.Minute {
+		t.Errorf("breaker window = %v, se esperaba 1m", cfg.Renaper.BreakerWindow)
+	}
+	if cfg.Renaper.BreakerOpenDuration != 30*time.Second {
+		t.Errorf("breaker open duration = %v, se esperaban 30s", cfg.Renaper.BreakerOpenDuration)
+	}
+}
+
+func TestLoadAceptaUnCircuitBreakerDeRenaperPersonalizado(t *testing.T) {
+	env := entornoMinimo()
+	env["RENAPER_BREAKER_FAILURE_THRESHOLD"] = "2"
+	env["RENAPER_BREAKER_WINDOW"] = "10s"
+	env["RENAPER_BREAKER_OPEN_DURATION"] = "5s"
+	aplicar(t, env)
+
+	cfg, err := config.Load()
+	if err != nil {
+		t.Fatalf("error inesperado: %v", err)
+	}
+	if cfg.Renaper.BreakerFailureThreshold != 2 {
+		t.Errorf("breaker failure threshold = %d, se esperaban 2", cfg.Renaper.BreakerFailureThreshold)
+	}
+	if cfg.Renaper.BreakerWindow != 10*time.Second {
+		t.Errorf("breaker window = %v, se esperaban 10s", cfg.Renaper.BreakerWindow)
+	}
+	if cfg.Renaper.BreakerOpenDuration != 5*time.Second {
+		t.Errorf("breaker open duration = %v, se esperaban 5s", cfg.Renaper.BreakerOpenDuration)
+	}
+}
+
+func TestLoadRechazaElCircuitBreakerDeRenaperMalConfigurado(t *testing.T) {
+	cases := map[string]map[string]string{
+		"umbral cero":     {"RENAPER_BREAKER_FAILURE_THRESHOLD": "0"},
+		"umbral negativo": {"RENAPER_BREAKER_FAILURE_THRESHOLD": "-1"},
+		"ventana cero":    {"RENAPER_BREAKER_WINDOW": "0s"},
+		"apertura cero":   {"RENAPER_BREAKER_OPEN_DURATION": "0s"},
+	}
+
+	for name, override := range cases {
+		t.Run(name, func(t *testing.T) {
+			env := entornoMinimo()
+			for k, v := range override {
+				env[k] = v
+			}
 			aplicar(t, env)
 
 			if _, err := config.Load(); err == nil {
