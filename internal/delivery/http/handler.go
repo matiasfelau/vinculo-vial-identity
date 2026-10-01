@@ -367,6 +367,26 @@ func (h *Handler) abortWithDomainError(c *gin.Context, err error) {
 		// persona hasta acertar.
 		h.abort(c, http.StatusBadRequest, codeIdentityNotVerified, "no fue posible verificar la identidad", nil)
 
+	case errors.Is(err, domain.ErrUpstreamUnavailable):
+		// 503, no 500: RENAPER es quien no responde, no este servicio. El
+		// cliente puede reintentar razonablemente ante este código, que es
+		// justamente la distinción que un 500 genérico no comunica.
+		h.logger.WarnContext(c.Request.Context(), "dependencia no disponible",
+			slog.String("request_id", requestIDOf(c)),
+			slog.String("error", err.Error()),
+		)
+		h.abort(c, http.StatusServiceUnavailable, codeUpstreamUnavailable, "el servicio no está disponible, reintentar en unos segundos", nil)
+
+	case errors.Is(err, domain.ErrUpstreamInvalidResponse):
+		// 502: RENAPER respondió, pero con un error de su lado o un cuerpo
+		// fuera de contrato. Se distingue de ErrUpstreamUnavailable porque acá
+		// sí hubo respuesta; el detalle queda en el log, nunca en el cuerpo.
+		h.logger.ErrorContext(c.Request.Context(), "respuesta inválida del upstream",
+			slog.String("request_id", requestIDOf(c)),
+			slog.String("error", err.Error()),
+		)
+		h.abort(c, http.StatusBadGateway, codeUpstreamError, "el servicio no está disponible, reintentar en unos segundos", nil)
+
 	case errors.Is(err, domain.ErrMalformedCryptogram):
 		// El mensaje no tiene la forma de un mensaje HPKE. Es un cliente mal
 		// implementado, no un fallo del servicio: un 500 lo mandaría a buscar el

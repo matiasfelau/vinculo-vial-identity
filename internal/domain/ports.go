@@ -163,9 +163,13 @@ type RenaperService interface {
 	// ValidateIdentity devuelve (true, nil) cuando la identidad se confirma;
 	// (false, nil) cuando RENAPER respondió pero no pudo confirmarla —dato
 	// inválido o selfie que no coincide, sin distinguir cuál de las dos—; y
-	// (_, error) cuando el propio servicio de RENAPER no pudo consultarse (caído,
-	// timeout, credenciales rechazadas). Esta última categoría no implica nada
-	// sobre la identidad: es un fallo de la dependencia externa, no un veredicto.
+	// (_, error) cuando el propio servicio de RENAPER no pudo consultarse. Esta
+	// última categoría no implica nada sobre la identidad: es un fallo de la
+	// dependencia externa, no un veredicto, y el error debe envolver uno de los
+	// dos centinelas de domain que lo clasifican para la capa HTTP:
+	// ErrUpstreamUnavailable si RENAPER no respondió (timeout, conexión
+	// rechazada, circuito abierto), o ErrUpstreamInvalidResponse si respondió
+	// con un error de su lado o un cuerpo fuera de contrato.
 	//
 	// El llamador es responsable de limpiar dni, tramite, sexo y selfie cuando
 	// termina de usarlos.

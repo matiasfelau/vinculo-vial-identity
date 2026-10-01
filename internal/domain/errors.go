@@ -88,6 +88,19 @@ var (
 	// Refresh Token después de rotarlo: esto es la señal de un posible robo de
 	// sesión. → 403 Forbidden (Defensa Activa).
 	ErrSessionReused = errors.New("domain: refresh token reusado")
+
+	// ErrUpstreamUnavailable indica que una dependencia síncrona propia —hoy
+	// solo RenaperService— no respondió: timeout, conexión rechazada o
+	// circuito abierto. No es un veredicto sobre la solicitud, es un fallo de
+	// infraestructura ajena a este servicio. → 503 Service Unavailable,
+	// contrato de resiliencia común a toda la plataforma.
+	ErrUpstreamUnavailable = errors.New("domain: dependencia no disponible")
+
+	// ErrUpstreamInvalidResponse indica que la dependencia síncrona sí
+	// respondió, pero con un error de su lado (5xx) o un cuerpo fuera de
+	// contrato. A diferencia de ErrUpstreamUnavailable, hubo respuesta: el
+	// fallo es del upstream, no de la conexión hacia él. → 502 Bad Gateway.
+	ErrUpstreamInvalidResponse = errors.New("domain: respuesta inválida del upstream")
 )
 
 func invalidUser(reason string) error {

@@ -380,6 +380,8 @@ func TestSignUpMapeaLosErroresDeDominio(t *testing.T) {
 		"usuario duplicado":       {domain.ErrDuplicateUser, http.StatusConflict, "registro_no_disponible"},
 		"criptograma mal formado": {domain.ErrMalformedCryptogram, http.StatusBadRequest, "solicitud_invalida"},
 		"criptograma ilegible":    {domain.ErrInvalidCryptogram, http.StatusInternalServerError, "error_interno"},
+		"renaper no disponible":   {domain.ErrUpstreamUnavailable, http.StatusServiceUnavailable, "dependencia_no_disponible"},
+		"renaper responde mal":    {domain.ErrUpstreamInvalidResponse, http.StatusBadGateway, "upstream_invalido"},
 		"fallo inesperado":        {errors.New("la base no responde"), http.StatusInternalServerError, "error_interno"},
 	}
 
