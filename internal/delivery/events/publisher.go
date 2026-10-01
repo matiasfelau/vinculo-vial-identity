@@ -12,6 +12,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"net"
 	"strings"
 	"sync"
 	"time"
@@ -103,7 +104,13 @@ func NewPublisher(cfg Config, logger *slog.Logger) (*Publisher, error) {
 
 	p := &Publisher{cfg: cfg, logger: logger, now: time.Now}
 
-	if err := p.connect(); err != nil {
+	// En el arranque no hay un presupuesto de publish del que derivar el
+	// deadline del dial (ver dialWithDeadline): DialTimeout es, acá sí, una
+	// ventana propia.
+	ctx, cancel := context.WithTimeout(context.Background(), cfg.DialTimeout)
+	defer cancel()
+
+	if err := p.connect(ctx); err != nil {
 		return nil, err
 	}
 	return p, nil
@@ -155,7 +162,7 @@ func (p *Publisher) publishEnvelope(ctx context.Context, envelope Envelope) erro
 			slog.String("error", err.Error()),
 		)
 
-		if reconnectErr := p.reconnect(); reconnectErr != nil {
+		if reconnectErr := p.reconnect(ctx); reconnectErr != nil {
 			return fmt.Errorf("events: no se pudo reconectar con el broker: %w", reconnectErr)
 		}
 		if err := p.publish(ctx, envelope.EventType, msg); err != nil {
@@ -223,10 +230,61 @@ func scrubURL(err error, url string) error {
 	return errors.New(strings.ReplaceAll(msg, url, "[url omitida]"))
 }
 
-func (p *Publisher) connect() error {
+// dialWithDeadline adapta amqp.DefaultDial para que el dial respete el
+// presupuesto que quede en ctx, en vez de abrir su propia ventana de tiempo
+// independiente de DialTimeout. Sin esto, una reconexión disparada a mitad de
+// publishEnvelope podía tardar hasta DialTimeout completo sin importar cuánto
+// del PublishTimeout total ya se había consumido, multiplicando la latencia
+// de un broker caído muy por encima del presupuesto configurado (contrato de
+// resiliencia: el publish completo, reconexión incluida, no debe superar
+// PublishTimeout).
+// remainingOrFallback calcula la ventana de tiempo disponible para el dial:
+// lo que le quede de deadline a ctx, acotado por fallback. El menor de los
+// dos manda. Separado de dialWithDeadline para poder probar el cálculo sin
+// abrir una conexión de verdad —la conversación de red queda fuera de los
+// tests unitarios de este paquete, igual que el resto del protocolo AMQP.
+func remainingOrFallback(ctx context.Context, fallback time.Duration) time.Duration {
+	timeout := fallback
+	if deadline, ok := ctx.Deadline(); ok {
+		if remaining := time.Until(deadline); remaining < timeout {
+			timeout = remaining
+		}
+	}
+	return timeout
+}
+
+func dialWithDeadline(ctx context.Context, fallback time.Duration) func(network, addr string) (net.Conn, error) {
+	return func(network, addr string) (net.Conn, error) {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+
+		timeout := remainingOrFallback(ctx, fallback)
+		if timeout <= 0 {
+			return nil, context.DeadlineExceeded
+		}
+
+		conn, err := net.DialTimeout(network, addr, timeout)
+		if err != nil {
+			return nil, err
+		}
+
+		// Igual que amqp.DefaultDial: el latido todavía no arrancó, así que se
+		// fija un deadline propio para el handshake AMQP/TLS. La librería lo
+		// limpia una vez establecida la conexión (openComplete).
+		if err := conn.SetDeadline(time.Now().Add(timeout)); err != nil {
+			_ = conn.Close()
+			return nil, err
+		}
+
+		return conn, nil
+	}
+}
+
+func (p *Publisher) connect(ctx context.Context) error {
 	conn, err := amqp.DialConfig(p.cfg.URL, amqp.Config{
 		Heartbeat: p.cfg.Heartbeat,
-		Dial:      amqp.DefaultDial(p.cfg.DialTimeout),
+		Dial:      dialWithDeadline(ctx, p.cfg.DialTimeout),
 	})
 	if err != nil {
 		// La URL lleva las credenciales del broker; nunca se incluye en el error.
@@ -303,7 +361,7 @@ func (p *Publisher) watchReturns(returns <-chan amqp.Return) {
 	}
 }
 
-func (p *Publisher) reconnect() error {
+func (p *Publisher) reconnect(ctx context.Context) error {
 	p.mu.Lock()
 	if p.ch != nil {
 		_ = p.ch.Close()
@@ -314,7 +372,7 @@ func (p *Publisher) reconnect() error {
 	p.ch, p.conn = nil, nil
 	p.mu.Unlock()
 
-	return p.connect()
+	return p.connect(ctx)
 }
 
 // Close libera el canal y la conexión.

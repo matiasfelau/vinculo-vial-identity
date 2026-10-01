@@ -51,6 +51,7 @@ func aplicar(t *testing.T, env map[string]string) {
 		"JWT_PRIVATE_KEY", "JWT_ISSUER", "ACCESS_TOKEN_TTL_MINUTES", "REFRESH_TOKEN_TTL_DAYS",
 		"ARGON2_MEMORY_KIB", "ARGON2_ITERATIONS", "ARGON2_PARALLELISM",
 		"RABBITMQ_ENABLED", "RABBITMQ_URL", "RABBITMQ_EXCHANGE",
+		"RABBITMQ_DIAL_TIMEOUT", "RABBITMQ_HEARTBEAT", "RENAPER_TIMEOUT",
 	} {
 		t.Setenv(k, "")
 		os.Unsetenv(k)
@@ -95,6 +96,9 @@ func TestLoadConElEntornoMinimo(t *testing.T) {
 	}
 	if cfg.Token.RefreshTokenTTL != 30*24*time.Hour {
 		t.Errorf("refresh token ttl = %v, se esperaban 30 días", cfg.Token.RefreshTokenTTL)
+	}
+	if cfg.Renaper.Timeout != 3*time.Second {
+		t.Errorf("renaper timeout = %v, se esperaban 3s", cfg.Renaper.Timeout)
 	}
 }
 
@@ -186,6 +190,78 @@ func TestLoadAceptaTTLPersonalizados(t *testing.T) {
 	}
 	if cfg.Token.RefreshTokenTTL != 7*24*time.Hour {
 		t.Errorf("refresh token ttl = %v, se esperaban 7 días", cfg.Token.RefreshTokenTTL)
+	}
+}
+
+// RENAPER_TIMEOUT es el presupuesto de la única dependencia síncrona saliente
+// del servicio: tiene que poder ajustarse sin recompilar, igual que cualquier
+// otro timeout de infraestructura.
+func TestLoadAceptaUnRenaperTimeoutPersonalizado(t *testing.T) {
+	env := entornoMinimo()
+	env["RENAPER_TIMEOUT"] = "500ms"
+	aplicar(t, env)
+
+	cfg, err := config.Load()
+	if err != nil {
+		t.Fatalf("error inesperado: %v", err)
+	}
+	if cfg.Renaper.Timeout != 500*time.Millisecond {
+		t.Errorf("renaper timeout = %v, se esperaban 500ms", cfg.Renaper.Timeout)
+	}
+}
+
+func TestLoadRechazaRenaperTimeoutNoPositivo(t *testing.T) {
+	cases := map[string]string{
+		"cero":     "0s",
+		"negativo": "-1s",
+	}
+
+	for name, valor := range cases {
+		t.Run(name, func(t *testing.T) {
+			env := entornoMinimo()
+			env["RENAPER_TIMEOUT"] = valor
+			aplicar(t, env)
+
+			if _, err := config.Load(); err == nil {
+				t.Error("se esperaba un error de configuración")
+			}
+		})
+	}
+}
+
+// DialTimeout y Heartbeat no tenían variable de entorno propia: quedaban
+// fijos en los defaults del paquete events sin forma de ajustarlos sin
+// recompilar, al margen del resto de los timeouts salientes del servicio.
+func TestLoadConfiguraElDialTimeoutYElHeartbeatDelBrokerPorDefecto(t *testing.T) {
+	aplicar(t, entornoMinimo())
+
+	cfg, err := config.Load()
+	if err != nil {
+		t.Fatalf("error inesperado: %v", err)
+	}
+	if cfg.Events.DialTimeout != 10*time.Second {
+		t.Errorf("dial timeout = %v, se esperaban 10s", cfg.Events.DialTimeout)
+	}
+	if cfg.Events.Heartbeat != 10*time.Second {
+		t.Errorf("heartbeat = %v, se esperaban 10s", cfg.Events.Heartbeat)
+	}
+}
+
+func TestLoadAceptaUnDialTimeoutYHeartbeatPersonalizados(t *testing.T) {
+	env := entornoMinimo()
+	env["RABBITMQ_DIAL_TIMEOUT"] = "2s"
+	env["RABBITMQ_HEARTBEAT"] = "30s"
+	aplicar(t, env)
+
+	cfg, err := config.Load()
+	if err != nil {
+		t.Fatalf("error inesperado: %v", err)
+	}
+	if cfg.Events.DialTimeout != 2*time.Second {
+		t.Errorf("dial timeout = %v, se esperaban 2s", cfg.Events.DialTimeout)
+	}
+	if cfg.Events.Heartbeat != 30*time.Second {
+		t.Errorf("heartbeat = %v, se esperaban 30s", cfg.Events.Heartbeat)
 	}
 }
 

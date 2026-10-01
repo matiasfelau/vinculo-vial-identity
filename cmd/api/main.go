@@ -114,7 +114,7 @@ func run() error {
 		}
 	}()
 
-	renaperSvc := buildRenaper(logger)
+	renaperSvc := buildRenaper(cfg, logger)
 
 	signUpService, err := signup.New(signup.Deps{
 		Decryptor: decryptor,
@@ -264,6 +264,8 @@ func buildPublisher(cfg *config.Config, logger *slog.Logger) (domain.EventPublis
 		Exchange:       cfg.Events.Exchange,
 		Producer:       cfg.Events.Producer,
 		PublishTimeout: cfg.Events.PublishTimeout,
+		DialTimeout:    cfg.Events.DialTimeout,
+		Heartbeat:      cfg.Events.Heartbeat,
 	}, logger)
 	if err != nil {
 		return nil, nil, err
@@ -280,9 +282,13 @@ func buildPublisher(cfg *config.Config, logger *slog.Logger) (domain.EventPublis
 // una alternativa real que cablear. El WARN en cada arranque es la única
 // salvaguarda: que quede imposible de ignorar que ninguna identidad se está
 // verificando de verdad.
-func buildRenaper(logger *slog.Logger) domain.RenaperService {
+//
+// Se envuelve con renaper.WithTimeout incluso sobre el Mock: así el límite de
+// RENAPER_TIMEOUT queda probado de punta a punta antes de que exista un
+// cliente real que lo necesite de verdad.
+func buildRenaper(cfg *config.Config, logger *slog.Logger) domain.RenaperService {
 	logger.Warn("RenaperService en modo mock: ninguna identidad se verifica realmente; no usar en producción")
-	return &renaper.Mock{}
+	return renaper.WithTimeout(&renaper.Mock{}, cfg.Renaper.Timeout)
 }
 
 // serve levanta el servidor público y el interno (US-04) a la vez, cada uno

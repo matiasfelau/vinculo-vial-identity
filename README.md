@@ -89,7 +89,15 @@ ValidateIdentity(ctx, dni, tramite, sexo, selfie []byte) (bool, error)
 
 `(true, nil)` confirma la identidad; `(false, nil)` es un rechazo genuino de
 RENAPER (→ `400`, sin decir si falló el trámite, el sexo o la selfie); un
-`error` es un fallo de la consulta, no un veredicto (→ `500`).
+`error` es un fallo de la consulta, no un veredicto, y se clasifica según el
+contrato de resiliencia de la plataforma: `domain.ErrUpstreamUnavailable` si
+RENAPER no respondió —timeout, conexión rechazada— (→ `503`), o
+`domain.ErrUpstreamInvalidResponse` si respondió con un error de su lado o un
+cuerpo fuera de contrato (→ `502`).
+
+`RENAPER_TIMEOUT` (3 s por defecto) acota esa consulta de punta a punta,
+aplicado por `renaper.WithTimeout` alrededor de la implementación activa — no
+depende únicamente del contexto de la petición HTTP entrante.
 
 **Hoy solo existe `internal/renaper.Mock`**: espera ~500 ms y siempre devuelve
 `true`, sin contactar ningún servicio externo. No hay todavía credenciales ni
@@ -97,7 +105,8 @@ contrato acordado con la API real de RENAPER. `cmd/api/main.go` lo cablea sin
 condicionarlo a ninguna variable de entorno y deja un `WARN` en cada arranque
 —**no debe usarse en producción**: aprobaría cualquier identidad sin verificar
 nada—. Cuando exista el cliente real, va a vivir en el mismo paquete, detrás del
-mismo puerto, sin que el resto del servicio se entere del cambio.
+mismo puerto, envuelto por el mismo `WithTimeout`, sin que el resto del
+servicio se entere del cambio.
 
 ## Cómo funciona un login
 
@@ -390,6 +399,13 @@ arranque si no la encuentra en vez de crearla por su cuenta. Cada publicación
 va además con `mandatory=true`: si ningún binding la enruta a una cola, el
 broker la devuelve y `Publisher` lo deja en WARN, en lugar de perderse en
 silencio como podía ocurrir antes.
+
+`RABBITMQ_PUBLISH_TIMEOUT` (5 s por defecto) acota el intento completo —el
+primer publish, la reconexión si hace falta y el reintento— con un único
+deadline: el dial de la reconexión usa lo que le quede a ese mismo contexto en
+vez de abrir su propia ventana de `RABBITMQ_DIAL_TIMEOUT`, así que un broker
+caído no puede multiplicar la latencia del publish más allá del presupuesto
+configurado.
 
 ### `user.created`
 
