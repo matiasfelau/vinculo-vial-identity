@@ -10,7 +10,10 @@ package renaper
 
 import (
 	"context"
+	"fmt"
 	"time"
+
+	"github.com/matiasfelau/vinculo-vial-identity/internal/domain"
 )
 
 // DefaultMockLatency es la demora que simula el Mock cuando no se configura una
@@ -39,7 +42,11 @@ type Mock struct {
 //
 // Respeta la cancelación del contexto en vez de bloquear un shutdown ordenado o
 // el timeout de una petición hasta que se cumpla la latencia simulada, igual que
-// haría un cliente HTTP real contra RENAPER.
+// haría un cliente HTTP real contra RENAPER. El error que devuelve en ese caso
+// envuelve domain.ErrUpstreamUnavailable —tanto si el contexto se canceló como
+// si venció su deadline, el efecto para el llamador es el mismo: la dependencia
+// no respondió a tiempo— y conserva ctx.Err() en la cadena para que el
+// llamador siga pudiendo distinguir ambos casos si lo necesita.
 func (m *Mock) ValidateIdentity(ctx context.Context, dni, tramite, sexo, selfie []byte) (bool, error) {
 	latency := m.Latency
 	if latency <= 0 {
@@ -53,6 +60,6 @@ func (m *Mock) ValidateIdentity(ctx context.Context, dni, tramite, sexo, selfie 
 	case <-timer.C:
 		return true, nil
 	case <-ctx.Done():
-		return false, ctx.Err()
+		return false, fmt.Errorf("renaper: no respondió a tiempo: %w: %w", domain.ErrUpstreamUnavailable, ctx.Err())
 	}
 }

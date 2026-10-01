@@ -101,6 +101,14 @@ const (
 	// de servicio a servicio configurado en INTERNAL_SERVICE_TOKEN.
 	codeUnauthorizedService = "servicio_no_autorizado"
 	codeInternal            = "error_interno"
+	// codeUpstreamUnavailable es el código del 503 que produce el registro
+	// cuando RENAPER no respondió: timeout, conexión rechazada o circuito
+	// abierto. Contrato de resiliencia común a toda la plataforma.
+	codeUpstreamUnavailable = "dependencia_no_disponible"
+	// codeUpstreamError es el código del 502 que produce el registro cuando
+	// RENAPER sí respondió, pero con un error de su lado o un cuerpo fuera de
+	// contrato.
+	codeUpstreamError = "upstream_invalido"
 )
 
 // errorResponse es la forma única de todos los errores de la API.

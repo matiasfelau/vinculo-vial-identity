@@ -6,6 +6,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/matiasfelau/vinculo-vial-identity/internal/domain"
 	"github.com/matiasfelau/vinculo-vial-identity/internal/renaper"
 )
 
@@ -56,5 +57,24 @@ func TestMockRespetaLaCancelacionDelContexto(t *testing.T) {
 	}
 	if ok {
 		t.Error("no debe confirmarse una identidad cuando el contexto se cancela")
+	}
+}
+
+// El contrato de resiliencia de la plataforma exige que un fallo de RENAPER
+// se pueda clasificar como "dependencia no disponible" sin inspeccionar texto
+// de error: domain.ErrUpstreamUnavailable es lo que abortWithDomainError usa
+// para mapear a 503.
+func TestMockClasificaLaCancelacionComoUpstreamNoDisponible(t *testing.T) {
+	m := &renaper.Mock{Latency: time.Hour}
+
+	ctx, cancel := context.WithTimeout(t.Context(), time.Millisecond)
+	defer cancel()
+
+	_, err := m.ValidateIdentity(ctx, nil, nil, nil, nil)
+	if !errors.Is(err, domain.ErrUpstreamUnavailable) {
+		t.Errorf("error = %v, se esperaba que envolviera domain.ErrUpstreamUnavailable", err)
+	}
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Errorf("error = %v, se esperaba que conservara context.DeadlineExceeded", err)
 	}
 }
