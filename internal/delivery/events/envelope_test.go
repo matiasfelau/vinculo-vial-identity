@@ -169,9 +169,24 @@ func TestNewEnvelopeNormalizaLasMarcasDeTiempoAUTC(t *testing.T) {
 
 func eventoDeRevocacion() domain.SessionsRevoked {
 	return domain.NewSessionsRevoked(
+		uuid.MustParse("a1b2c3d4-e5f6-4789-9abc-def012345678"),
 		uuid.MustParse("6f2a4c1e-9d3b-4f5a-8c7d-1e2f3a4b5c6d"),
 		domain.SessionsRevokedReasonReuseDetected,
 	)
+}
+
+// A diferencia de user.created, el eventId acá no se genera en este punto:
+// viene del patrón Transactional Outbox (domain.OutboxEvent.ID) y tiene que
+// reutilizarse tal cual entre reintentos del worker, para que un consumidor
+// que deduplique por event_id no cuente dos veces una publicación
+// reintentada.
+func TestNewSessionsRevokedEnvelopeReutilizaElEventID(t *testing.T) {
+	evt := eventoDeRevocacion()
+	env := newSessionsRevokedEnvelope(evt, DefaultProducer, emitido)
+
+	if env.EventID != evt.EventID.String() {
+		t.Errorf("eventId = %q, se esperaba que reutilizara %q", env.EventID, evt.EventID.String())
+	}
 }
 
 func TestNewSessionsRevokedEnvelopeCompletaElSobreEstandar(t *testing.T) {

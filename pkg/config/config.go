@@ -40,6 +40,7 @@ type Config struct {
 	Events   EventsConfig
 	Token    TokenConfig
 	Renaper  RenaperConfig
+	Outbox   OutboxConfig
 }
 
 // HTTPConfig son los parámetros del servidor.
@@ -188,6 +189,16 @@ type RenaperConfig struct {
 	BreakerOpenDuration time.Duration
 }
 
+// OutboxConfig son los parámetros del worker en background que publica los
+// eventos del patrón Transactional Outbox (US-06).
+type OutboxConfig struct {
+	// WorkerInterval es cada cuánto corre un ciclo de publicación.
+	WorkerInterval time.Duration
+	// WorkerBatchSize acota cuántos eventos pendientes se intentan publicar
+	// por ciclo.
+	WorkerBatchSize int
+}
+
 // EventsConfig son los parámetros del broker.
 type EventsConfig struct {
 	// Enabled en false usa el publisher inerte. El broker es global y no forma
@@ -255,11 +266,17 @@ const (
 	defaultRenaperBreakerFailureThreshold = 5
 	defaultRenaperBreakerWindow           = time.Minute
 	defaultRenaperBreakerOpenDuration     = 30 * time.Second
-	defaultEventsExchange                 = "vvi.topic.exchange"
-	defaultEventsProducer                 = "vinculo-vial-identity"
-	defaultEventsPublishTimeut            = 1500 * time.Millisecond
-	defaultEventsDialTimeout              = 10 * time.Second
-	defaultEventsHeartbeat                = 10 * time.Second
+	// defaultOutboxWorkerInterval y defaultOutboxWorkerBatchSize no derivan
+	// del presupuesto de ningún request: el worker corre fuera del camino
+	// síncrono de /refresh, así que su cadencia es una decisión operativa
+	// (cuánto puede demorar en salir un evento), no de latencia.
+	defaultOutboxWorkerInterval  = 2 * time.Second
+	defaultOutboxWorkerBatchSize = 20
+	defaultEventsExchange        = "vvi.topic.exchange"
+	defaultEventsProducer        = "vinculo-vial-identity"
+	defaultEventsPublishTimeut   = 1500 * time.Millisecond
+	defaultEventsDialTimeout     = 10 * time.Second
+	defaultEventsHeartbeat       = 10 * time.Second
 	// defaultAccessTokenTTLMinutes y defaultRefreshTokenTTLDays son los valores
 	// que fija el contrato compartido de US-02, no una elección local: Gateway
 	// asume estos mismos TTL del lado de la verificación.
@@ -339,6 +356,11 @@ func Load() (*Config, error) {
 			BreakerFailureThreshold: r.integer("RENAPER_BREAKER_FAILURE_THRESHOLD", defaultRenaperBreakerFailureThreshold),
 			BreakerWindow:           r.duration("RENAPER_BREAKER_WINDOW", defaultRenaperBreakerWindow),
 			BreakerOpenDuration:     r.duration("RENAPER_BREAKER_OPEN_DURATION", defaultRenaperBreakerOpenDuration),
+		},
+
+		Outbox: OutboxConfig{
+			WorkerInterval:  r.duration("OUTBOX_WORKER_INTERVAL", defaultOutboxWorkerInterval),
+			WorkerBatchSize: r.integer("OUTBOX_WORKER_BATCH_SIZE", defaultOutboxWorkerBatchSize),
 		},
 	}
 
@@ -444,6 +466,13 @@ func (c *Config) validate() error {
 		r.fail("config: RENAPER_BREAKER_OPEN_DURATION debe ser positivo")
 	}
 
+	if c.Outbox.WorkerInterval <= 0 {
+		r.fail("config: OUTBOX_WORKER_INTERVAL debe ser positivo")
+	}
+	if c.Outbox.WorkerBatchSize < 1 {
+		r.fail("config: OUTBOX_WORKER_BATCH_SIZE debe ser al menos 1")
+	}
+
 	if c.Events.Enabled {
 		if c.Events.URL.Reveal() == "" {
 			r.fail("config: RABBITMQ_URL es obligatoria con RABBITMQ_ENABLED=true")
@@ -497,6 +526,8 @@ func (c *Config) LogValue() slog.Value {
 		slog.Int("renaper_breaker_failure_threshold", c.Renaper.BreakerFailureThreshold),
 		slog.Duration("renaper_breaker_window", c.Renaper.BreakerWindow),
 		slog.Duration("renaper_breaker_open_duration", c.Renaper.BreakerOpenDuration),
+		slog.Duration("outbox_worker_interval", c.Outbox.WorkerInterval),
+		slog.Int("outbox_worker_batch_size", c.Outbox.WorkerBatchSize),
 		slog.Int("argon2_memory_kib", c.Crypto.Argon2MemoryKiB),
 		slog.Duration("access_token_ttl", c.Token.AccessTokenTTL),
 		slog.Duration("refresh_token_ttl", c.Token.RefreshTokenTTL),

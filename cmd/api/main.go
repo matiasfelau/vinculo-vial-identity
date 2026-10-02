@@ -25,6 +25,7 @@ import (
 	"github.com/matiasfelau/vinculo-vial-identity/internal/domain"
 	"github.com/matiasfelau/vinculo-vial-identity/internal/renaper"
 	"github.com/matiasfelau/vinculo-vial-identity/internal/repository/postgres"
+	"github.com/matiasfelau/vinculo-vial-identity/internal/service/outbox"
 	"github.com/matiasfelau/vinculo-vial-identity/internal/service/ownership"
 	"github.com/matiasfelau/vinculo-vial-identity/internal/service/session"
 	"github.com/matiasfelau/vinculo-vial-identity/internal/service/signin"
@@ -99,6 +100,14 @@ func run() error {
 		return err
 	}
 
+	// outbox_events no depende de users ni de sessions: es la tabla del
+	// patrón Transactional Outbox de la Defensa Activa (US-06), ver
+	// domain.OutboxEvent.
+	outboxRepo, err := postgres.NewOutboxRepository(ctx, db)
+	if err != nil {
+		return err
+	}
+
 	tokens, err := buildTokenGenerator(cfg)
 	if err != nil {
 		return err
@@ -113,6 +122,16 @@ func run() error {
 			logger.Error("no se pudo cerrar el publisher", slog.String("error", err.Error()))
 		}
 	}()
+
+	// El worker de outbox publica en background: RefreshService ya no
+	// depende de domain.EventPublisher en absoluto, así que /refresh no se
+	// ve afectado por la disponibilidad del broker al ejecutar la Defensa
+	// Activa (más allá de que el evento tarde en salir mientras el worker
+	// reintenta). Comparte el ctx cancelable por SIGTERM de run(): al apagar
+	// el servicio dejan de programarse nuevos ciclos, en vez de que el
+	// worker sobreviva al resto del proceso.
+	outboxWorker := outbox.NewWorker(outboxRepo, publisher, cfg.Outbox.WorkerBatchSize, logger)
+	go outboxWorker.Run(ctx, cfg.Outbox.WorkerInterval)
 
 	renaperSvc := buildRenaper(cfg, logger)
 
@@ -144,10 +163,9 @@ func run() error {
 	}
 
 	refreshService, err := session.NewRefreshService(session.RefreshDeps{
-		Sessions:  sessions,
-		Tokens:    tokens,
-		Publisher: publisher,
-		Logger:    logger,
+		Sessions: sessions,
+		Tokens:   tokens,
+		Logger:   logger,
 	})
 	if err != nil {
 		return err

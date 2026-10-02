@@ -60,10 +60,18 @@ type SessionRepository interface {
 	RevokeByHash(ctx context.Context, refreshTokenHash string) error
 
 	// RevokeAllByUserID marca como revocadas todas las sesiones de un usuario,
-	// vigentes o no. Es la Defensa Activa de US-03: se dispara al detectar el
-	// reúso de un Refresh Token ya revocado, y asume que toda la familia de
-	// sesiones del usuario puede estar comprometida.
-	RevokeAllByUserID(ctx context.Context, userID uuid.UUID) error
+	// vigentes o no, y persiste outboxEvent en la misma transacción (patrón
+	// Transactional Outbox). Es la Defensa Activa de US-03: se dispara al
+	// detectar el reúso de un Refresh Token ya revocado, y asume que toda la
+	// familia de sesiones del usuario puede estar comprometida.
+	//
+	// outboxEvent nunca es nil en el único llamador actual (RefreshService):
+	// a diferencia de un evento con destinatarios opcionales, la Defensa
+	// Activa siempre tiene un usuario al que notificar. Se acepta como
+	// puntero, igual que otros puertos de este archivo, para que un futuro
+	// llamador sin nada que publicar pueda pasar nil sin forzar un tipo
+	// vacío.
+	RevokeAllByUserID(ctx context.Context, userID uuid.UUID, outboxEvent *OutboxEvent) error
 
 	// RotateSession revoca la sesión vieja e inserta la sesión rotada como una
 	// única operación atómica: si un paso falla, el otro se deshace.
@@ -76,6 +84,27 @@ type SessionRepository interface {
 	// garantizada por la forma del puerto, no por una convención que el
 	// llamador podría romper sin darse cuenta.
 	RotateSession(ctx context.Context, oldSessionID uuid.UUID, newSession *Session) error
+}
+
+// OutboxRepository expone las operaciones que el worker de publicación en
+// background (internal/service/outbox) necesita: traer eventos pendientes y
+// registrar el resultado del intento de publicarlos. Las filas las escribe
+// SessionRepository.RevokeAllByUserID, dentro de su propia transacción; este
+// puerto solo las lee y actualiza su estado.
+type OutboxRepository interface {
+	// FetchPending devuelve hasta limit eventos todavía no enviados,
+	// ordenados por antigüedad, para no dejar eventos varados detrás de un
+	// alud de eventos nuevos.
+	FetchPending(ctx context.Context, limit int) ([]OutboxEvent, error)
+
+	// MarkSent registra que el evento se publicó y el broker lo confirmó
+	// (publisher confirms). Antes de este punto, el evento sigue pendiente.
+	MarkSent(ctx context.Context, id uuid.UUID) error
+
+	// MarkFailed registra un intento fallido sin cambiar el estado pendiente:
+	// el worker lo va a reintentar en el próximo ciclo, reutilizando el mismo
+	// id como EventID (ver SessionsRevoked).
+	MarkFailed(ctx context.Context, id uuid.UUID, lastErr string) error
 }
 
 // TokenGenerator emite el par de tokens de una sesión nueva tras un login
