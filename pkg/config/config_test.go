@@ -46,7 +46,7 @@ func aplicar(t *testing.T, env map[string]string) {
 		"HTTP_INTERNAL_PORT", "INTERNAL_SERVICE_TOKEN",
 		"POSTGRES_HOST", "POSTGRES_PORT", "POSTGRES_USER", "POSTGRES_PASSWORD",
 		"POSTGRES_DB", "POSTGRES_SSLMODE", "POSTGRES_LOG_SQL", "EPHEMERAL_DB",
-		"POSTGRES_MAX_OPEN_CONNS", "POSTGRES_MAX_IDLE_CONNS",
+		"POSTGRES_MAX_OPEN_CONNS", "POSTGRES_MAX_IDLE_CONNS", "POSTGRES_STATEMENT_TIMEOUT",
 		"IDENTITY_HPKE_PRIVATE_KEY", "IDENTITY_HPKE_INFO", "AES_KEY", "HMAC_SECRET",
 		"JWT_PRIVATE_KEY", "JWT_ISSUER", "ACCESS_TOKEN_TTL_MINUTES", "REFRESH_TOKEN_TTL_DAYS",
 		"ARGON2_MEMORY_KIB", "ARGON2_ITERATIONS", "ARGON2_PARALLELISM",
@@ -98,8 +98,8 @@ func TestLoadConElEntornoMinimo(t *testing.T) {
 	if cfg.Token.RefreshTokenTTL != 30*24*time.Hour {
 		t.Errorf("refresh token ttl = %v, se esperaban 30 días", cfg.Token.RefreshTokenTTL)
 	}
-	if cfg.Renaper.Timeout != 3*time.Second {
-		t.Errorf("renaper timeout = %v, se esperaban 3s", cfg.Renaper.Timeout)
+	if cfg.Renaper.Timeout != 1500*time.Millisecond {
+		t.Errorf("renaper timeout = %v, se esperaban 1500ms", cfg.Renaper.Timeout)
 	}
 }
 
@@ -608,6 +608,54 @@ func TestLosSecretosNoSeImprimen(t *testing.T) {
 	}
 	if !strings.Contains(cfg.Postgres.DSN(), password) {
 		t.Error("el DSN debería llevar la contraseña real")
+	}
+}
+
+// statement_timeout protege del lado del servidor contra una sentencia
+// colgada, defensa en profundidad junto al deadline por consulta del
+// cliente (internal/repository/postgres.queryTimeout).
+func TestDSNIncluyeElStatementTimeoutPorDefecto(t *testing.T) {
+	aplicar(t, entornoMinimo())
+
+	cfg, err := config.Load()
+	if err != nil {
+		t.Fatalf("error inesperado: %v", err)
+	}
+	if !strings.Contains(cfg.Postgres.DSN(), "statement_timeout=1500") {
+		t.Errorf("DSN = %q, se esperaba statement_timeout=1500 (1500ms por defecto)", cfg.Postgres.DSN())
+	}
+}
+
+func TestDSNRespetaUnStatementTimeoutPersonalizado(t *testing.T) {
+	env := entornoMinimo()
+	env["POSTGRES_STATEMENT_TIMEOUT"] = "500ms"
+	aplicar(t, env)
+
+	cfg, err := config.Load()
+	if err != nil {
+		t.Fatalf("error inesperado: %v", err)
+	}
+	if !strings.Contains(cfg.Postgres.DSN(), "statement_timeout=500") {
+		t.Errorf("DSN = %q, se esperaba statement_timeout=500", cfg.Postgres.DSN())
+	}
+}
+
+func TestLoadRechazaStatementTimeoutNoPositivo(t *testing.T) {
+	cases := map[string]string{
+		"cero":     "0s",
+		"negativo": "-1s",
+	}
+
+	for name, valor := range cases {
+		t.Run(name, func(t *testing.T) {
+			env := entornoMinimo()
+			env["POSTGRES_STATEMENT_TIMEOUT"] = valor
+			aplicar(t, env)
+
+			if _, err := config.Load(); err == nil {
+				t.Error("se esperaba un error de configuración")
+			}
+		})
 	}
 }
 

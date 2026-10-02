@@ -98,13 +98,25 @@ type PostgresConfig struct {
 	// levante con una base vacía. Es destructivo por diseño: nunca admisible
 	// con APP_ENV=production (ver (*Config).validate()).
 	EphemeralDB bool
+	// StatementTimeout acota, del lado del servidor, cualquier sentencia que
+	// exceda este plazo (protege contra una consulta colgada aunque el
+	// cliente Go no respete su propio contexto). Es defensa en profundidad
+	// junto al deadline por consulta que aplica cada repositorio
+	// (internal/repository/postgres.queryTimeout): ese protege contra la
+	// espera por una conexión libre del pool, este contra una sentencia que
+	// ya arrancó y se cuelga.
+	StatementTimeout time.Duration
 }
 
-// DSN arma la cadena de conexión.
+// DSN arma la cadena de conexión. pgx trata un parámetro que no reconoce como
+// propio de la cadena de conexión como un parámetro de sesión de PostgreSQL
+// (equivalente a un SET tras conectar), así que alcanza con incluir
+// statement_timeout acá, sin tocar el driver.
 func (c PostgresConfig) DSN() string {
 	return fmt.Sprintf(
-		"host=%s port=%d user=%s password=%s dbname=%s sslmode=%s",
+		"host=%s port=%d user=%s password=%s dbname=%s sslmode=%s statement_timeout=%d",
 		c.Host, c.Port, c.User, c.Password.Reveal(), c.Database, c.SSLMode,
+		c.StatementTimeout.Milliseconds(),
 	)
 }
 
@@ -224,12 +236,18 @@ const (
 	defaultMaxIdleConns    = 5
 	defaultConnMaxLifetime = 30 * time.Minute
 	defaultConnMaxIdleTime = 5 * time.Minute
-	defaultHPKEInfo        = ""
-	// defaultRenaperTimeout deja margen dentro del presupuesto total de
-	// /auth/signup (contrato de resiliencia: ≤ 5000 ms) para Argon2id, el
-	// cifrado/descifrado y la escritura en base, que corren antes y después de
-	// esta consulta.
-	defaultRenaperTimeout = 3 * time.Second
+	// defaultStatementTimeout, defaultRenaperTimeout y
+	// defaultEventsPublishTimeut comparten el mismo valor a propósito: son
+	// las tres dependencias síncronas que /auth/signup encadena en el peor
+	// caso (RENAPER, la escritura en base, y el publish de user.created,
+	// este último de forma bloqueante para la respuesta HTTP aunque su
+	// fallo no la cambie). 1500 ms × 3 + ~500 ms de margen para Argon2id y
+	// el resto de la CPU propia (cifrado, framework) ≈ 5000 ms, el techo
+	// del contrato de resiliencia para el request completo. Subir
+	// cualquiera de los tres sin bajar otro rompe ese presupuesto.
+	defaultStatementTimeout = 1500 * time.Millisecond
+	defaultHPKEInfo         = ""
+	defaultRenaperTimeout   = 1500 * time.Millisecond
 	// Mismos valores que renaper.DefaultBreaker*: no hay un import cruzado
 	// entre este paquete y renaper —acá solo se leen variables de entorno—,
 	// así que el default se repite a propósito, igual que ya ocurre con
@@ -238,10 +256,10 @@ const (
 	defaultRenaperBreakerWindow           = time.Minute
 	defaultRenaperBreakerOpenDuration     = 30 * time.Second
 	defaultEventsExchange                 = "vvi.topic.exchange"
-	defaultEventsProducer      = "vinculo-vial-identity"
-	defaultEventsPublishTimeut = 5 * time.Second
-	defaultEventsDialTimeout   = 10 * time.Second
-	defaultEventsHeartbeat     = 10 * time.Second
+	defaultEventsProducer                 = "vinculo-vial-identity"
+	defaultEventsPublishTimeut            = 1500 * time.Millisecond
+	defaultEventsDialTimeout              = 10 * time.Second
+	defaultEventsHeartbeat                = 10 * time.Second
 	// defaultAccessTokenTTLMinutes y defaultRefreshTokenTTLDays son los valores
 	// que fija el contrato compartido de US-02, no una elección local: Gateway
 	// asume estos mismos TTL del lado de la verificación.
@@ -274,18 +292,19 @@ func Load() (*Config, error) {
 		},
 
 		Postgres: PostgresConfig{
-			Host:            r.str("POSTGRES_HOST", "localhost"),
-			Port:            r.integer("POSTGRES_PORT", 5432),
-			User:            r.required("POSTGRES_USER"),
-			Password:        Secret(r.required("POSTGRES_PASSWORD")),
-			Database:        r.required("POSTGRES_DB"),
-			SSLMode:         r.str("POSTGRES_SSLMODE", "disable"),
-			MaxOpenConns:    r.integer("POSTGRES_MAX_OPEN_CONNS", defaultMaxOpenConns),
-			MaxIdleConns:    r.integer("POSTGRES_MAX_IDLE_CONNS", defaultMaxIdleConns),
-			ConnMaxLifetime: r.duration("POSTGRES_CONN_MAX_LIFETIME", defaultConnMaxLifetime),
-			ConnMaxIdleTime: r.duration("POSTGRES_CONN_MAX_IDLE_TIME", defaultConnMaxIdleTime),
-			LogSQL:          r.boolean("POSTGRES_LOG_SQL", false),
-			EphemeralDB:     r.boolean("EPHEMERAL_DB", false),
+			Host:             r.str("POSTGRES_HOST", "localhost"),
+			Port:             r.integer("POSTGRES_PORT", 5432),
+			User:             r.required("POSTGRES_USER"),
+			Password:         Secret(r.required("POSTGRES_PASSWORD")),
+			Database:         r.required("POSTGRES_DB"),
+			SSLMode:          r.str("POSTGRES_SSLMODE", "disable"),
+			MaxOpenConns:     r.integer("POSTGRES_MAX_OPEN_CONNS", defaultMaxOpenConns),
+			MaxIdleConns:     r.integer("POSTGRES_MAX_IDLE_CONNS", defaultMaxIdleConns),
+			ConnMaxLifetime:  r.duration("POSTGRES_CONN_MAX_LIFETIME", defaultConnMaxLifetime),
+			ConnMaxIdleTime:  r.duration("POSTGRES_CONN_MAX_IDLE_TIME", defaultConnMaxIdleTime),
+			LogSQL:           r.boolean("POSTGRES_LOG_SQL", false),
+			EphemeralDB:      r.boolean("EPHEMERAL_DB", false),
+			StatementTimeout: r.duration("POSTGRES_STATEMENT_TIMEOUT", defaultStatementTimeout),
 		},
 
 		Crypto: CryptoConfig{
@@ -374,6 +393,9 @@ func (c *Config) validate() error {
 	if c.Postgres.MaxIdleConns > c.Postgres.MaxOpenConns {
 		r.fail("config: POSTGRES_MAX_IDLE_CONNS (%d) no puede superar POSTGRES_MAX_OPEN_CONNS (%d)",
 			c.Postgres.MaxIdleConns, c.Postgres.MaxOpenConns)
+	}
+	if c.Postgres.StatementTimeout <= 0 {
+		r.fail("config: POSTGRES_STATEMENT_TIMEOUT debe ser positivo")
 	}
 
 	// sslmode=disable manda el tráfico en claro. Vale en el compose local, donde
@@ -468,6 +490,7 @@ func (c *Config) LogValue() slog.Value {
 		slog.String("postgres_db", c.Postgres.Database),
 		slog.String("postgres_sslmode", c.Postgres.SSLMode),
 		slog.Bool("postgres_ephemeral_db", c.Postgres.EphemeralDB),
+		slog.Duration("postgres_statement_timeout", c.Postgres.StatementTimeout),
 		slog.Bool("events_enabled", c.Events.Enabled),
 		slog.String("events_exchange", c.Events.Exchange),
 		slog.Duration("renaper_timeout", c.Renaper.Timeout),

@@ -57,6 +57,9 @@ func (r *UserRepository) Create(ctx context.Context, u *domain.User) error {
 		return errors.New("postgres: se requiere un usuario")
 	}
 
+	ctx, cancel := context.WithTimeout(ctx, queryTimeout)
+	defer cancel()
+
 	if err := r.db.WithContext(ctx).Create(toModel(u)).Error; err != nil {
 		return mapCreateError(err)
 	}
@@ -67,6 +70,9 @@ func (r *UserRepository) Create(ctx context.Context, u *domain.User) error {
 // vía de búsqueda del login (US-02): nunca se busca por DNI en claro, que no
 // se persiste.
 func (r *UserRepository) FindByDNIHashed(ctx context.Context, dniHashed string) (*domain.User, error) {
+	ctx, cancel := context.WithTimeout(ctx, queryTimeout)
+	defer cancel()
+
 	var m userModel
 	if err := r.db.WithContext(ctx).Where("dni_hashed = ?", dniHashed).Take(&m).Error; err != nil {
 		return nil, mapFindError(err)
@@ -81,6 +87,9 @@ func (r *UserRepository) FindByDNIHashed(ctx context.Context, dniHashed string) 
 // lo tanto el mismo domain.ErrUserNotFound— sin que este repositorio tenga
 // que distinguirlos.
 func (r *UserRepository) FindByOwnerAndDNIHash(ctx context.Context, ownerID uuid.UUID, dniHashed string) (*domain.User, error) {
+	ctx, cancel := context.WithTimeout(ctx, queryTimeout)
+	defer cancel()
+
 	var m userModel
 	if err := r.db.WithContext(ctx).Where("id = ? AND dni_hashed = ?", ownerID, dniHashed).Take(&m).Error; err != nil {
 		return nil, mapFindError(err)
