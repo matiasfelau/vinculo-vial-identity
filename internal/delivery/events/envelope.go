@@ -79,10 +79,15 @@ type sessionsRevokedPayload struct {
 // A diferencia de newEnvelope, acá Actor sí lleva un valor: es el usuario
 // cuyas sesiones se revocaron, la referencia que Notification necesita para
 // saber de quién dar de baja los tokens FCM.
+//
+// EventID reutiliza evt.EventID en vez de generar uno nuevo: viene del
+// patrón Transactional Outbox (domain.OutboxEvent.ID), y tiene que ser
+// estable entre reintentos del worker para que un consumidor que deduplique
+// por event_id no cuente dos veces una publicación reintentada.
 func newSessionsRevokedEnvelope(evt domain.SessionsRevoked, producer string, now time.Time) Envelope {
 	actor := evt.UserID.String()
 	return Envelope{
-		EventID:   uuid.NewString(),
+		EventID:   evt.EventID.String(),
 		EventType: EventTypeSessionsRevoked,
 		Timestamp: now.UTC().Format(time.RFC3339Nano),
 		Producer:  producer,

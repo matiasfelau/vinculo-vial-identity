@@ -53,6 +53,7 @@ func aplicar(t *testing.T, env map[string]string) {
 		"RABBITMQ_ENABLED", "RABBITMQ_URL", "RABBITMQ_EXCHANGE",
 		"RABBITMQ_DIAL_TIMEOUT", "RABBITMQ_HEARTBEAT", "RENAPER_TIMEOUT",
 		"RENAPER_BREAKER_FAILURE_THRESHOLD", "RENAPER_BREAKER_WINDOW", "RENAPER_BREAKER_OPEN_DURATION",
+		"OUTBOX_WORKER_INTERVAL", "OUTBOX_WORKER_BATCH_SIZE",
 	} {
 		t.Setenv(k, "")
 		os.Unsetenv(k)
@@ -276,6 +277,62 @@ func TestLoadRechazaElCircuitBreakerDeRenaperMalConfigurado(t *testing.T) {
 		"umbral negativo": {"RENAPER_BREAKER_FAILURE_THRESHOLD": "-1"},
 		"ventana cero":    {"RENAPER_BREAKER_WINDOW": "0s"},
 		"apertura cero":   {"RENAPER_BREAKER_OPEN_DURATION": "0s"},
+	}
+
+	for name, override := range cases {
+		t.Run(name, func(t *testing.T) {
+			env := entornoMinimo()
+			for k, v := range override {
+				env[k] = v
+			}
+			aplicar(t, env)
+
+			if _, err := config.Load(); err == nil {
+				t.Error("se esperaba un error de configuración")
+			}
+		})
+	}
+}
+
+func TestLoadConfiguraElWorkerDeOutboxPorDefecto(t *testing.T) {
+	aplicar(t, entornoMinimo())
+
+	cfg, err := config.Load()
+	if err != nil {
+		t.Fatalf("error inesperado: %v", err)
+	}
+	if cfg.Outbox.WorkerInterval != 2*time.Second {
+		t.Errorf("worker interval = %v, se esperaban 2s", cfg.Outbox.WorkerInterval)
+	}
+	if cfg.Outbox.WorkerBatchSize != 20 {
+		t.Errorf("worker batch size = %d, se esperaban 20", cfg.Outbox.WorkerBatchSize)
+	}
+}
+
+func TestLoadAceptaUnWorkerDeOutboxPersonalizado(t *testing.T) {
+	env := entornoMinimo()
+	env["OUTBOX_WORKER_INTERVAL"] = "500ms"
+	env["OUTBOX_WORKER_BATCH_SIZE"] = "5"
+	aplicar(t, env)
+
+	cfg, err := config.Load()
+	if err != nil {
+		t.Fatalf("error inesperado: %v", err)
+	}
+	if cfg.Outbox.WorkerInterval != 500*time.Millisecond {
+		t.Errorf("worker interval = %v, se esperaban 500ms", cfg.Outbox.WorkerInterval)
+	}
+	if cfg.Outbox.WorkerBatchSize != 5 {
+		t.Errorf("worker batch size = %d, se esperaban 5", cfg.Outbox.WorkerBatchSize)
+	}
+}
+
+func TestLoadRechazaElWorkerDeOutboxMalConfigurado(t *testing.T) {
+	cases := map[string]map[string]string{
+		"intervalo cero":     {"OUTBOX_WORKER_INTERVAL": "0s"},
+		"intervalo negativo": {"OUTBOX_WORKER_INTERVAL": "-1s"},
+		"batch size cero":    {"OUTBOX_WORKER_BATCH_SIZE": "0"},
+		"batch size negativo": {"OUTBOX_WORKER_BATCH_SIZE": "-1"},
 	}
 
 	for name, override := range cases {

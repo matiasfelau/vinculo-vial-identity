@@ -338,7 +338,8 @@ cmd/genkeys/                generación del material criptográfico
 internal/domain/            entidades User y Session, eventos, errores centinela, puertos
 internal/service/signup/    orquestación del alta (US-01)
 internal/service/signin/    orquestación del login (US-02)
-internal/repository/postgres/  persistencia GORM (users, sessions)
+internal/service/outbox/    worker en background del patrón Transactional Outbox (US-06)
+internal/repository/postgres/  persistencia GORM (users, sessions, outbox_events)
 internal/delivery/http/     handlers Gin, DTOs, middlewares
 internal/delivery/events/   publisher RabbitMQ (+ inerte)
 internal/crypto/hpke/       descifrado del transporte
@@ -394,6 +395,21 @@ que recibe el cliente. La clave foránea con `ON DELETE CASCADE` se agrega con
 SQL crudo después de `AutoMigrate`, de forma idempotente: GORM solo la genera
 sola a partir de una asociación Go, y no hace falta cargar esa relación
 completa solo para declararla.
+
+Tabla `outbox_events`, creada con `AutoMigrate` en la inicialización de
+`OutboxRepository`. No depende de `users` ni de `sessions`: es infraestructura
+interna del patrón Transactional Outbox (US-06), no un dato de negocio.
+
+| campo | tipo | notas |
+|---|---|---|
+| `id` | uuid | PK; mismo valor que `eventId` al publicarse |
+| `user_id` | uuid | usuario cuyas sesiones se revocaron |
+| `reason` | varchar(64) | `REUSE_DETECTED` |
+| `status` | varchar(16) | `pending` / `sent`, indexada junto a `created_at` |
+| `attempts` | int | incrementado en cada intento fallido |
+| `last_error` | text | nullable; diagnóstico del último fallo |
+| `created_at` | timestamptz | usada para ordenar `FetchPending` |
+| `sent_at` | timestamptz | nullable; se fija al marcar `sent` |
 
 ### Clasificación de errores de la base
 
@@ -481,6 +497,18 @@ del usuario, y hacerlo en cada logout apagaría las notificaciones de sus
 demás dispositivos. Acá `actor` sí lleva el UUID del usuario afectado, y
 `reason` es un enum acotado pensado para auditoría.
 
+**Patrón Transactional Outbox.** A diferencia de `user.created`,
+`RefreshService` no publica nada de forma síncrona: `SessionRepository.
+RevokeAllByUserID` persiste la revocación y una fila en `outbox_events` en la
+misma transacción, y `internal/service/outbox.Worker` la retira y publica en
+background (`OUTBOX_WORKER_INTERVAL`, por defecto cada 2 s). Un evento se
+marca enviado solo después de que el broker lo confirme; si el publish falla,
+o se confirma pero no se puede marcar, queda pendiente para el próximo ciclo,
+reutilizando el mismo `eventId` para que un consumidor que deduplique por él
+no cuente dos veces un reintento. Resuelve la doble escritura no atómica que
+antes existía entre la revocación y el publish: la respuesta de `/refresh` ya
+no depende en absoluto de la disponibilidad de RabbitMQ.
+
 ```json
 {
   "eventId": "…",
@@ -503,12 +531,13 @@ demás dispositivos. Acá `actor` sí lleva el UUID del usuario afectado, y
 - **Contrato desincronizado con Frontend y Gateway.** El payload interno
   reemplazó `biometric_verified` por `tramite`/`sexo`/`selfie`; hasta que los
   otros dos repos repliquen el cambio, no son interoperables entre sí.
-- **Outbox transaccional.** Hoy, si RabbitMQ está caído, tanto el alta
-  (`user.created`) como la Defensa Activa (`user.sessions.revoked`) se
-  completan igual y el evento se pierde con un registro de error. Es la
-  decisión correcta para no romper el caso de uso que motiva cada evento por
-  un problema del broker, pero hay que resolverlo antes de que algún
-  consumidor dependa de alguno de los dos para algo crítico.
+- **Outbox transaccional para `user.created`.** A diferencia de
+  `user.sessions.revoked` (ver más arriba, ya resuelto con el patrón Outbox),
+  el alta sigue publicando de forma síncrona: si RabbitMQ está caído, el
+  usuario se registra igual y el evento se pierde con un registro de error.
+  Es la decisión correcta para no romper el alta por un problema del broker,
+  pero hay que resolverlo con el mismo patrón antes de que algún consumidor
+  dependa de `user.created` para algo crítico.
 - **Migraciones versionadas**, en lugar de `AutoMigrate`.
 - **Rate limiting** de los endpoints de alta y login. Argon2id reserva 64 MiB
   por derivación concurrente (el login también deriva uno, vía `Verify`, en
