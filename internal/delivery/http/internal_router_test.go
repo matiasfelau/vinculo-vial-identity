@@ -289,6 +289,7 @@ func TestVerifyOwnershipTraduceLosErroresDeDominio(t *testing.T) {
 	}{
 		{"criptograma mal formado", domain.ErrMalformedCryptogram, http.StatusBadRequest},
 		{"criptograma que no abre", domain.ErrInvalidCryptogram, http.StatusInternalServerError},
+		{"base de datos caída", domain.ErrDatabaseUnavailable, http.StatusServiceUnavailable},
 		{"fallo de infraestructura", errors.New("connection reset by peer"), http.StatusInternalServerError},
 	}
 

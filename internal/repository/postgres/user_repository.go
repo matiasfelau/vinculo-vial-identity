@@ -92,10 +92,21 @@ func mapFindError(err error) error {
 	if errors.Is(err, gorm.ErrRecordNotFound) {
 		return domain.ErrUserNotFound
 	}
+	if classified := classifyDBError(err); errors.Is(classified, domain.ErrDatabaseUnavailable) {
+		return classified
+	}
 	return fmt.Errorf("postgres: no se pudo buscar el usuario: %w", err)
 }
 
 func mapCreateError(err error) error {
+	// La indisponibilidad de la base se distingue primero: un SQLSTATE de
+	// conexión o de recursos agotados nunca coincide con el de una violación
+	// de unicidad, así que el orden entre ambos chequeos no cambia el
+	// resultado, pero clasificar primero deja la intención más clara.
+	if classified := classifyDBError(err); errors.Is(classified, domain.ErrDatabaseUnavailable) {
+		return classified
+	}
+
 	// TranslateError de GORM cubre el caso normal; el chequeo de SQLSTATE es el
 	// respaldo si esa opción se desactiva o el driver cambia.
 	if errors.Is(err, gorm.ErrDuplicatedKey) {

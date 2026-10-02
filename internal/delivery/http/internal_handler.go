@@ -48,8 +48,9 @@ func NewInternalHandler(verifyOwnership VerifyOwnershipService, logger *slog.Log
 //	400 — el cuerpo no es JSON interpretable, owner_id no es un UUID válido,
 //	      dni_enc no es base64, o el criptograma no tiene la forma de un
 //	      mensaje HPKE.
+//	503 — la base de datos propia no está disponible.
 //	500 — el criptograma no descifra (clave desincronizada o manipulación),
-//	      o falla algo interno (p. ej. la consulta al repositorio).
+//	      o falla algo interno distinto.
 //
 // La autenticación de servicio a servicio (X-Internal-Service-Token) la
 // exige el middleware del router interno antes de que la petición llegue
@@ -116,6 +117,14 @@ func (h *InternalHandler) abortVerifyOwnershipError(c *gin.Context, err error, o
 			slog.String("owner_id", ownerID.String()),
 		)
 		h.abort(c, http.StatusInternalServerError, codeInternal, "error interno")
+
+	case errors.Is(err, domain.ErrDatabaseUnavailable):
+		h.logger.WarnContext(c.Request.Context(), "base de datos no disponible en verify-ownership",
+			slog.String("request_id", requestIDOf(c)),
+			slog.String("owner_id", ownerID.String()),
+			slog.String("error", err.Error()),
+		)
+		h.abort(c, http.StatusServiceUnavailable, codeUpstreamUnavailable, "el servicio no está disponible, reintentar en unos segundos")
 
 	default:
 		h.logger.ErrorContext(c.Request.Context(), "fallo no esperado en verify-ownership",

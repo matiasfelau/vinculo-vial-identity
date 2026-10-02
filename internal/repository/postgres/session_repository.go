@@ -65,7 +65,7 @@ func (r *SessionRepository) Create(ctx context.Context, s *domain.Session) error
 	}
 
 	if err := r.db.WithContext(ctx).Create(toSessionModel(s)).Error; err != nil {
-		return fmt.Errorf("postgres: no se pudo crear la sesión: %w", err)
+		return fmt.Errorf("postgres: no se pudo crear la sesión: %w", classifyDBError(err))
 	}
 	return nil
 }
@@ -85,7 +85,7 @@ func (r *SessionRepository) RevokeByID(ctx context.Context, id uuid.UUID) error 
 		Model(&sessionModel{}).
 		Where("id = ?", id).
 		Update("is_revoked", true).Error; err != nil {
-		return fmt.Errorf("postgres: no se pudo revocar la sesión: %w", err)
+		return fmt.Errorf("postgres: no se pudo revocar la sesión: %w", classifyDBError(err))
 	}
 	return nil
 }
@@ -98,7 +98,7 @@ func (r *SessionRepository) RevokeByHash(ctx context.Context, refreshTokenHash s
 		Model(&sessionModel{}).
 		Where("refresh_token_hash = ?", refreshTokenHash).
 		Update("is_revoked", true).Error; err != nil {
-		return fmt.Errorf("postgres: no se pudo revocar la sesión: %w", err)
+		return fmt.Errorf("postgres: no se pudo revocar la sesión: %w", classifyDBError(err))
 	}
 	return nil
 }
@@ -112,7 +112,7 @@ func (r *SessionRepository) RevokeAllByUserID(ctx context.Context, userID uuid.U
 		Model(&sessionModel{}).
 		Where("user_id = ?", userID).
 		Update("is_revoked", true).Error; err != nil {
-		return fmt.Errorf("postgres: no se pudo revocar las sesiones del usuario: %w", err)
+		return fmt.Errorf("postgres: no se pudo revocar las sesiones del usuario: %w", classifyDBError(err))
 	}
 	return nil
 }
@@ -140,7 +140,7 @@ func (r *SessionRepository) RotateSession(ctx context.Context, oldSessionID uuid
 		return nil
 	})
 	if err != nil {
-		return fmt.Errorf("postgres: no se pudo rotar la sesión: %w", err)
+		return fmt.Errorf("postgres: no se pudo rotar la sesión: %w", classifyDBError(err))
 	}
 	return nil
 }
@@ -148,6 +148,9 @@ func (r *SessionRepository) RotateSession(ctx context.Context, oldSessionID uuid
 func mapSessionFindError(err error) error {
 	if errors.Is(err, gorm.ErrRecordNotFound) {
 		return domain.ErrSessionNotFound
+	}
+	if classified := classifyDBError(err); errors.Is(classified, domain.ErrDatabaseUnavailable) {
+		return classified
 	}
 	return fmt.Errorf("postgres: no se pudo buscar la sesión: %w", err)
 }
