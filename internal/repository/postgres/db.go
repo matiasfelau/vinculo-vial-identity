@@ -90,7 +90,7 @@ func Open(ctx context.Context, cfg Config) (*gorm.DB, error) {
 // base no contesta, el orquestador no debería derivar tráfico a esta réplica,
 // porque ningún alta podría persistirse.
 //
-// Mismo queryTimeout que el resto de las consultas: /readyz no debería tardar
+// Mismo queryTimeout que el resto de las consultas: /ready no debería tardar
 // más que cualquier otra operación en darse cuenta de que la base no responde.
 func Ping(ctx context.Context, db *gorm.DB) error {
 	if db == nil {

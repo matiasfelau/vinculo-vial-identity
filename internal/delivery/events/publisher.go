@@ -30,10 +30,9 @@ const (
 	DefaultExchange = "vvi.topic.exchange"
 	DefaultProducer = "vinculo-vial-identity"
 	// DefaultPublishTimeout acota el intento completo de publish (attempt,
-	// reconexión y reintento — ver publishEnvelope y dialWithDeadline). El
-	// valor es una de las tres fracciones iguales del presupuesto de
-	// /auth/signup (contrato de resiliencia: request completo ≤ 5000 ms);
-	// ver la nota de defaultEventsPublishTimeut en pkg/config.
+	// reconexión y reintento — ver publishEnvelope y dialWithDeadline). Lo
+	// consume el worker del outbox, fuera del camino de cualquier request,
+	// así que no suma a la latencia de ningún endpoint.
 	DefaultPublishTimeout = 1500 * time.Millisecond
 	// DefaultDialTimeout solo rige la conexión inicial en el arranque
 	// (NewPublisher): no es parte del presupuesto por petición, así que no
@@ -124,17 +123,12 @@ func NewPublisher(cfg Config, logger *slog.Logger) (*Publisher, error) {
 	return p, nil
 }
 
-// PublishUserCreated emite el evento con confirmación del broker.
+// PublishSessionsRevoked emite el evento con confirmación del broker.
 //
 // La entrega es persistente y se espera el ack: sin confirmación, un publish
 // exitoso solo prueba que el mensaje salió del proceso, no que el broker lo
-// haya aceptado, y un reinicio del broker lo perdería en silencio.
-func (p *Publisher) PublishUserCreated(ctx context.Context, evt domain.UserCreated) error {
-	return p.publishEnvelope(ctx, newEnvelope(evt, p.cfg.Producer, p.now()))
-}
-
-// PublishSessionsRevoked emite el evento con confirmación del broker, con las
-// mismas garantías que PublishUserCreated.
+// haya aceptado, y un reinicio del broker lo perdería en silencio. Toda
+// publicación va además con mandatory=true (ver send), como fija el contrato.
 func (p *Publisher) PublishSessionsRevoked(ctx context.Context, evt domain.SessionsRevoked) error {
 	return p.publishEnvelope(ctx, newSessionsRevokedEnvelope(evt, p.cfg.Producer, p.now()))
 }
@@ -213,11 +207,12 @@ func (p *Publisher) send(ctx context.Context, routingKey string, msg amqp.Publis
 		ctx,
 		p.cfg.Exchange,
 		routingKey,
-		// mandatory=true: si ningún binding enruta el mensaje a una cola, el
-		// broker lo devuelve (ver watchReturns) en lugar de descartarlo sin
-		// dejar rastro. No cambia lo que confirma el publisher confirm: ese ack
-		// sigue significando "el broker aceptó el mensaje", nunca "una cola lo
-		// recibió"; mandatory es lo que expone esa segunda garantía.
+		// mandatory=true, sin excepciones: si ningún binding enruta el mensaje
+		// a una cola, el broker lo devuelve (ver watchReturns) en lugar de
+		// descartarlo sin dejar rastro. No cambia lo que confirma el
+		// publisher confirm: ese ack sigue significando "el broker aceptó el
+		// mensaje", nunca "una cola lo recibió"; mandatory es lo que expone
+		// esa segunda garantía.
 		true,
 		false,
 		msg,

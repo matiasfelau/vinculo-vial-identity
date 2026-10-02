@@ -19,8 +19,8 @@ const (
 // este paquete más que a través de domain.OutboxEvent.
 type outboxEventModel struct {
 	ID        uuid.UUID  `gorm:"column:id;type:uuid;primaryKey"`
-	UserID    uuid.UUID  `gorm:"column:user_id;type:uuid;not null"`
-	Reason    string     `gorm:"column:reason;type:varchar(64);not null"`
+	Type      string     `gorm:"column:type;type:varchar(64);not null"`
+	Payload   []byte     `gorm:"column:payload;type:jsonb;not null"`
 	Status    string     `gorm:"column:status;type:varchar(16);not null;default:pending;index:idx_outbox_events_status_created_at,priority:1"`
 	Attempts  int        `gorm:"column:attempts;not null;default:0"`
 	LastError *string    `gorm:"column:last_error;type:text"`

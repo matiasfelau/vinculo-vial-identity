@@ -25,7 +25,7 @@ type RouterConfig struct {
 	Logout  LogoutService
 	Logger  *slog.Logger
 	// ReadinessCheck reporta si las dependencias externas responden. Si es nil,
-	// /readyz se limita a informar que el proceso está vivo.
+	// /ready se limita a informar que el proceso está vivo.
 	ReadinessCheck func(context.Context) error
 	// MaxBodyBytes limita el cuerpo de las peticiones. Si es 0 se usa el valor
 	// por defecto.
@@ -81,20 +81,23 @@ func NewRouter(cfg RouterConfig) (*gin.Engine, error) {
 		c.JSON(http.StatusOK, gin.H{"status": "ok"})
 	})
 
-	r.GET("/readyz", func(c *gin.Context) {
+	readyHandler := func(c *gin.Context) {
 		if cfg.ReadinessCheck != nil {
 			if err := cfg.ReadinessCheck(c.Request.Context()); err != nil {
 				logger.ErrorContext(c.Request.Context(), "dependencia no disponible",
 					slog.String("error", err.Error()),
 				)
-				// El motivo queda en el log: el cuerpo de /readyz lo puede leer
+				// El motivo queda en el log: el cuerpo de la respuesta lo puede leer
 				// cualquiera que alcance el puerto.
 				c.JSON(http.StatusServiceUnavailable, gin.H{"status": "unavailable"})
 				return
 			}
 		}
 		c.JSON(http.StatusOK, gin.H{"status": "ready"})
-	})
+	}
+
+	r.GET("/ready", readyHandler)
+	r.GET("/readyz", readyHandler)
 
 	auth := r.Group("/api/v1/auth", limitBody(maxBody), noStore())
 	auth.POST("/signup", handler.SignUp)

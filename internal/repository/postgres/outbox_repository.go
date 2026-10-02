@@ -19,8 +19,8 @@ import (
 func toOutboxModel(e *domain.OutboxEvent) *outboxEventModel {
 	return &outboxEventModel{
 		ID:        e.ID,
-		UserID:    e.UserID,
-		Reason:    string(e.Reason),
+		Type:      e.Type,
+		Payload:   e.Payload,
 		Status:    outboxStatusPending,
 		CreatedAt: e.CreatedAt,
 	}
@@ -29,8 +29,8 @@ func toOutboxModel(e *domain.OutboxEvent) *outboxEventModel {
 func (m *outboxEventModel) toDomain() domain.OutboxEvent {
 	return domain.OutboxEvent{
 		ID:        m.ID,
-		UserID:    m.UserID,
-		Reason:    domain.SessionsRevokedReason(m.Reason),
+		Type:      m.Type,
+		Payload:   m.Payload,
 		CreatedAt: m.CreatedAt,
 	}
 }

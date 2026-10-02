@@ -57,23 +57,3 @@ func TestNewUser(t *testing.T) {
 		}
 	})
 }
-
-func TestNewUserCreated(t *testing.T) {
-	now := time.Now()
-	u, err := domain.NewUser("vecino@example.com", "$argon2id$hash", "blindindex", "cifrado", now)
-	if err != nil {
-		t.Fatalf("error inesperado: %v", err)
-	}
-
-	evt := domain.NewUserCreated(u)
-
-	if evt.UserID != u.ID {
-		t.Errorf("user id = %v, se esperaba %v", evt.UserID, u.ID)
-	}
-	if evt.AccountStatus != domain.AccountStatusActive {
-		t.Errorf("account status = %q, se esperaba %q", evt.AccountStatus, domain.AccountStatusActive)
-	}
-	if !evt.OccurredAt.Equal(u.CreatedAt) {
-		t.Errorf("occurred at = %v, se esperaba %v", evt.OccurredAt, u.CreatedAt)
-	}
-}

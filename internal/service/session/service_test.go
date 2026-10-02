@@ -2,6 +2,7 @@ package session_test
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"log/slog"
 	"strings"
@@ -213,11 +214,23 @@ func TestRefreshSesionYaRevocadaDisparaLaDefensaActiva(t *testing.T) {
 	if evento.ID == uuid.Nil {
 		t.Error("el evento de outbox debe llevar un ID propio, reutilizable entre reintentos")
 	}
-	if evento.UserID != h.sessions.found.UserID {
-		t.Errorf("user_id del evento = %v, se esperaba %v", evento.UserID, h.sessions.found.UserID)
+	if evento.Type != "user.sessions.revoked" {
+		t.Errorf("tipo de evento = %q, se esperaba user.sessions.revoked", evento.Type)
 	}
-	if evento.Reason != domain.SessionsRevokedReasonReuseDetected {
-		t.Errorf("reason del evento = %q, se esperaba %q", evento.Reason, domain.SessionsRevokedReasonReuseDetected)
+
+	var payload struct {
+		UserID string `json:"user_id"`
+		Reason string `json:"reason"`
+	}
+	if err := json.Unmarshal(evento.Payload, &payload); err != nil {
+		t.Fatalf("payload inválido: %v", err)
+	}
+
+	if payload.UserID != h.sessions.found.UserID.String() {
+		t.Errorf("user_id del evento = %v, se esperaba %v", payload.UserID, h.sessions.found.UserID)
+	}
+	if payload.Reason != string(domain.SessionsRevokedReasonReuseDetected) {
+		t.Errorf("reason del evento = %q, se esperaba %q", payload.Reason, domain.SessionsRevokedReasonReuseDetected)
 	}
 	if !evento.CreatedAt.Equal(h.now) {
 		t.Errorf("created_at del evento = %v, se esperaba %v", evento.CreatedAt, h.now)

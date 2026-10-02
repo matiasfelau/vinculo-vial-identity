@@ -247,15 +247,14 @@ const (
 	defaultMaxIdleConns    = 5
 	defaultConnMaxLifetime = 30 * time.Minute
 	defaultConnMaxIdleTime = 5 * time.Minute
-	// defaultStatementTimeout, defaultRenaperTimeout y
-	// defaultEventsPublishTimeut comparten el mismo valor a propósito: son
-	// las tres dependencias síncronas que /auth/signup encadena en el peor
-	// caso (RENAPER, la escritura en base, y el publish de user.created,
-	// este último de forma bloqueante para la respuesta HTTP aunque su
-	// fallo no la cambie). 1500 ms × 3 + ~500 ms de margen para Argon2id y
-	// el resto de la CPU propia (cifrado, framework) ≈ 5000 ms, el techo
-	// del contrato de resiliencia para el request completo. Subir
-	// cualquiera de los tres sin bajar otro rompe ese presupuesto.
+	// defaultStatementTimeout y defaultRenaperTimeout son las dos
+	// dependencias síncronas que /auth/signup encadena en el peor caso
+	// (RENAPER y la escritura en base): 1500 ms × 2 + ~500 ms de margen para
+	// Argon2id y el resto de la CPU propia (cifrado, framework) ≈ 3500 ms,
+	// bajo el techo de 5000 ms del contrato de resiliencia para el request
+	// completo. defaultEventsPublishTimeut tiene el mismo valor por
+	// coherencia, pero lo consume el worker del outbox, fuera de cualquier
+	// request.
 	defaultStatementTimeout = 1500 * time.Millisecond
 	defaultHPKEInfo         = ""
 	defaultRenaperTimeout   = 1500 * time.Millisecond

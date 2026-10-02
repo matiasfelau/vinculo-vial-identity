@@ -12,8 +12,6 @@ import (
 	"log/slog"
 	"time"
 
-	"github.com/google/uuid"
-
 	"github.com/matiasfelau/vinculo-vial-identity/internal/domain"
 )
 
@@ -100,12 +98,14 @@ func (s *RefreshService) Refresh(ctx context.Context, refreshToken string) (acce
 		// escritura, y por lo tanto no hay forma de que la revocación quede
 		// persistida sin que el evento a publicar también lo quede, ni
 		// viceversa.
-		outboxEvent := domain.OutboxEvent{
-			ID:        uuid.New(),
-			UserID:    found.UserID,
-			Reason:    domain.SessionsRevokedReasonReuseDetected,
-			CreatedAt: s.deps.Now(),
+		outboxEvent, err := domain.NewOutboxEvent("user.sessions.revoked", map[string]string{
+			"user_id": found.UserID.String(),
+			"reason":  string(domain.SessionsRevokedReasonReuseDetected),
+		})
+		if err != nil {
+			return "", "", fmt.Errorf("session: no se pudo armar el evento de outbox: %w", err)
 		}
+		outboxEvent.CreatedAt = s.deps.Now()
 		if err := s.deps.Sessions.RevokeAllByUserID(ctx, found.UserID, &outboxEvent); err != nil {
 			return "", "", fmt.Errorf("session: no se pudo ejecutar la defensa activa: %w", err)
 		}

@@ -2,6 +2,7 @@ package outbox_test
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"sync"
 	"testing"
@@ -74,10 +75,6 @@ type publisherMock struct {
 	published []domain.SessionsRevoked
 }
 
-func (m *publisherMock) PublishUserCreated(context.Context, domain.UserCreated) error {
-	panic("outbox: PublishUserCreated no se usa en este paquete")
-}
-
 func (m *publisherMock) PublishSessionsRevoked(_ context.Context, evt domain.SessionsRevoked) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -90,12 +87,10 @@ func (m *publisherMock) PublishSessionsRevoked(_ context.Context, evt domain.Ses
 }
 
 func unEvento() domain.OutboxEvent {
-	return domain.OutboxEvent{
-		ID:        uuid.MustParse("a1b2c3d4-e5f6-4789-9abc-def012345678"),
-		UserID:    uuid.New(),
-		Reason:    domain.SessionsRevokedReasonReuseDetected,
-		CreatedAt: time.Now().UTC(),
-	}
+	evt, _ := domain.NewOutboxEvent("user.sessions.revoked", domain.NewSessionsRevoked(uuid.New(), uuid.New(), domain.SessionsRevokedReasonReuseDetected))
+	evt.ID = uuid.MustParse("a1b2c3d4-e5f6-4789-9abc-def012345678")
+	evt.CreatedAt = time.Now().UTC()
+	return evt
 }
 
 func TestProcessBatchPublicaYMarcaEnviado(t *testing.T) {
@@ -125,11 +120,17 @@ func TestProcessBatchPublicaYMarcaEnviado(t *testing.T) {
 	if publicado.EventID != evt.ID {
 		t.Errorf("EventID publicado = %v, se esperaba %v (reutilizado del outbox)", publicado.EventID, evt.ID)
 	}
-	if publicado.UserID != evt.UserID {
-		t.Errorf("UserID publicado = %v, se esperaba %v", publicado.UserID, evt.UserID)
+	var payload struct {
+		UserID string `json:"user_id"`
+		Reason string `json:"reason"`
 	}
-	if publicado.Reason != evt.Reason {
-		t.Errorf("Reason publicado = %q, se esperaba %q", publicado.Reason, evt.Reason)
+	_ = json.Unmarshal(evt.Payload, &payload)
+
+	if publicado.UserID.String() != payload.UserID {
+		t.Errorf("UserID publicado = %v, se esperaba %v", publicado.UserID, payload.UserID)
+	}
+	if string(publicado.Reason) != payload.Reason {
+		t.Errorf("Reason publicado = %q, se esperaba %q", publicado.Reason, payload.Reason)
 	}
 }
 
@@ -176,6 +177,42 @@ func TestProcessBatchSiFallaMarkSentTrasPublicarNoLoCuentaComoEnviado(t *testing
 	}
 	if len(pub.published) != 1 {
 		t.Error("se esperaba que el publish sí se hubiera intentado una vez")
+	}
+}
+
+// Un tipo desconocido o un payload que no se puede interpretar no se publican
+// con datos inventados: el evento queda pendiente con el motivo en last_error,
+// para que alguien lo vea, en vez de salir al bus con un user_id vacío.
+func TestProcessBatchNoPublicaEventosQueNoPuedeInterpretar(t *testing.T) {
+	casos := map[string]func(*domain.OutboxEvent){
+		"tipo desconocido":    func(e *domain.OutboxEvent) { e.Type = "user.created" },
+		"payload ilegible":    func(e *domain.OutboxEvent) { e.Payload = []byte("{no es json") },
+		"user_id inválido":    func(e *domain.OutboxEvent) { e.Payload = []byte(`{"user_id":"no-es-uuid","reason":"REUSE_DETECTED"}`) },
+		"payload sin user_id": func(e *domain.OutboxEvent) { e.Payload = []byte(`{"reason":"REUSE_DETECTED"}`) },
+	}
+
+	for nombre, degradar := range casos {
+		t.Run(nombre, func(t *testing.T) {
+			evt := unEvento()
+			degradar(&evt)
+			repo := &outboxRepoMock{pending: []domain.OutboxEvent{evt}}
+			pub := &publisherMock{}
+			w := outbox.NewWorker(repo, pub, 20, nil)
+
+			sent, err := w.ProcessBatch(context.Background())
+			if err != nil {
+				t.Fatalf("error inesperado: %v", err)
+			}
+			if sent != 0 || len(pub.published) != 0 {
+				t.Errorf("sent=%d published=%d, se esperaba que no se publicara nada", sent, len(pub.published))
+			}
+			if len(repo.failedIDs) != 1 || repo.failedIDs[0] != evt.ID {
+				t.Errorf("failedIDs = %v, se esperaba [%v]", repo.failedIDs, evt.ID)
+			}
+			if len(repo.sentIDs) != 0 {
+				t.Error("no debería haberse marcado como enviado")
+			}
+		})
 	}
 }
 

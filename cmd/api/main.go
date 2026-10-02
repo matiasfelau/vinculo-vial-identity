@@ -142,7 +142,6 @@ func run() error {
 		Hasher:    hasher,
 		Renaper:   renaperSvc,
 		Users:     users,
-		Publisher: publisher,
 		Logger:    logger,
 	})
 	if err != nil {

@@ -68,9 +68,9 @@ const (
 // enviado), el reintento reutiliza el mismo EventID, para que un consumidor
 // que deduplique por event_id lo trate como el mismo evento, no uno nuevo.
 type SessionsRevoked struct {
-	EventID uuid.UUID
-	UserID  uuid.UUID
-	Reason  SessionsRevokedReason
+	EventID uuid.UUID             `json:"event_id"`
+	UserID  uuid.UUID             `json:"user_id"`
+	Reason  SessionsRevokedReason `json:"reason"`
 }
 
 // NewSessionsRevoked construye el evento de la Defensa Activa a partir de un
@@ -80,23 +80,3 @@ func NewSessionsRevoked(eventID, userID uuid.UUID, reason SessionsRevokedReason)
 	return SessionsRevoked{EventID: eventID, UserID: userID, Reason: reason}
 }
 
-// OutboxEvent es un evento de dominio pendiente de publicar, persistido en la
-// misma transacción que el cambio de estado que lo origina (patrón
-// Transactional Outbox). Hoy es exclusivamente el de la Defensa Activa de
-// US-03: la publicación de user.sessions.revoked se demora hasta el worker en
-// background de internal/service/outbox, en vez de intentarse de forma
-// síncrona dentro de /refresh — un evento sin fila de outbox persistida es
-// indistinguible de uno que nunca pasó, así que esta tabla es la única fuente
-// de verdad de "qué falta publicar".
-//
-// Resuelve el TECH DEBT (MVP) que documentaba session.RefreshService antes de
-// esta versión: la revocación de sesiones y el evento a publicar ya no son
-// una doble escritura no atómica, porque SessionRepository.RevokeAllByUserID
-// persiste ambas cosas en la misma transacción.
-type OutboxEvent struct {
-	// ID es el mismo valor que lleva SessionsRevoked.EventID al publicarse.
-	ID        uuid.UUID
-	UserID    uuid.UUID
-	Reason    SessionsRevokedReason
-	CreatedAt time.Time
-}

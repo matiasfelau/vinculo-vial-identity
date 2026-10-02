@@ -82,7 +82,7 @@ services:
       # con varios componentes ese nombre es demasiado genérico y colisiona fácil.
       - vinculo-vial
     # La imagen es scratch: no hay shell ni curl con que ejecutar un healthcheck
-    # de Compose. El endpoint /readyz existe igual y es el que consume el
+    # de Compose. El endpoint /ready existe igual y es el que consume el
     # orquestador en los entornos reales.
 
 volumes:
