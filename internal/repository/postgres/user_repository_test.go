@@ -157,6 +157,25 @@ func TestMapFindErrorNoTraduceOtrosFallos(t *testing.T) {
 	}
 }
 
+// Sección Postgres del contrato de resiliencia: un SQLSTATE de conexión debe
+// mapearse a ErrDatabaseUnavailable (→ 503), no al 500 genérico.
+func TestMapFindErrorClasificaIndisponibilidadDeLaBase(t *testing.T) {
+	got := mapFindError(&pgconn.PgError{Code: "08006"})
+	if !errors.Is(got, domain.ErrDatabaseUnavailable) {
+		t.Errorf("error = %v, se esperaba ErrDatabaseUnavailable", got)
+	}
+}
+
+func TestMapCreateErrorClasificaIndisponibilidadDeLaBase(t *testing.T) {
+	got := mapCreateError(&pgconn.PgError{Code: "53300"})
+	if !errors.Is(got, domain.ErrDatabaseUnavailable) {
+		t.Errorf("error = %v, se esperaba ErrDatabaseUnavailable", got)
+	}
+	if errors.Is(got, domain.ErrDuplicateUser) {
+		t.Error("la indisponibilidad de la base no debe confundirse con un duplicado")
+	}
+}
+
 func TestCloseToleraConexionNula(t *testing.T) {
 	if err := Close(nil); err != nil {
 		t.Errorf("error inesperado: %v", err)

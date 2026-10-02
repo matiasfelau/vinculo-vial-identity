@@ -101,6 +101,17 @@ var (
 	// contrato. A diferencia de ErrUpstreamUnavailable, hubo respuesta: el
 	// fallo es del upstream, no de la conexión hacia él. → 502 Bad Gateway.
 	ErrUpstreamInvalidResponse = errors.New("domain: respuesta inválida del upstream")
+
+	// ErrDatabaseUnavailable indica que la base de datos propia no respondió
+	// a tiempo o no está disponible: deadline de contexto, falla de conexión
+	// (SQLSTATE 08xxx), recursos agotados (53xxx), statement_timeout excedido
+	// (57014) o apagado administrativo (57P0x) — sección Postgres del
+	// contrato de resiliencia. El repositorio es quien clasifica
+	// (postgres.classifyDBError); el resto del servicio solo necesita este
+	// centinela. → 503 Service Unavailable. Cualquier otro error de
+	// persistencia (ej. una violación de constraint, ya colapsada en
+	// ErrDuplicateUser) no es este caso: 502 no aplica a la base.
+	ErrDatabaseUnavailable = errors.New("domain: la base de datos no está disponible")
 )
 
 func invalidUser(reason string) error {

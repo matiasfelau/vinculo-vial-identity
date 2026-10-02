@@ -395,6 +395,19 @@ SQL crudo después de `AutoMigrate`, de forma idempotente: GORM solo la genera
 sola a partir de una asociación Go, y no hace falta cargar esa relación
 completa solo para declararla.
 
+### Clasificación de errores de la base
+
+`internal/repository/postgres.classifyDBError` traduce cualquier error de
+persistencia a `domain.ErrDatabaseUnavailable` cuando es indisponibilidad —no
+cuando es un error de la aplicación—, según la sección Postgres del contrato
+de resiliencia: deadline de contexto vencido, SQLSTATE `08xxx` (conexión),
+`53xxx` (recursos agotados), `57014` (`statement_timeout`) o `57P0x` (apagado
+administrativo). Cualquier otro error de la base —una violación de constraint,
+ya colapsada en `ErrDuplicateUser`— se propaga sin clasificar. Todos los
+repositorios lo aplican, y todos los handlers HTTP lo mapean a `503` antes de
+caer en el `500` genérico: `502` no aplica a la base, porque Postgres no tiene
+un equivalente al "5xx del upstream" de una dependencia HTTP.
+
 ## Eventos publicados
 
 Los dos eventos usan el Event Envelope estándar de la plataforma. Ningún
