@@ -95,7 +95,7 @@ RENAPER no respondió —timeout, conexión rechazada— (→ `503`), o
 `domain.ErrUpstreamInvalidResponse` si respondió con un error de su lado o un
 cuerpo fuera de contrato (→ `502`).
 
-`RENAPER_TIMEOUT` (3 s por defecto) acota esa consulta de punta a punta,
+`RENAPER_TIMEOUT` (1500 ms por defecto) acota esa consulta de punta a punta,
 aplicado por `renaper.WithTimeout` alrededor de la implementación activa — no
 depende únicamente del contexto de la petición HTTP entrante.
 
@@ -422,12 +422,35 @@ va además con `mandatory=true`: si ningún binding la enruta a una cola, el
 broker la devuelve y `Publisher` lo deja en WARN, en lugar de perderse en
 silencio como podía ocurrir antes.
 
-`RABBITMQ_PUBLISH_TIMEOUT` (5 s por defecto) acota el intento completo —el
+`RABBITMQ_PUBLISH_TIMEOUT` (1500 ms por defecto) acota el intento completo —el
 primer publish, la reconexión si hace falta y el reintento— con un único
 deadline: el dial de la reconexión usa lo que le quede a ese mismo contexto en
 vez de abrir su propia ventana de `RABBITMQ_DIAL_TIMEOUT`, así que un broker
 caído no puede multiplicar la latencia del publish más allá del presupuesto
-configurado.
+configurado. El publish de `user.created` es bloqueante para la respuesta de
+`/auth/signup` —un fallo no la cambia, pero su latencia sí cuenta para el
+total— así que este valor entra en el presupuesto de los 5000 ms descripto
+más abajo.
+
+### Presupuesto de latencia de `/auth/signup`
+
+Es el único endpoint que encadena las tres dependencias síncronas del
+servicio en una sola petición: RENAPER, la escritura en base y el publish de
+`user.created`. El contrato de resiliencia fija el techo del request completo
+en 5000 ms, así que `RENAPER_TIMEOUT`, `POSTGRES_STATEMENT_TIMEOUT` y
+`RABBITMQ_PUBLISH_TIMEOUT` comparten el mismo valor a propósito —1500 ms cada
+uno— dejando ~500 ms de margen para Argon2id y el resto de la CPU propia
+(HPKE, Blind Index, cifrado AES, framework):
+
+```
+RENAPER (1500 ms) + escritura en base (1500 ms) + publish (1500 ms) + margen (~500 ms) ≈ 5000 ms
+```
+
+Los demás endpoints tocan como máximo dos de estas dependencias en serie
+(`/refresh` normal: `FindByHash` + `RotateSession`, dos consultas) o ninguna
+síncrona externa (`/logout`, `/signin`), así que quedan cómodos bajo el mismo
+techo sin acercarse a él. Subir cualquiera de los tres valores sin bajar otro
+rompe este presupuesto.
 
 ### `user.created`
 

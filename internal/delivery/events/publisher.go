@@ -27,11 +27,19 @@ const (
 	// DefaultExchange es el topic exchange del contrato de la plataforma. Debe
 	// coincidir exactamente con el que declara vinculo-vial-core: ver la nota
 	// de declaración pasiva en connect().
-	DefaultExchange       = "vvi.topic.exchange"
-	DefaultProducer       = "vinculo-vial-identity"
-	DefaultPublishTimeout = 5 * time.Second
-	DefaultDialTimeout    = 10 * time.Second
-	DefaultHeartbeat      = 10 * time.Second
+	DefaultExchange = "vvi.topic.exchange"
+	DefaultProducer = "vinculo-vial-identity"
+	// DefaultPublishTimeout acota el intento completo de publish (attempt,
+	// reconexión y reintento — ver publishEnvelope y dialWithDeadline). El
+	// valor es una de las tres fracciones iguales del presupuesto de
+	// /auth/signup (contrato de resiliencia: request completo ≤ 5000 ms);
+	// ver la nota de defaultEventsPublishTimeut en pkg/config.
+	DefaultPublishTimeout = 1500 * time.Millisecond
+	// DefaultDialTimeout solo rige la conexión inicial en el arranque
+	// (NewPublisher): no es parte del presupuesto por petición, así que no
+	// comparte el recorte de DefaultPublishTimeout.
+	DefaultDialTimeout = 10 * time.Second
+	DefaultHeartbeat   = 10 * time.Second
 )
 
 // Config son los parámetros de conexión y publicación.
