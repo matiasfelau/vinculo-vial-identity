@@ -402,13 +402,20 @@ interna del patrón Transactional Outbox (US-06), no un dato de negocio.
 | campo | tipo | notas |
 |---|---|---|
 | `id` | uuid | PK; mismo valor que `eventId` al publicarse |
-| `user_id` | uuid | usuario cuyas sesiones se revocaron |
-| `reason` | varchar(64) | `REUSE_DETECTED` |
+| `type` | varchar(64) | tipo de evento; hoy solo `user.sessions.revoked` |
+| `payload` | jsonb | `{"user_id": "…", "reason": "REUSE_DETECTED"}` |
 | `status` | varchar(16) | `pending` / `sent`, indexada junto a `created_at` |
 | `attempts` | int | incrementado en cada intento fallido |
 | `last_error` | text | nullable; diagnóstico del último fallo |
 | `created_at` | timestamptz | usada para ordenar `FetchPending` |
 | `sent_at` | timestamptz | nullable; se fija al marcar `sent` |
+
+Una base que haya corrido el esquema anterior de #41 (columnas `user_id` y
+`reason`, ambas NOT NULL) se migra sola al arrancar: `NewOutboxRepository`
+convierte cada fila existente al formato `type` + `payload` y recién después
+borra las dos columnas viejas, para no dejar sin contenido a los eventos
+pendientes. Es idempotente y no toca la tabla si ya está migrada. Se cubre con
+una prueba de integración contra Postgres real (se omite sin `DATABASE_URL`).
 
 ### Clasificación de errores de la base
 

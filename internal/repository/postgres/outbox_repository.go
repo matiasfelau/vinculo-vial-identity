@@ -42,6 +42,62 @@ type OutboxRepository struct {
 	db *gorm.DB
 }
 
+// migrateLegacyOutbox es la migración explícita de outbox_events desde el
+// esquema tipado de #41 (columnas user_id y reason) al genérico actual (type +
+// payload jsonb). AutoMigrate no la cubre: nunca borra columnas, y las dos
+// columnas viejas son NOT NULL, así que en cualquier base que haya corrido #41
+// todo INSERT nuevo fallaría por falta de valor en user_id/reason.
+//
+// No se limita a borrarlas: antes convierte cada fila existente —pendiente o
+// enviada— al formato nuevo, porque borrar user_id/reason a secas dejaría a los
+// eventos pendientes sin contenido que publicar, y AutoMigrate tampoco podría
+// agregar type/payload NOT NULL sobre una tabla con filas. Es idempotente: sin
+// ninguna de las dos columnas viejas no toca la tabla (ni la bloquea).
+const migrateLegacyOutbox = `
+DO $$
+BEGIN
+	IF to_regclass('outbox_events') IS NULL THEN
+		RETURN;
+	END IF;
+
+	IF NOT EXISTS (
+		SELECT 1 FROM information_schema.columns
+		WHERE table_schema = current_schema()
+			AND table_name = 'outbox_events'
+			AND column_name IN ('user_id', 'reason')
+	) THEN
+		RETURN;
+	END IF;
+
+	IF EXISTS (
+		SELECT 1 FROM information_schema.columns
+		WHERE table_schema = current_schema()
+			AND table_name = 'outbox_events' AND column_name = 'user_id'
+	) AND EXISTS (
+		SELECT 1 FROM information_schema.columns
+		WHERE table_schema = current_schema()
+			AND table_name = 'outbox_events' AND column_name = 'reason'
+	) THEN
+		ALTER TABLE outbox_events
+			ADD COLUMN IF NOT EXISTS type varchar(64),
+			ADD COLUMN IF NOT EXISTS payload jsonb;
+
+		UPDATE outbox_events
+		SET type = 'user.sessions.revoked',
+			payload = jsonb_build_object('user_id', user_id::text, 'reason', reason)
+		WHERE type IS NULL OR payload IS NULL;
+
+		ALTER TABLE outbox_events
+			ALTER COLUMN type SET NOT NULL,
+			ALTER COLUMN payload SET NOT NULL;
+	END IF;
+
+	ALTER TABLE outbox_events
+		DROP COLUMN IF EXISTS user_id,
+		DROP COLUMN IF EXISTS reason;
+END $$;
+`
+
 // NewOutboxRepository construye el repositorio y ejecuta AutoMigrate.
 //
 // outbox_events no declara una clave foránea hacia users (a diferencia de
@@ -51,6 +107,10 @@ type OutboxRepository struct {
 func NewOutboxRepository(ctx context.Context, db *gorm.DB) (*OutboxRepository, error) {
 	if db == nil {
 		return nil, errors.New("postgres: se requiere una conexión GORM")
+	}
+
+	if err := db.WithContext(ctx).Exec(migrateLegacyOutbox).Error; err != nil {
+		return nil, fmt.Errorf("postgres: no se pudo migrar outbox_events desde el esquema tipado: %w", err)
 	}
 
 	if err := db.WithContext(ctx).AutoMigrate(&outboxEventModel{}); err != nil {
