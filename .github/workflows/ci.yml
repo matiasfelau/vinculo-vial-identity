@@ -1,0 +1,53 @@
+name: CI
+
+# Corre en todo pull request hacia dev o main. docker-release.yml solo corre
+# en main y tags, así que sin este workflow ningún cambio pasaba por CI antes
+# de llegar a dev.
+on:
+  pull_request:
+    branches: [dev, main]
+
+permissions:
+  contents: read
+
+jobs:
+  build-and-test:
+    runs-on: ubuntu-latest
+    services:
+      # Postgres real para las pruebas de integración de internal/repository/
+      # postgres: se omiten solas si DATABASE_URL no está definida.
+      postgres:
+        image: postgres:17-alpine
+        env:
+          POSTGRES_USER: identity
+          POSTGRES_PASSWORD: identity
+          POSTGRES_DB: identity
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U identity -d identity"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      DATABASE_URL: postgres://identity:identity@localhost:5432/identity?sslmode=disable
+    steps:
+      - name: Descargar código fuente
+        uses: actions/checkout@v4
+
+      - name: Configurar Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - name: Descargar dependencias
+        run: go mod download
+
+      - name: Compilar
+        run: CGO_ENABLED=0 go build ./...
+
+      - name: Vet
+        run: go vet ./...
+
+      - name: Ejecutar pruebas
+        run: go test -count=1 ./...
