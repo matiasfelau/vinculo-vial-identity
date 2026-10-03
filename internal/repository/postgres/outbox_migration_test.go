@@ -1,9 +1,19 @@
-// Prueba de integración contra PostgreSQL real de la migración de
-// outbox_events. Se omite si DATABASE_URL no está definida (igual que en
-// vinculo-vial-vehicle); el workflow de CI la define con un servicio Postgres.
+//go:build integration
+
+// Pruebas de integración contra un PostgreSQL real de la migración de
+// outbox_events. Se excluyen del "go test ./..." común: la migración es SQL
+// propio del motor y un doble no la ejercita.
+//
+// Requieren TEST_DATABASE_URL apuntando a una base descartable. Con el tag
+// integration el llamador las pidió explícitamente, así que si la variable
+// falta fallan en vez de omitirse: saltearlas en silencio dejaría pasar en
+// verde un CI mal configurado. En CI la provee el servicio postgres del
+// workflow.
 //
 // Cada prueba trabaja en un esquema propio, que se borra al terminar: no toca
-// las tablas de `public` de la base a la que apunta DATABASE_URL.
+// las tablas de `public` de la base a la que apunta la variable.
+//
+//	TEST_DATABASE_URL=postgres://identity:identity@localhost:5432/identity?sslmode=disable //	  go test -tags=integration -count=1 -run Integracion ./internal/repository/postgres/
 package postgres
 
 import (
@@ -39,9 +49,9 @@ CREATE INDEX idx_outbox_events_status_created_at ON outbox_events (status, creat
 func baseConEsquemaAislado(t *testing.T) *gorm.DB {
 	t.Helper()
 
-	dsn := os.Getenv("DATABASE_URL")
+	dsn := os.Getenv("TEST_DATABASE_URL")
 	if dsn == "" {
-		t.Skip("DATABASE_URL no configurada: se omite la prueba de integración con PostgreSQL")
+		t.Fatal("TEST_DATABASE_URL no está definida: las pruebas de integración requieren un PostgreSQL real")
 	}
 
 	admin, err := gorm.Open(pgdriver.Open(dsn), &gorm.Config{})
@@ -55,7 +65,7 @@ func baseConEsquemaAislado(t *testing.T) *gorm.DB {
 
 	u, err := url.Parse(dsn)
 	if err != nil {
-		t.Fatalf("DATABASE_URL inválida: %v", err)
+		t.Fatalf("TEST_DATABASE_URL inválida: %v", err)
 	}
 	q := u.Query()
 	q.Set("search_path", schema)
@@ -105,7 +115,7 @@ func nuevoEventoDeRevocacion(t *testing.T) domain.OutboxEvent {
 // Una base que corrió #41 tiene filas con user_id/reason. La migración las
 // convierte al formato nuevo en vez de dejarlas sin contenido, borra las
 // columnas viejas y deja la tabla en condiciones de aceptar INSERT nuevos.
-func TestMigracionDelOutboxTipadoConservaLasFilasYBorraLasColumnas(t *testing.T) {
+func TestIntegracionMigracionDelOutboxTipadoConservaLasFilasYBorraLasColumnas(t *testing.T) {
 	db := baseConEsquemaAislado(t)
 	if err := db.Exec(ddlOutboxTipado).Error; err != nil {
 		t.Fatalf("no se pudo crear la tabla tipada: %v", err)
@@ -158,7 +168,7 @@ func TestMigracionDelOutboxTipadoConservaLasFilasYBorraLasColumnas(t *testing.T)
 // Caso que reportó la revisión de #42: una base donde AutoMigrate ya agregó
 // type/payload (la tabla estaba vacía) pero user_id/reason siguen NOT NULL, y
 // por lo tanto todo INSERT nuevo fallaba.
-func TestMigracionDelOutboxConAmbosEsquemasPermiteInsertar(t *testing.T) {
+func TestIntegracionMigracionDelOutboxConAmbosEsquemasPermiteInsertar(t *testing.T) {
 	db := baseConEsquemaAislado(t)
 	if err := db.Exec(ddlOutboxTipado).Error; err != nil {
 		t.Fatalf("no se pudo crear la tabla tipada: %v", err)
@@ -186,7 +196,7 @@ func TestMigracionDelOutboxConAmbosEsquemasPermiteInsertar(t *testing.T) {
 
 // La migración corre en cada arranque: sobre una base sin tabla, o ya
 // migrada, no debe fallar ni cambiar nada.
-func TestMigracionDelOutboxEsIdempotente(t *testing.T) {
+func TestIntegracionMigracionDelOutboxEsIdempotente(t *testing.T) {
 	db := baseConEsquemaAislado(t)
 
 	for i := 0; i < 3; i++ {

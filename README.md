@@ -415,7 +415,9 @@ Una base que haya corrido el esquema anterior de #41 (columnas `user_id` y
 convierte cada fila existente al formato `type` + `payload` y recién después
 borra las dos columnas viejas, para no dejar sin contenido a los eventos
 pendientes. Es idempotente y no toca la tabla si ya está migrada. Se cubre con
-una prueba de integración contra Postgres real (se omite sin `DATABASE_URL`).
+pruebas de integración contra Postgres real, bajo el build tag `integration`:
+`TEST_DATABASE_URL=… go test -tags=integration -run Integracion ./internal/repository/postgres/`.
+Fallan —no se omiten— si falta la variable, y el CI las corre en un paso aparte.
 
 ### Clasificación de errores de la base
 

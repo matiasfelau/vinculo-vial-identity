@@ -14,8 +14,8 @@ jobs:
   build-and-test:
     runs-on: ubuntu-latest
     services:
-      # Postgres real para las pruebas de integración de internal/repository/
-      # postgres: se omiten solas si DATABASE_URL no está definida.
+      # Postgres real para las pruebas de integración (build tag integration)
+      # de internal/repository/postgres.
       postgres:
         image: postgres:17-alpine
         env:
@@ -29,8 +29,6 @@ jobs:
           --health-interval 5s
           --health-timeout 5s
           --health-retries 10
-    env:
-      DATABASE_URL: postgres://identity:identity@localhost:5432/identity?sslmode=disable
     steps:
       - name: Descargar código fuente
         uses: actions/checkout@v4
@@ -46,8 +44,32 @@ jobs:
       - name: Compilar
         run: CGO_ENABLED=0 go build ./...
 
+      # -tags=integration además compila las pruebas de integración, que el
+      # build y el test comunes excluyen.
       - name: Vet
-        run: go vet ./...
+        run: go vet -tags=integration ./...
 
       - name: Ejecutar pruebas
         run: go test -count=1 ./...
+
+      # Paso aparte, con el tag. Las pruebas fallan (no se omiten) si falta
+      # TEST_DATABASE_URL, y además se exige que corran todas las que existen:
+      # un -run que no coincide con nada también sale en verde ("no tests to
+      # run"), y eso dejaría pasar un CI que no prueba nada.
+      - name: Ejecutar pruebas de integración (Postgres real)
+        shell: bash
+        env:
+          TEST_DATABASE_URL: postgres://identity:identity@localhost:5432/identity?sslmode=disable
+        run: |
+          pkg=./internal/repository/postgres/
+          esperadas=$(go test -tags=integration -list Integracion "$pkg" | grep -c '^TestIntegracion' || true)
+          if [ "$esperadas" -eq 0 ]; then
+            echo "::error::no hay pruebas TestIntegracion*: el paso no probaría nada"
+            exit 1
+          fi
+          go test -tags=integration -count=1 -run Integracion -v "$pkg" | tee integracion.log
+          pasaron=$(grep -c -- '^--- PASS: TestIntegracion' integracion.log || true)
+          if [ "$pasaron" -ne "$esperadas" ]; then
+            echo "::error::pasaron $pasaron de $esperadas pruebas de integración"
+            exit 1
+          fi
