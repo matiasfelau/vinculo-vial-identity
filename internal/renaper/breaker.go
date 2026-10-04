@@ -47,7 +47,7 @@ const (
 	breakerHalfOpen
 )
 
-// withBreaker decora un domain.RenaperService con un circuit breaker.
+// CircuitBreaker decora un domain.RenaperService con un circuit breaker.
 //
 // Solo cuentan como falla domain.ErrUpstreamUnavailable y
 // domain.ErrUpstreamInvalidResponse —timeout, conexión rechazada, 5xx del
@@ -58,7 +58,7 @@ const (
 //
 // Mientras el circuito está abierto, ValidateIdentity devuelve de inmediato
 // sin tocar la red: "circuito abierto → 503 sin tocar la red" del contrato.
-type withBreaker struct {
+type CircuitBreaker struct {
 	next   domain.RenaperService
 	cfg    BreakerConfig
 	logger *slog.Logger
@@ -71,15 +71,51 @@ type withBreaker struct {
 }
 
 // WithCircuitBreaker decora next. logger puede ser nil (usa slog.Default()).
-func WithCircuitBreaker(next domain.RenaperService, cfg BreakerConfig, logger *slog.Logger) domain.RenaperService {
+// Devuelve el tipo concreto, que además de domain.RenaperService expone State
+// para /health/deps.
+func WithCircuitBreaker(next domain.RenaperService, cfg BreakerConfig, logger *slog.Logger) *CircuitBreaker {
 	cfg.applyDefaults()
 	if logger == nil {
 		logger = slog.Default()
 	}
-	return &withBreaker{next: next, cfg: cfg, logger: logger, now: time.Now}
+	return &CircuitBreaker{next: next, cfg: cfg, logger: logger, now: time.Now}
 }
 
-func (w *withBreaker) ValidateIdentity(ctx context.Context, dni, tramite, sexo, selfie []byte) (bool, error) {
+// BreakerState es el estado observable del circuito, para /health/deps.
+type BreakerState string
+
+const (
+	// BreakerStateClosed: las llamadas pasan con normalidad.
+	BreakerStateClosed BreakerState = "closed"
+	// BreakerStateOpen: las llamadas fallan de inmediato, sin tocar la red.
+	BreakerStateOpen BreakerState = "open"
+	// BreakerStateHalfOpen: venció OpenDuration y la próxima llamada es la
+	// prueba que decide si el circuito cierra o vuelve a abrir.
+	BreakerStateHalfOpen BreakerState = "half_open"
+)
+
+// State informa el estado efectivo del circuito sin modificarlo. Un circuito
+// abierto cuyo OpenDuration ya venció se informa como half_open aunque la
+// transición real ocurra recién con la próxima llamada (ver allow): es lo que
+// esa llamada va a encontrar.
+func (w *CircuitBreaker) State() BreakerState {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+
+	switch w.state {
+	case breakerOpen:
+		if w.now().Sub(w.openedAt) >= w.cfg.OpenDuration {
+			return BreakerStateHalfOpen
+		}
+		return BreakerStateOpen
+	case breakerHalfOpen:
+		return BreakerStateHalfOpen
+	default:
+		return BreakerStateClosed
+	}
+}
+
+func (w *CircuitBreaker) ValidateIdentity(ctx context.Context, dni, tramite, sexo, selfie []byte) (bool, error) {
 	if !w.allow() {
 		return false, fmt.Errorf("renaper: circuito abierto, no se intenta la consulta: %w", domain.ErrUpstreamUnavailable)
 	}
@@ -96,7 +132,7 @@ func (w *withBreaker) ValidateIdentity(ctx context.Context, dni, tramite, sexo, 
 // esta única llamada como prueba—. Con el circuito medio abierto, nunca: ya
 // hay una prueba en curso y una segunda llamada concurrente no debe sumarse
 // a ella.
-func (w *withBreaker) allow() bool {
+func (w *CircuitBreaker) allow() bool {
 	w.mu.Lock()
 	defer w.mu.Unlock()
 
@@ -115,7 +151,7 @@ func (w *withBreaker) allow() bool {
 }
 
 // record contabiliza el resultado de una llamada que allow() ya autorizó.
-func (w *withBreaker) record(err error) {
+func (w *CircuitBreaker) record(err error) {
 	w.mu.Lock()
 	defer w.mu.Unlock()
 

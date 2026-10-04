@@ -200,6 +200,16 @@ func run() error {
 		// Readiness apoyada en la base: si no responde, ni un alta ni un login
 		// podrían persistirse y el orquestador no debería mandar tráfico acá.
 		ReadinessCheck: func(ctx context.Context) error { return postgres.Ping(ctx, db) },
+		// /health/deps es aparte de /ready: informa el broker, el worker del
+		// outbox y el breaker hacia RENAPER sin afectar al balanceo.
+		DepsHealth: delivery.NewDepsHealthHandler(
+			delivery.DepCheck{Name: "broker", Check: publisher.Status},
+			delivery.DepCheck{Name: "outbox_worker", Check: outboxWorker.Status},
+			delivery.DepCheck{Name: "renaper_breaker", Check: func() (string, bool) {
+				state := renaperSvc.State()
+				return string(state), state == renaper.BreakerStateClosed
+			}},
+		),
 	})
 	if err != nil {
 		return err
@@ -264,12 +274,19 @@ func buildTokenGenerator(cfg *config.Config) (domain.TokenGenerator, error) {
 	return token.New(cfg.Crypto.JWTPrivateKey.Reveal(), cfg.Token.AccessTokenTTL, cfg.Token.RefreshTokenTTL, cfg.Token.Issuer)
 }
 
+// statusPublisher es un domain.EventPublisher que además informa su estado
+// para /health/deps: tanto el publisher real como el inerte lo implementan.
+type statusPublisher interface {
+	domain.EventPublisher
+	Status() (state string, ok bool)
+}
+
 // buildPublisher elige entre el publisher real y el inerte.
 //
 // El broker es un recurso global de la plataforma y no está en el compose de
 // este servicio; la configuración ya impide que el modo inerte llegue a
 // producción.
-func buildPublisher(cfg *config.Config, logger *slog.Logger) (domain.EventPublisher, func() error, error) {
+func buildPublisher(cfg *config.Config, logger *slog.Logger) (statusPublisher, func() error, error) {
 	if !cfg.Events.Enabled {
 		p := events.NewNoopPublisher(logger)
 		logger.Warn("publisher de eventos deshabilitado: las altas no se publicarán")
@@ -305,7 +322,7 @@ func buildPublisher(cfg *config.Config, logger *slog.Logger) (domain.EventPublis
 // de que exista un cliente real que los necesite de verdad. El breaker es la
 // capa más externa: con el circuito abierto, ValidateIdentity no debe
 // intentar nada, ni siquiera esperar el timeout.
-func buildRenaper(cfg *config.Config, logger *slog.Logger) domain.RenaperService {
+func buildRenaper(cfg *config.Config, logger *slog.Logger) *renaper.CircuitBreaker {
 	logger.Warn("RenaperService en modo mock: ninguna identidad se verifica realmente; no usar en producción")
 
 	svc := renaper.WithTimeout(&renaper.Mock{}, cfg.Renaper.Timeout)
