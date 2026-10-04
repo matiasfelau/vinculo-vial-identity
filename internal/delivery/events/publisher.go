@@ -88,9 +88,10 @@ type Publisher struct {
 	logger *slog.Logger
 	now    func() time.Time
 
-	mu   sync.Mutex
-	conn *amqp.Connection
-	ch   *amqp.Channel
+	mu     sync.Mutex
+	conn   *amqp.Connection
+	ch     *amqp.Channel
+	closed bool
 }
 
 // NewPublisher conecta con el broker y verifica que el exchange exista.
@@ -378,10 +379,53 @@ func (p *Publisher) reconnect(ctx context.Context) error {
 	return p.connect(ctx)
 }
 
+// Status informa si el publisher tiene hoy una conexión y un canal vivos hacia
+// el broker, para /health/deps. No intenta reconectar ni toca la red: es solo
+// la lectura del estado actual. La reconexión es perezosa (ocurre en el
+// próximo publish, ver publishEnvelope), así que tras una caída del broker
+// "down" puede persistir mientras no haya eventos pendientes que publicar.
+func (p *Publisher) Status() (string, bool) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
+	if p.conn == nil || p.conn.IsClosed() || p.ch == nil || p.ch.IsClosed() {
+		return "down", false
+	}
+	return "up", true
+}
+
+// EnsureConnected restablece la conexión con el broker si está caída, acotado
+// por PublishTimeout, y no hace nada si ya está viva. Existe porque la
+// reconexión de publishEnvelope es perezosa —ocurre al publicar—: sin esto, un
+// broker que se cae y vuelve mientras no hay eventos pendientes dejaría a
+// Status en "down" (y a /health/deps en degraded) hasta el próximo evento,
+// aunque el broker esté sano. Lo llama el worker del outbox cuando está ocioso.
+//
+// Solo lo usa el worker, que publica de a un evento por vez; no está pensado
+// para concurrir con otras publicaciones.
+func (p *Publisher) EnsureConnected(ctx context.Context) error {
+	if _, ok := p.Status(); ok {
+		return nil
+	}
+
+	p.mu.Lock()
+	cerrado := p.closed
+	p.mu.Unlock()
+	if cerrado {
+		return errors.New("events: el publisher está cerrado")
+	}
+
+	ctx, cancel := context.WithTimeout(ctx, p.cfg.PublishTimeout)
+	defer cancel()
+	return p.reconnect(ctx)
+}
+
 // Close libera el canal y la conexión.
 func (p *Publisher) Close() error {
 	p.mu.Lock()
 	defer p.mu.Unlock()
+
+	p.closed = true
 
 	var errs []error
 	if p.ch != nil {

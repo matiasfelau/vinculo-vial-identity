@@ -506,6 +506,41 @@ no depende en absoluto de la disponibilidad de RabbitMQ.
 }
 ```
 
+## Health
+
+Tres rutas en el puerto público, con roles distintos:
+
+| ruta | qué chequea | responde |
+|---|---|---|
+| `/healthz` | nada: el proceso está vivo | `200` |
+| `/ready` (alias `/readyz`) | **solo la base propia** | `200` / `503` |
+| `/health/deps` | broker, worker del outbox y breaker hacia RENAPER | `200` / `503` |
+
+`/ready` es el path del healthcheck activo de Kong, por eso no mira nada más
+que la base: sacar a Identity del balanceo porque el broker o RENAPER fallan
+dejaría sin servicio a endpoints que no los usan. `/health/deps` es para
+diagnóstico y monitoreo, y su `503` **no** afecta al balanceo ni a `/ready`.
+
+```json
+{"status": "ok", "checks": {"broker": "up", "outbox_worker": "up", "renaper_breaker": "closed"}}
+```
+
+Si alguna dependencia no está sana responde `503` con `"status": "degraded"` y
+el estado de las tres (nunca corta en la primera que falla):
+
+| check | sano | degradado |
+|---|---|---|
+| `broker` | `up`; `disabled` con `RABBITMQ_ENABLED=false` (solo desarrollo) | `down`: sin conexión o canal vivo |
+| `outbox_worker` | `up` | `down`: el último ciclo no pudo leer el outbox (la base falla); `stalled`: sin iniciar un ciclo hace más de `max(5 × intervalo, 1 min)`; `stopped` |
+| `renaper_breaker` | `closed` | `open`; `half_open` (venció `RENAPER_BREAKER_OPEN_DURATION`, la próxima llamada decide) |
+
+Un broker caído **no** degrada al worker: un publish fallido deja el evento
+pendiente y el worker sigue sano reintentando. Y como la reconexión del
+publisher es perezosa, el worker la restablece solo en los ciclos sin eventos
+pendientes: sin eso, `broker` seguiría en `down` tras una caída hasta el
+próximo evento, aunque el broker ya estuviera sano. El cuerpo solo lleva el
+nombre del estado, nunca el detalle de un error.
+
 ## Deuda técnica conocida
 
 - **Cliente real de RENAPER.** `internal/renaper.Mock` aprueba cualquier

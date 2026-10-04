@@ -35,5 +35,10 @@ func (p *NoopPublisher) PublishSessionsRevoked(ctx context.Context, evt domain.S
 	return nil
 }
 
+// Status informa que el broker está deshabilitado: es el modo de desarrollo,
+// que la configuración rechaza con APP_ENV=production. Deshabilitado no es una
+// falla, así que /health/deps no lo cuenta como degradación.
+func (p *NoopPublisher) Status() (string, bool) { return "disabled", true }
+
 // Close no tiene nada que liberar.
 func (p *NoopPublisher) Close() error { return nil }
