@@ -642,11 +642,11 @@ func TestHealthz(t *testing.T) {
 	}
 }
 
-func TestReadyz(t *testing.T) {
+func TestReady(t *testing.T) {
 	t.Run("200 con las dependencias sanas", func(t *testing.T) {
 		ts := newTestServer(t, func(context.Context) error { return nil })
 
-		req := httptest.NewRequest(http.MethodGet, "/readyz", nil)
+		req := httptest.NewRequest(http.MethodGet, "/ready", nil)
 		rec := httptest.NewRecorder()
 		ts.handler.ServeHTTP(rec, req)
 
@@ -658,14 +658,14 @@ func TestReadyz(t *testing.T) {
 	t.Run("503 si una dependencia no responde", func(t *testing.T) {
 		ts := newTestServer(t, func(context.Context) error { return errors.New("la base no responde") })
 
-		req := httptest.NewRequest(http.MethodGet, "/readyz", nil)
+		req := httptest.NewRequest(http.MethodGet, "/ready", nil)
 		rec := httptest.NewRecorder()
 		ts.handler.ServeHTTP(rec, req)
 
 		if rec.Code != http.StatusServiceUnavailable {
 			t.Errorf("status = %d, se esperaba 503", rec.Code)
 		}
-		// El motivo va al log, no al cuerpo: /readyz lo lee cualquiera que
+		// El motivo va al log, no al cuerpo: /ready lo lee cualquiera que
 		// alcance el puerto.
 		if strings.Contains(rec.Body.String(), "la base no responde") {
 			t.Errorf("el cuerpo revela el motivo del fallo: %s", rec.Body.String())

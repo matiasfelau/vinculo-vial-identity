@@ -10,9 +10,8 @@ import "time"
 // arranque, por ejemplo con el pool de conexiones agotado.
 //
 // El valor coincide con pkg/config.defaultStatementTimeout y con
-// renaper.DefaultTimeout equivalente (RENAPER_TIMEOUT) a propósito: son las
-// tres dependencias síncronas que /auth/signup encadena en el peor caso, y
-// 1500 ms × 3 más el margen de Argon2id y el resto de la CPU propia es lo
-// que mantiene el request completo dentro de los 5000 ms del contrato de
-// resiliencia.
+// RENAPER_TIMEOUT a propósito: son las dos dependencias síncronas que
+// /auth/signup encadena en el peor caso, y 1500 ms × 2 más el margen de
+// Argon2id y el resto de la CPU propia mantiene el request completo bajo los
+// 5000 ms del contrato de resiliencia.
 const queryTimeout = 1500 * time.Millisecond

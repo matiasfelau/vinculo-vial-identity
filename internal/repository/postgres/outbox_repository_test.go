@@ -28,23 +28,19 @@ func TestOutboxTableName(t *testing.T) {
 }
 
 func TestToOutboxModelSiempreQuedaPendiente(t *testing.T) {
-	evt := &domain.OutboxEvent{
-		ID:        uuid.New(),
-		UserID:    uuid.New(),
-		Reason:    domain.SessionsRevokedReasonReuseDetected,
-		CreatedAt: time.Date(2026, 8, 19, 10, 0, 0, 0, time.UTC),
-	}
+	evt, _ := domain.NewOutboxEvent("user.sessions.revoked", domain.NewSessionsRevoked(uuid.New(), uuid.New(), domain.SessionsRevokedReasonReuseDetected))
+	evt.CreatedAt = time.Date(2026, 8, 19, 10, 0, 0, 0, time.UTC)
 
-	m := toOutboxModel(evt)
+	m := toOutboxModel(&evt)
 
 	if m.ID != evt.ID {
 		t.Errorf("id = %v, se esperaba %v", m.ID, evt.ID)
 	}
-	if m.UserID != evt.UserID {
-		t.Errorf("user_id = %v, se esperaba %v", m.UserID, evt.UserID)
+	if m.Type != evt.Type {
+		t.Errorf("type = %q, se esperaba %q", m.Type, evt.Type)
 	}
-	if m.Reason != string(evt.Reason) {
-		t.Errorf("reason = %q, se esperaba %q", m.Reason, evt.Reason)
+	if string(m.Payload) != string(evt.Payload) {
+		t.Errorf("payload = %s, se esperaba %s", string(m.Payload), string(evt.Payload))
 	}
 	if m.Status != outboxStatusPending {
 		t.Errorf("status = %q, se esperaba %q", m.Status, outboxStatusPending)
@@ -57,16 +53,12 @@ func TestToOutboxModelSiempreQuedaPendiente(t *testing.T) {
 // El mapeo entidad↔modelo tiene que ser simétrico: lo que el worker lee de
 // FetchPending debe reconstruir exactamente el evento que se persistió.
 func TestMapeoDeOutboxEsSimetrico(t *testing.T) {
-	original := domain.OutboxEvent{
-		ID:        uuid.New(),
-		UserID:    uuid.New(),
-		Reason:    domain.SessionsRevokedReasonReuseDetected,
-		CreatedAt: time.Date(2026, 8, 19, 10, 0, 0, 0, time.UTC),
-	}
+	original, _ := domain.NewOutboxEvent("user.sessions.revoked", domain.NewSessionsRevoked(uuid.New(), uuid.New(), domain.SessionsRevokedReasonReuseDetected))
+	original.CreatedAt = time.Date(2026, 8, 19, 10, 0, 0, 0, time.UTC)
 
 	got := toOutboxModel(&original).toDomain()
 
-	if got != original {
+	if got.ID != original.ID || got.Type != original.Type || string(got.Payload) != string(original.Payload) || !got.CreatedAt.Equal(original.CreatedAt) {
 		t.Errorf("ida y vuelta = %+v, se esperaba %+v", got, original)
 	}
 }

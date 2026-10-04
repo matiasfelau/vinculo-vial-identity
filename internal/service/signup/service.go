@@ -54,7 +54,6 @@ type Deps struct {
 	// real antes de dar de alta la cuenta.
 	Renaper   domain.RenaperService
 	Users     domain.UserRepository
-	Publisher domain.EventPublisher
 	Logger    *slog.Logger
 	// Now permite fijar el reloj en los tests. Si es nil se usa time.Now.
 	Now func() time.Time
@@ -83,8 +82,6 @@ func New(d Deps) (*Service, error) {
 		return nil, errors.New("signup: falta el servicio de verificación de identidad")
 	case d.Users == nil:
 		return nil, errors.New("signup: falta el repositorio de usuarios")
-	case d.Publisher == nil:
-		return nil, errors.New("signup: falta el publisher de eventos")
 	}
 
 	if d.Logger == nil {
@@ -193,29 +190,7 @@ func (s *Service) SignUp(ctx context.Context, ephemeralPublicKey, ciphertext []b
 		return uuid.Nil, err
 	}
 
-	s.publish(ctx, user)
-
 	s.deps.Logger.InfoContext(ctx, "usuario registrado", slog.String("user_id", user.ID.String()))
 
 	return user.ID, nil
-}
-
-// publish emite user.created sin poner en riesgo el resultado del alta.
-//
-// El usuario ya está persistido y confirmado: devolver un 500 acá haría que la
-// app reintentara y se encontrara con un 409, dejando al vecino sin poder
-// registrarse por un problema del broker. Se registra el fallo y se sigue.
-//
-// La contrapartida es que un evento puede perderse si RabbitMQ está caído justo
-// en ese instante. La solución correcta es un outbox transaccional —persistir el
-// evento en la misma transacción que el usuario y despacharlo aparte—, que queda
-// fuera del alcance de US-01 y debería abordarse antes de que algún consumidor
-// dependa del evento para algo crítico.
-func (s *Service) publish(ctx context.Context, user *domain.User) {
-	if err := s.deps.Publisher.PublishUserCreated(ctx, domain.NewUserCreated(user)); err != nil {
-		s.deps.Logger.ErrorContext(ctx, "no se pudo publicar user.created; el alta se mantiene",
-			slog.String("user_id", user.ID.String()),
-			slog.String("error", err.Error()),
-		)
-	}
 }

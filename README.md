@@ -38,8 +38,7 @@ POST /api/v1/auth/signup
       ├─ 5. Blind Index del DNI (HMAC-SHA256)
       ├─ 6. Cifrar el DNI at-rest (AES-256-GCM, clave distinta)
       ├─ 7. Derivar la contraseña (Argon2id)
-      ├─ 8. Persistir                          → 409 si email o DNI ya existen
-      └─ 9. Publicar user.created              → no compromete el alta si falla
+      └─ 8. Persistir                          → 409 si email o DNI ya existen
                                                 → 201
 ```
 
@@ -403,13 +402,22 @@ interna del patrón Transactional Outbox (US-06), no un dato de negocio.
 | campo | tipo | notas |
 |---|---|---|
 | `id` | uuid | PK; mismo valor que `eventId` al publicarse |
-| `user_id` | uuid | usuario cuyas sesiones se revocaron |
-| `reason` | varchar(64) | `REUSE_DETECTED` |
+| `type` | varchar(64) | tipo de evento; hoy solo `user.sessions.revoked` |
+| `payload` | jsonb | `{"user_id": "…", "reason": "REUSE_DETECTED"}` |
 | `status` | varchar(16) | `pending` / `sent`, indexada junto a `created_at` |
 | `attempts` | int | incrementado en cada intento fallido |
 | `last_error` | text | nullable; diagnóstico del último fallo |
 | `created_at` | timestamptz | usada para ordenar `FetchPending` |
 | `sent_at` | timestamptz | nullable; se fija al marcar `sent` |
+
+Una base que haya corrido el esquema anterior de #41 (columnas `user_id` y
+`reason`, ambas NOT NULL) se migra sola al arrancar: `NewOutboxRepository`
+convierte cada fila existente al formato `type` + `payload` y recién después
+borra las dos columnas viejas, para no dejar sin contenido a los eventos
+pendientes. Es idempotente y no toca la tabla si ya está migrada. Se cubre con
+pruebas de integración contra Postgres real, bajo el build tag `integration`:
+`TEST_DATABASE_URL=… go test -tags=integration -run Integracion ./internal/repository/postgres/`.
+Fallan —no se omiten— si falta la variable, y el CI las corre en un paso aparte.
 
 ### Clasificación de errores de la base
 
@@ -426,66 +434,43 @@ un equivalente al "5xx del upstream" de una dependencia HTTP.
 
 ## Eventos publicados
 
-Los dos eventos usan el Event Envelope estándar de la plataforma. Ningún
-payload lleva PII: quien necesite datos de la persona los pide a este
-servicio.
+El servicio publica un único evento, `user.sessions.revoked`, con el Event
+Envelope estándar de la plataforma. El payload no lleva PII: quien necesite
+datos de la persona los pide a este servicio. El alta no publica nada: Core
+confirmó que `user.created` no tiene consumidor.
 
 Se publican sobre `vvi.topic.exchange`. Este servicio nunca declara esa
 topología: la responsabilidad es de `vinculo-vial-core`, y `NewPublisher`
 verifica que el exchange exista con una declaración pasiva, fallando el
 arranque si no la encuentra en vez de crearla por su cuenta. Cada publicación
-va además con `mandatory=true`: si ningún binding la enruta a una cola, el
-broker la devuelve y `Publisher` lo deja en WARN, en lugar de perderse en
-silencio como podía ocurrir antes.
+va además con `mandatory=true`, sin excepciones (así lo fija el contrato): si
+ningún binding la enruta a una cola, el broker la devuelve y `Publisher` lo
+deja en WARN, en lugar de perderse en silencio.
 
 `RABBITMQ_PUBLISH_TIMEOUT` (1500 ms por defecto) acota el intento completo —el
 primer publish, la reconexión si hace falta y el reintento— con un único
 deadline: el dial de la reconexión usa lo que le quede a ese mismo contexto en
 vez de abrir su propia ventana de `RABBITMQ_DIAL_TIMEOUT`, así que un broker
 caído no puede multiplicar la latencia del publish más allá del presupuesto
-configurado. El publish de `user.created` es bloqueante para la respuesta de
-`/auth/signup` —un fallo no la cambia, pero su latencia sí cuenta para el
-total— así que este valor entra en el presupuesto de los 5000 ms descripto
-más abajo.
+configurado. Lo consume el worker del outbox, fuera del camino de cualquier
+request, así que no suma a la latencia de ningún endpoint.
 
 ### Presupuesto de latencia de `/auth/signup`
 
-Es el único endpoint que encadena las tres dependencias síncronas del
-servicio en una sola petición: RENAPER, la escritura en base y el publish de
-`user.created`. El contrato de resiliencia fija el techo del request completo
-en 5000 ms, así que `RENAPER_TIMEOUT`, `POSTGRES_STATEMENT_TIMEOUT` y
-`RABBITMQ_PUBLISH_TIMEOUT` comparten el mismo valor a propósito —1500 ms cada
-uno— dejando ~500 ms de margen para Argon2id y el resto de la CPU propia
-(HPKE, Blind Index, cifrado AES, framework):
+Es el endpoint que más dependencias síncronas encadena: RENAPER y la escritura
+en base. El contrato de resiliencia fija el techo del request completo en
+5000 ms; `RENAPER_TIMEOUT` y `POSTGRES_STATEMENT_TIMEOUT` valen 1500 ms cada
+uno, y queda margen para Argon2id y el resto de la CPU propia (HPKE, Blind
+Index, cifrado AES, framework):
 
 ```
-RENAPER (1500 ms) + escritura en base (1500 ms) + publish (1500 ms) + margen (~500 ms) ≈ 5000 ms
+RENAPER (1500 ms) + escritura en base (1500 ms) + margen (~500 ms) ≈ 3500 ms ≤ 5000 ms
 ```
 
-Los demás endpoints tocan como máximo dos de estas dependencias en serie
-(`/refresh` normal: `FindByHash` + `RotateSession`, dos consultas) o ninguna
-síncrona externa (`/logout`, `/signin`), así que quedan cómodos bajo el mismo
-techo sin acercarse a él. Subir cualquiera de los tres valores sin bajar otro
-rompe este presupuesto.
-
-### `user.created`
-
-Se publica al completar el alta (US-01). `actor` va en `null` porque todavía
-no hay sesión ni usuario autenticado actuando: el usuario se está creando en
-esa misma petición.
-
-```json
-{
-  "eventId": "…",
-  "eventType": "user.created",
-  "timestamp": "2026-08-12T15:30:01Z",
-  "producer": "vinculo-vial-identity",
-  "actor": null,
-  "payload": {
-    "userId": "6f2a4c1e-9d3b-4f5a-8c7d-1e2f3a4b5c6d"
-  }
-}
-```
+El alta no publica ningún evento, así que `RABBITMQ_PUBLISH_TIMEOUT` no entra en
+este presupuesto. Los demás endpoints tocan como máximo dos consultas en serie
+(`/refresh` normal: `FindByHash` + `RotateSession`) o una sola dependencia
+(`/logout`, `/signin`), y quedan cómodos bajo el mismo techo.
 
 ### `user.sessions.revoked`
 
@@ -497,8 +482,7 @@ del usuario, y hacerlo en cada logout apagaría las notificaciones de sus
 demás dispositivos. Acá `actor` sí lleva el UUID del usuario afectado, y
 `reason` es un enum acotado pensado para auditoría.
 
-**Patrón Transactional Outbox.** A diferencia de `user.created`,
-`RefreshService` no publica nada de forma síncrona: `SessionRepository.
+**Patrón Transactional Outbox.** `RefreshService` no publica nada de forma síncrona: `SessionRepository.
 RevokeAllByUserID` persiste la revocación y una fila en `outbox_events` en la
 misma transacción, y `internal/service/outbox.Worker` la retira y publica en
 background (`OUTBOX_WORKER_INTERVAL`, por defecto cada 2 s). Un evento se
@@ -531,13 +515,6 @@ no depende en absoluto de la disponibilidad de RabbitMQ.
 - **Contrato desincronizado con Frontend y Gateway.** El payload interno
   reemplazó `biometric_verified` por `tramite`/`sexo`/`selfie`; hasta que los
   otros dos repos repliquen el cambio, no son interoperables entre sí.
-- **Outbox transaccional para `user.created`.** A diferencia de
-  `user.sessions.revoked` (ver más arriba, ya resuelto con el patrón Outbox),
-  el alta sigue publicando de forma síncrona: si RabbitMQ está caído, el
-  usuario se registra igual y el evento se pierde con un registro de error.
-  Es la decisión correcta para no romper el alta por un problema del broker,
-  pero hay que resolverlo con el mismo patrón antes de que algún consumidor
-  dependa de `user.created` para algo crítico.
 - **Migraciones versionadas**, en lugar de `AutoMigrate`.
 - **Rate limiting** de los endpoints de alta y login. Argon2id reserva 64 MiB
   por derivación concurrente (el login también deriva uno, vía `Verify`, en

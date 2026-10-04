@@ -46,7 +46,7 @@ type InternalRouterConfig struct {
 //
 // A diferencia de NewRouter, acá el secreto de servicio se exige en toda
 // ruta, incluida /internal/healthz: este puerto no lo consulta ningún
-// balanceador externo —el orquestador usa /readyz del router público para
+// balanceador externo —el orquestador usa /ready del router público para
 // decidir si el proceso está listo—, así que no hay necesidad operativa de
 // dejar una excepción, y cada excepción es superficie de menos que proteger.
 func NewInternalRouter(cfg InternalRouterConfig) (*gin.Engine, error) {

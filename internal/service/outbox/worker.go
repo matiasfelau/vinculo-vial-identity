@@ -8,12 +8,20 @@ package outbox
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"log/slog"
 	"time"
 
+	"github.com/google/uuid"
+
 	"github.com/matiasfelau/vinculo-vial-identity/internal/domain"
 )
+
+// eventTypeSessionsRevoked es el único tipo de evento que hoy pasa por el
+// outbox: la Defensa Activa de US-03. Coincide con el tipo con que lo arma
+// session.RefreshService.
+const eventTypeSessionsRevoked = "user.sessions.revoked"
 
 // Worker publica en background los eventos pendientes del outbox.
 type Worker struct {
@@ -51,13 +59,14 @@ func (w *Worker) ProcessBatch(ctx context.Context) (int, error) {
 
 	sent := 0
 	for _, event := range events {
-		evt := domain.NewSessionsRevoked(event.ID, event.UserID, event.Reason)
-		if err := w.publisher.PublishSessionsRevoked(ctx, evt); err != nil {
+		pubErr := w.publish(ctx, event)
+
+		if pubErr != nil {
 			w.logger.ErrorContext(ctx, "outbox worker: no se pudo publicar, se reintentará",
 				slog.String("event_id", event.ID.String()),
-				slog.String("error", err.Error()),
+				slog.String("error", pubErr.Error()),
 			)
-			if markErr := w.repo.MarkFailed(ctx, event.ID, err.Error()); markErr != nil {
+			if markErr := w.repo.MarkFailed(ctx, event.ID, pubErr.Error()); markErr != nil {
 				w.logger.ErrorContext(ctx, "outbox worker: no se pudo registrar el intento fallido",
 					slog.String("event_id", event.ID.String()),
 					slog.String("error", markErr.Error()),
@@ -77,6 +86,32 @@ func (w *Worker) ProcessBatch(ctx context.Context) (int, error) {
 	}
 
 	return sent, nil
+}
+
+// publish traduce una fila de outbox al evento de dominio que corresponde a
+// su tipo y lo publica. Un tipo desconocido o un payload que no se puede
+// interpretar son errores como cualquier otro: el evento queda pendiente con
+// el motivo en last_error, en lugar de publicarse con datos inventados.
+func (w *Worker) publish(ctx context.Context, event domain.OutboxEvent) error {
+	switch event.Type {
+	case eventTypeSessionsRevoked:
+		var payload struct {
+			UserID string `json:"user_id"`
+			Reason string `json:"reason"`
+		}
+		if err := json.Unmarshal(event.Payload, &payload); err != nil {
+			return fmt.Errorf("outbox worker: payload de %s ilegible: %w", event.Type, err)
+		}
+		userID, err := uuid.Parse(payload.UserID)
+		if err != nil {
+			return fmt.Errorf("outbox worker: user_id de %s inválido: %w", event.Type, err)
+		}
+		evt := domain.NewSessionsRevoked(event.ID, userID, domain.SessionsRevokedReason(payload.Reason))
+		return w.publisher.PublishSessionsRevoked(ctx, evt)
+
+	default:
+		return fmt.Errorf("outbox worker: tipo de evento desconocido: %s", event.Type)
+	}
 }
 
 // Run ejecuta ProcessBatch en un loop con el intervalo dado, hasta que ctx

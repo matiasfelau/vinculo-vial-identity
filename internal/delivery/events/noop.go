@@ -26,15 +26,6 @@ func NewNoopPublisher(logger *slog.Logger) *NoopPublisher {
 	return &NoopPublisher{logger: logger}
 }
 
-// PublishUserCreated registra el evento que se habría publicado.
-func (p *NoopPublisher) PublishUserCreated(ctx context.Context, evt domain.UserCreated) error {
-	p.logger.WarnContext(ctx, "publisher inerte: el evento no se publicó",
-		slog.String("event_type", EventTypeUserCreated),
-		slog.String("user_id", evt.UserID.String()),
-	)
-	return nil
-}
-
 // PublishSessionsRevoked registra el evento que se habría publicado.
 func (p *NoopPublisher) PublishSessionsRevoked(ctx context.Context, evt domain.SessionsRevoked) error {
 	p.logger.WarnContext(ctx, "publisher inerte: el evento no se publicó",

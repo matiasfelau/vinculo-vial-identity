@@ -171,30 +171,3 @@ func (m *repositoryMock) last() domain.User {
 	defer m.mu.Unlock()
 	return m.created[len(m.created)-1]
 }
-
-type publisherMock struct {
-	err error
-
-	mu        sync.Mutex
-	calls     int
-	published []domain.UserCreated
-}
-
-func (m *publisherMock) PublishUserCreated(_ context.Context, evt domain.UserCreated) error {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-
-	m.calls++
-	if m.err != nil {
-		return m.err
-	}
-	m.published = append(m.published, evt)
-	return nil
-}
-
-// PublishSessionsRevoked no lo ejercita ningún test de signup: es parte de
-// domain.EventPublisher solo porque la Defensa Activa de US-03 (US-06) la
-// necesita sobre el mismo publisher.
-func (m *publisherMock) PublishSessionsRevoked(context.Context, domain.SessionsRevoked) error {
-	panic("signup: PublishSessionsRevoked no se usa en el alta")
-}
