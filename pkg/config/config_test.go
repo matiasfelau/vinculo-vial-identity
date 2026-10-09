@@ -55,6 +55,7 @@ func aplicar(t *testing.T, env map[string]string) {
 		"RENAPER_BREAKER_FAILURE_THRESHOLD", "RENAPER_BREAKER_WINDOW", "RENAPER_BREAKER_OPEN_DURATION",
 		"OUTBOX_WORKER_INTERVAL", "OUTBOX_WORKER_BATCH_SIZE",
 		"RABBITMQ_PREFETCH", "MAX_RETRIES", "ALERT_REJECTED_QUEUE", "FRAUD_PENALTY",
+		"ALERT_REPORTED_QUEUE", "REPORT_REVIEW_THRESHOLD",
 	} {
 		t.Setenv(k, "")
 		os.Unsetenv(k)
@@ -313,6 +314,45 @@ func TestLoadConfiguraLosConsumidoresPorDefecto(t *testing.T) {
 	}
 	if cfg.Reputation.FraudPenalty != 10 {
 		t.Errorf("fraud penalty = %d, se esperaban 10", cfg.Reputation.FraudPenalty)
+	}
+	if cfg.Consumer.AlertReportedQueue != "identity.alert-reported.q" {
+		t.Errorf("cola de reportes = %q, se esperaba identity.alert-reported.q", cfg.Consumer.AlertReportedQueue)
+	}
+	if cfg.Reputation.ReviewThreshold != 1 {
+		t.Errorf("umbral de revisión = %d, se esperaba 1", cfg.Reputation.ReviewThreshold)
+	}
+}
+
+func TestLoadAceptaUnUmbralDeRevisionPersonalizado(t *testing.T) {
+	env := entornoMinimo()
+	env["REPORT_REVIEW_THRESHOLD"] = "3"
+	env["ALERT_REPORTED_QUEUE"] = "identity.otra.q"
+	aplicar(t, env)
+
+	cfg, err := config.Load()
+	if err != nil {
+		t.Fatalf("error inesperado: %v", err)
+	}
+	if cfg.Reputation.ReviewThreshold != 3 {
+		t.Errorf("umbral de revisión = %d, se esperaba 3", cfg.Reputation.ReviewThreshold)
+	}
+	if cfg.Consumer.AlertReportedQueue != "identity.otra.q" {
+		t.Errorf("cola de reportes = %q", cfg.Consumer.AlertReportedQueue)
+	}
+}
+
+func TestLoadRechazaUnUmbralDeRevisionInvalido(t *testing.T) {
+	// Con umbral 0 todo usuario quedaría en revisión sin recibir un reporte.
+	for nombre, valor := range map[string]string{"cero": "0", "negativo": "-1", "no numérico": "uno"} {
+		t.Run(nombre, func(t *testing.T) {
+			env := entornoMinimo()
+			env["REPORT_REVIEW_THRESHOLD"] = valor
+			aplicar(t, env)
+
+			if _, err := config.Load(); err == nil {
+				t.Error("se esperaba un error de configuración")
+			}
+		})
 	}
 }
 

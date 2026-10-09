@@ -77,11 +77,17 @@ func cuerpoValido(t *testing.T, eventID uuid.UUID, eventType string) []byte {
 // entrega arma un delivery con su acker de prueba y, si retries > 0, el header
 // x-death que RabbitMQ agregaría tras esa cantidad de rechazos en la cola.
 func entrega(body []byte, retries int64) (amqp.Delivery, *acker) {
+	return entregaDeCola(colaDePrueba, body, retries)
+}
+
+// entregaDeCola es entrega para una cola de trabajo específica: el x-death
+// cuenta los rechazos de esa cola, que es la única que mira el consumidor.
+func entregaDeCola(cola string, body []byte, retries int64) (amqp.Delivery, *acker) {
 	a := &acker{}
 	headers := amqp.Table{}
 	if retries > 0 {
 		headers["x-death"] = []any{
-			amqp.Table{"queue": colaDePrueba, "reason": "rejected", "count": retries},
+			amqp.Table{"queue": cola, "reason": "rejected", "count": retries},
 		}
 	}
 	return amqp.Delivery{Acknowledger: a, DeliveryTag: 1, Headers: headers, Body: body}, a

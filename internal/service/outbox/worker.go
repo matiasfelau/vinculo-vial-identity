@@ -19,9 +19,9 @@ import (
 	"github.com/matiasfelau/vinculo-vial-identity/internal/domain"
 )
 
-// eventTypeSessionsRevoked es el único tipo de evento que hoy pasa por el
-// outbox: la Defensa Activa de US-03. Coincide con el tipo con que lo arma
-// session.RefreshService.
+// eventTypeSessionsRevoked es el tipo del evento de la Defensa Activa de
+// US-03. Coincide con el tipo con que lo arma session.RefreshService. El otro
+// tipo que pasa por el outbox es domain.EventTypeUserStatusChanged (US-08).
 const eventTypeSessionsRevoked = "user.sessions.revoked"
 
 // connectionKeeper lo implementa el publisher real: restablece la conexión con
@@ -156,6 +156,25 @@ func (w *Worker) publish(ctx context.Context, event domain.OutboxEvent) error {
 		}
 		evt := domain.NewSessionsRevoked(event.ID, userID, domain.SessionsRevokedReason(payload.Reason))
 		return w.publisher.PublishSessionsRevoked(ctx, evt)
+
+	case domain.EventTypeUserStatusChanged:
+		var payload struct {
+			UserID        string `json:"user_id"`
+			AccountStatus string `json:"account_status"`
+			Reason        string `json:"reason"`
+		}
+		if err := json.Unmarshal(event.Payload, &payload); err != nil {
+			return fmt.Errorf("outbox worker: payload de %s ilegible: %w", event.Type, err)
+		}
+		userID, err := uuid.Parse(payload.UserID)
+		if err != nil {
+			return fmt.Errorf("outbox worker: user_id de %s inválido: %w", event.Type, err)
+		}
+		if payload.AccountStatus == "" || payload.Reason == "" {
+			return fmt.Errorf("outbox worker: %s sin account_status o reason", event.Type)
+		}
+		evt := domain.NewUserStatusChanged(event.ID, userID, domain.AccountStatus(payload.AccountStatus), domain.UserStatusReason(payload.Reason))
+		return w.publisher.PublishUserStatusChanged(ctx, evt)
 
 	default:
 		return fmt.Errorf("outbox worker: tipo de evento desconocido: %s", event.Type)

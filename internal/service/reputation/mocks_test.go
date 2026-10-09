@@ -22,6 +22,27 @@ type repoMock struct {
 	eventos   []domain.ProcessedEvent
 	usuarios  []uuid.UUID
 	penalties []int
+
+	// Lo que registra ApplyReport.
+	resultado   domain.ReportOutcome
+	umbrales    []int
+	statusEvent []domain.OutboxEvent
+}
+
+func (m *repoMock) ApplyReport(_ context.Context, event domain.ProcessedEvent, userID uuid.UUID, threshold int, statusChanged domain.OutboxEvent) (domain.ReportOutcome, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	m.llamadas++
+	if m.err != nil {
+		return 0, m.err
+	}
+
+	m.eventos = append(m.eventos, event)
+	m.usuarios = append(m.usuarios, userID)
+	m.umbrales = append(m.umbrales, threshold)
+	m.statusEvent = append(m.statusEvent, statusChanged)
+	return m.resultado, nil
 }
 
 func (m *repoMock) ApplyRejection(_ context.Context, event domain.ProcessedEvent, userID uuid.UUID, penalty int) (domain.RejectionResult, error) {

@@ -325,14 +325,15 @@ func buildPublisher(cfg *config.Config, logger *slog.Logger) (statusPublisher, f
 	return p, p.Close, nil
 }
 
-// startConsumers arma y lanza los consumidores de eventos de US-08.
+// startConsumers arma y lanza los consumidores de eventos de US-08: los
+// rechazos de alertas (reputación) y los reportes (revisión).
 //
 // Con el broker deshabilitado (solo desarrollo; la configuración lo rechaza en
 // producción) no hay nada que consumir: queda constancia en WARN, igual que con
 // el publisher inerte.
 func startConsumers(ctx context.Context, cfg *config.Config, reputationRepo domain.ReputationRepository, logger *slog.Logger) (func(), error) {
 	if !cfg.Events.Enabled {
-		logger.Warn("consumo de eventos deshabilitado: no se procesarán rechazos de alertas")
+		logger.Warn("consumo de eventos deshabilitado: no se procesarán rechazos ni reportes de alertas")
 		return func() {}, nil
 	}
 
@@ -350,6 +351,20 @@ func startConsumers(ctx context.Context, cfg *config.Config, reputationRepo doma
 		return nil, err
 	}
 
+	reports, err := reputation.NewReportService(reputation.ReportDeps{
+		Repo:            reputationRepo,
+		Consumer:        cfg.Consumer.AlertReportedQueue,
+		ReviewThreshold: cfg.Reputation.ReviewThreshold,
+		Logger:          logger,
+	})
+	if err != nil {
+		return nil, err
+	}
+	reportedHandler, err := consumer.NewAlertReportedHandler(reports)
+	if err != nil {
+		return nil, err
+	}
+
 	return consumer.Start(ctx, consumer.Settings{
 		URL:            cfg.Events.URL.Reveal(),
 		Prefetch:       cfg.Consumer.Prefetch,
@@ -362,6 +377,12 @@ func startConsumers(ctx context.Context, cfg *config.Config, reputationRepo doma
 			EventType:  reputation.EventTypeAlertRejected,
 			MaxRetries: cfg.Consumer.MaxRetries,
 			Handler:    rejectedHandler,
+		},
+		{
+			Queue:      cfg.Consumer.AlertReportedQueue,
+			EventType:  reputation.EventTypeAlertReported,
+			MaxRetries: cfg.Consumer.MaxRetries,
+			Handler:    reportedHandler,
 		},
 	}, logger)
 }

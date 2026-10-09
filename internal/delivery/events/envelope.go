@@ -10,6 +10,11 @@ import (
 // de US-03 (US-06). Es también el routing key con el que se publica.
 const EventTypeSessionsRevoked = "user.sessions.revoked"
 
+// EventTypeUserStatusChanged es el tipo de evento con que Identity anuncia un
+// cambio de account_status (US-08). Es también el routing key con el que se
+// publica.
+const EventTypeUserStatusChanged = domain.EventTypeUserStatusChanged
+
 // Envelope es el sobre estándar de eventos de la plataforma. La forma es común
 // a todos los productores; lo específico de cada evento va en Payload.
 type Envelope struct {
@@ -53,6 +58,34 @@ func newSessionsRevokedEnvelope(evt domain.SessionsRevoked, producer string, now
 		Actor:     &actor,
 		Payload: sessionsRevokedPayload{
 			Reason: string(evt.Reason),
+		},
+	}
+}
+
+// userStatusChangedPayload es el contenido de user.status.changed, en
+// snake_case como fija el contrato. No lleva PII: el usuario va como UUID.
+type userStatusChangedPayload struct {
+	UserID        string `json:"user_id"`
+	AccountStatus string `json:"account_status"`
+	Reason        string `json:"reason"`
+}
+
+// newUserStatusChangedEnvelope arma el sobre de un cambio de estado.
+//
+// Actor es nulo: es un hecho del sistema, no de un usuario autenticado, y el
+// usuario afectado ya va en el payload. EventID reutiliza evt.EventID, la
+// fila del outbox, por la misma razón que en newSessionsRevokedEnvelope.
+func newUserStatusChangedEnvelope(evt domain.UserStatusChanged, producer string, now time.Time) Envelope {
+	return Envelope{
+		EventID:   evt.EventID.String(),
+		EventType: EventTypeUserStatusChanged,
+		Timestamp: now.UTC().Format(time.RFC3339Nano),
+		Producer:  producer,
+		Actor:     nil,
+		Payload: userStatusChangedPayload{
+			UserID:        evt.UserID.String(),
+			AccountStatus: string(evt.AccountStatus),
+			Reason:        string(evt.Reason),
 		},
 	}
 }

@@ -134,6 +134,12 @@ func (p *Publisher) PublishSessionsRevoked(ctx context.Context, evt domain.Sessi
 	return p.publishEnvelope(ctx, newSessionsRevokedEnvelope(evt, p.cfg.Producer, p.now()))
 }
 
+// PublishUserStatusChanged emite user.status.changed con confirmación del
+// broker, igual que PublishSessionsRevoked.
+func (p *Publisher) PublishUserStatusChanged(ctx context.Context, evt domain.UserStatusChanged) error {
+	return p.publishEnvelope(ctx, newUserStatusChangedEnvelope(evt, p.cfg.Producer, p.now()))
+}
+
 // publishEnvelope serializa el sobre y lo entrega con confirmación del
 // broker. Es el cuerpo común a todo Publish*: el routing key de cada evento
 // es su propio EventType, tal como documenta cada constante EventType*.

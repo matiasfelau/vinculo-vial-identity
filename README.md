@@ -366,7 +366,7 @@ Tabla `users`, creada con `AutoMigrate` en la inicialización del repositorio.
 | `password` | varchar(255) | hash Argon2id en formato PHC |
 | `dni_hashed` | varchar(64) | UNIQUE — Blind Index HMAC-SHA256 |
 | `dni_encrypted` | text | AES-256-GCM |
-| `account_status` | varchar(32) | `ACTIVE` |
+| `account_status` | varchar(32) | `ACTIVE` o `UNDER_REVIEW` (US-08) |
 | `reputation_score` | integer | NOT NULL, default 0 (US-08); baja `FRAUD_PENALTY` por cada alerta rechazada por fraude y puede quedar negativa |
 | `report_count` | integer | NOT NULL, default 0 (US-08); solo el conteo, nunca quién reportó |
 | `created_at` / `updated_at` | timestamptz | |
@@ -458,10 +458,11 @@ un equivalente al "5xx del upstream" de una dependencia HTTP.
 
 ## Eventos publicados
 
-El servicio publica un único evento, `user.sessions.revoked`, con el Event
-Envelope estándar de la plataforma. El payload no lleva PII: quien necesite
-datos de la persona los pide a este servicio. El alta no publica nada: Core
-confirmó que `user.created` no tiene consumidor.
+El servicio publica dos eventos, `user.sessions.revoked` y
+`user.status.changed` (US-08), con el Event Envelope estándar de la plataforma.
+Los dos salen por el outbox. El payload no lleva PII: quien necesite datos de
+la persona los pide a este servicio. El alta no publica nada: Core confirmó que
+`user.created` no tiene consumidor.
 
 Se publican sobre `vvi.topic.exchange`. Este servicio nunca declara esa
 topología: la responsabilidad es de `vinculo-vial-core`, y `NewPublisher`
@@ -530,6 +531,39 @@ no depende en absoluto de la disponibilidad de RabbitMQ.
 }
 ```
 
+### `user.status.changed`
+
+Anuncia un cambio de `account_status` (US-08). Hoy solo lo emite el consumo de
+`alert.reported`, cuando un emisor ACTIVE llega a `REPORT_REVIEW_THRESHOLD`
+reportes y pasa a `UNDER_REVIEW`. Alert lo consume para bloquear nuevas alertas
+de ese emisor. `actor` es `null`: es un hecho del sistema, y el usuario va en el
+payload.
+
+Se escribe en `outbox_events` en la misma transacción que el cambio de estado
+(nunca con un publish suelto tras el commit), y el worker del outbox lo
+publica con el mismo `eventId` entre reintentos.
+
+```json
+{
+  "eventId": "…",
+  "eventType": "user.status.changed",
+  "timestamp": "2026-10-09T12:00:00Z",
+  "producer": "vinculo-vial-identity",
+  "actor": null,
+  "payload": {
+    "user_id": "6f2a4c1e-9d3b-4f5a-8c7d-1e2f3a4b5c6d",
+    "account_status": "UNDER_REVIEW",
+    "reason": "REPORTS_THRESHOLD"
+  }
+}
+```
+
+**Levantar la revisión** queda fuera de alcance de US-08 (es manual, para un
+caso de uso futuro de administración). Hacerlo a mano en la base **no alcanza**:
+Alert mantiene una proyección alimentada por este evento, así que además de
+poner `account_status = 'ACTIVE'` hay que emitir `user.status.changed` con
+`ACTIVE`. Sin ese evento, Alert sigue bloqueando al emisor.
+
 ## Consumo de eventos (US-08)
 
 `internal/delivery/consumer` es la infraestructura común de los consumidores de
@@ -565,6 +599,24 @@ fraude (`NO_VEHICLE`, `BURST_MISMATCH`, `PLATE_MISMATCH`), se resta
 penaliza. Un `actor` nulo o que no es un UUID, o un payload sin `alert_id`
 válido ni `reason_codes`, va directo a la DLQ; un usuario inexistente se loguea
 y se confirma; un error de base reintenta.
+
+### `alert.reported` → revisión
+
+Consume `identity.alert-reported.q` (`ALERT_REPORTED_QUEUE`). El `actor` del
+sobre es el emisor reportado. En una única transacción se registra el evento en
+`processed_events`, se suma uno a `users.report_count` (`UPDATE … RETURNING`) y,
+si el conteo llega a `REPORT_REVIEW_THRESHOLD` y el usuario estaba `ACTIVE`, se
+lo pasa a `UNDER_REVIEW` y se escribe `user.status.changed` en el outbox. Un
+usuario que ya está en revisión sigue contando pero no vuelve a publicar, y un
+duplicado no incrementa.
+
+`UNDER_REVIEW` restringe solo la creación de alertas, y esa restricción la
+aplica Alert: en Identity no bloquea el login, el refresh ni nada más (ningún
+flujo consulta `account_status`). Identity no guarda quién reportó ni qué
+alerta fue: `alert.reported` no trae al denunciante, y el payload solo se
+valida (`alert_id` UUID, `reason` ∈ `FALSE_ALERT` | `SPAM`). Riesgo aceptado por
+el contrato: con umbral 1, cualquier destinatario puede poner en revisión al
+emisor que lo alertó.
 
 ## Health
 
