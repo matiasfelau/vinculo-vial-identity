@@ -341,6 +341,7 @@ internal/service/outbox/    worker en background del patrón Transactional Outbo
 internal/repository/postgres/  persistencia GORM (users, sessions, outbox_events)
 internal/delivery/http/     handlers Gin, DTOs, middlewares
 internal/delivery/events/   publisher RabbitMQ (+ inerte)
+internal/delivery/consumer/ infraestructura de consumo RabbitMQ: ack manual, reintentos, DLQ (US-08)
 internal/crypto/hpke/       descifrado del transporte
 internal/crypto/symmetric/  cifrado at-rest
 internal/crypto/blindindex/ Blind Index del DNI
@@ -505,6 +506,31 @@ no depende en absoluto de la disponibilidad de RabbitMQ.
   }
 }
 ```
+
+## Consumo de eventos (US-08)
+
+`internal/delivery/consumer` es la infraestructura común de los consumidores de
+este servicio. Cada handler implementa `consumer.Handler` y se corre con
+`consumer.Run`, con una conexión AMQP dedicada que se reabre con backoff
+exponencial si el broker cae. Como el publisher, nunca declara topología: la
+cola de trabajo `W`, `W.retry` y `W.dlq` las declara `vinculo-vial-core`.
+
+- **Ack manual** después de procesar con éxito, nunca `auto-ack`, y `prefetch`
+  explícito (`RABBITMQ_PREFETCH`).
+- **Fallo transitorio** (cualquier error que el handler devuelva, por ejemplo la
+  base caída): `nack` sin requeue. `W` hace dead-letter a `vvi.retry.exchange`
+  con routing key `W`; `W.retry` espera su TTL y devuelve el mensaje solo a `W`.
+  Los reintentos se cuentan con `x-death`, mirando únicamente la cola `W`.
+  Agotados `MAX_RETRIES`, el mensaje se publica en `vvi.dlq.exchange` y recién
+  después se hace ack.
+- **Fallo permanente** (sobre ilegible, sin `eventId` ni `eventType`, `eventType`
+  ajeno a la cola, `errors.Is(err, consumer.ErrPermanent)` o un panic del
+  handler): directo a la DLQ, sin reintento.
+- **La DLQ se rutea por el nombre de la cola de trabajo**, no por la routing key
+  del evento, con mensaje persistente, `mandatory=true` y publisher confirm
+  bajo un timeout (`RABBITMQ_PUBLISH_TIMEOUT`). Si la DLQ no confirma, el
+  original no se confirma: vuelve por la cola de reintento.
+- La entrega es at-least-once: cada handler tiene que ser idempotente.
 
 ## Health
 
