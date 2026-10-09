@@ -35,8 +35,15 @@ type User struct {
 	DNIHashed     string
 	DNIEncrypted  string
 	AccountStatus AccountStatus
-	CreatedAt     time.Time
-	UpdatedAt     time.Time
+	// ReputationScore es la reputación del usuario. Identity es su única
+	// fuente de verdad: nace en 0 y solo baja, por cada alerta rechazada por
+	// fraude. Puede quedar negativa.
+	ReputationScore int
+	// ReportCount es la cantidad de reportes recibidos de los destinatarios de
+	// sus alertas. Solo el conteo: no se guarda quién reportó.
+	ReportCount int
+	CreatedAt   time.Time
+	UpdatedAt   time.Time
 }
 
 // NewUser construye un User válido con los invariantes del alta.

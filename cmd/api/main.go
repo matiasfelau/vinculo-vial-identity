@@ -20,6 +20,7 @@ import (
 	"github.com/matiasfelau/vinculo-vial-identity/internal/crypto/hpke"
 	"github.com/matiasfelau/vinculo-vial-identity/internal/crypto/password"
 	"github.com/matiasfelau/vinculo-vial-identity/internal/crypto/symmetric"
+	"github.com/matiasfelau/vinculo-vial-identity/internal/delivery/consumer"
 	"github.com/matiasfelau/vinculo-vial-identity/internal/delivery/events"
 	delivery "github.com/matiasfelau/vinculo-vial-identity/internal/delivery/http"
 	"github.com/matiasfelau/vinculo-vial-identity/internal/domain"
@@ -27,6 +28,7 @@ import (
 	"github.com/matiasfelau/vinculo-vial-identity/internal/repository/postgres"
 	"github.com/matiasfelau/vinculo-vial-identity/internal/service/outbox"
 	"github.com/matiasfelau/vinculo-vial-identity/internal/service/ownership"
+	"github.com/matiasfelau/vinculo-vial-identity/internal/service/reputation"
 	"github.com/matiasfelau/vinculo-vial-identity/internal/service/session"
 	"github.com/matiasfelau/vinculo-vial-identity/internal/service/signin"
 	"github.com/matiasfelau/vinculo-vial-identity/internal/service/signup"
@@ -108,6 +110,13 @@ func run() error {
 		return err
 	}
 
+	// processed_events: la marca de deduplicación de los consumidores (US-08).
+	// Requiere que users ya esté migrada: actualiza sus columnas de reputación.
+	reputationRepo, err := postgres.NewReputationRepository(ctx, db)
+	if err != nil {
+		return err
+	}
+
 	tokens, err := buildTokenGenerator(cfg)
 	if err != nil {
 		return err
@@ -132,6 +141,14 @@ func run() error {
 	// worker sobreviva al resto del proceso.
 	outboxWorker := outbox.NewWorker(outboxRepo, publisher, cfg.Outbox.WorkerBatchSize, logger)
 	go outboxWorker.Run(ctx, cfg.Outbox.WorkerInterval)
+
+	stopConsumers, err := startConsumers(ctx, cfg, reputationRepo, logger)
+	if err != nil {
+		return err
+	}
+	// Se declara después de cerrar la base, así que corre antes: los consumidores
+	// terminan el mensaje en curso mientras la base todavía responde.
+	defer stopConsumers()
 
 	renaperSvc := buildRenaper(cfg, logger)
 
@@ -306,6 +323,47 @@ func buildPublisher(cfg *config.Config, logger *slog.Logger) (statusPublisher, f
 	}
 
 	return p, p.Close, nil
+}
+
+// startConsumers arma y lanza los consumidores de eventos de US-08.
+//
+// Con el broker deshabilitado (solo desarrollo; la configuración lo rechaza en
+// producción) no hay nada que consumir: queda constancia en WARN, igual que con
+// el publisher inerte.
+func startConsumers(ctx context.Context, cfg *config.Config, reputationRepo domain.ReputationRepository, logger *slog.Logger) (func(), error) {
+	if !cfg.Events.Enabled {
+		logger.Warn("consumo de eventos deshabilitado: no se procesarán rechazos de alertas")
+		return func() {}, nil
+	}
+
+	rejections, err := reputation.NewRejectionService(reputation.RejectionDeps{
+		Repo:         reputationRepo,
+		Consumer:     cfg.Consumer.AlertRejectedQueue,
+		FraudPenalty: cfg.Reputation.FraudPenalty,
+		Logger:       logger,
+	})
+	if err != nil {
+		return nil, err
+	}
+	rejectedHandler, err := consumer.NewAlertRejectedHandler(rejections)
+	if err != nil {
+		return nil, err
+	}
+
+	return consumer.Start(ctx, consumer.Settings{
+		URL:            cfg.Events.URL.Reveal(),
+		Prefetch:       cfg.Consumer.Prefetch,
+		DialTimeout:    cfg.Events.DialTimeout,
+		Heartbeat:      cfg.Events.Heartbeat,
+		PublishTimeout: cfg.Events.PublishTimeout,
+	}, []consumer.Spec{
+		{
+			Queue:      cfg.Consumer.AlertRejectedQueue,
+			EventType:  reputation.EventTypeAlertRejected,
+			MaxRetries: cfg.Consumer.MaxRetries,
+			Handler:    rejectedHandler,
+		},
+	}, logger)
 }
 
 // buildRenaper construye el verificador de identidad.

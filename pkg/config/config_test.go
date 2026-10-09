@@ -54,7 +54,7 @@ func aplicar(t *testing.T, env map[string]string) {
 		"RABBITMQ_DIAL_TIMEOUT", "RABBITMQ_HEARTBEAT", "RENAPER_TIMEOUT",
 		"RENAPER_BREAKER_FAILURE_THRESHOLD", "RENAPER_BREAKER_WINDOW", "RENAPER_BREAKER_OPEN_DURATION",
 		"OUTBOX_WORKER_INTERVAL", "OUTBOX_WORKER_BATCH_SIZE",
-		"RABBITMQ_PREFETCH", "MAX_RETRIES",
+		"RABBITMQ_PREFETCH", "MAX_RETRIES", "ALERT_REJECTED_QUEUE", "FRAUD_PENALTY",
 	} {
 		t.Setenv(k, "")
 		os.Unsetenv(k)
@@ -307,6 +307,45 @@ func TestLoadConfiguraLosConsumidoresPorDefecto(t *testing.T) {
 	}
 	if cfg.Consumer.MaxRetries != 5 {
 		t.Errorf("max retries = %d, se esperaban 5", cfg.Consumer.MaxRetries)
+	}
+	if cfg.Consumer.AlertRejectedQueue != "identity.alert-rejected.q" {
+		t.Errorf("cola de rechazos = %q, se esperaba identity.alert-rejected.q", cfg.Consumer.AlertRejectedQueue)
+	}
+	if cfg.Reputation.FraudPenalty != 10 {
+		t.Errorf("fraud penalty = %d, se esperaban 10", cfg.Reputation.FraudPenalty)
+	}
+}
+
+func TestLoadAceptaUnaReputacionPersonalizada(t *testing.T) {
+	env := entornoMinimo()
+	env["FRAUD_PENALTY"] = "25"
+	env["ALERT_REJECTED_QUEUE"] = "identity.otra.q"
+	aplicar(t, env)
+
+	cfg, err := config.Load()
+	if err != nil {
+		t.Fatalf("error inesperado: %v", err)
+	}
+	if cfg.Reputation.FraudPenalty != 25 {
+		t.Errorf("fraud penalty = %d, se esperaban 25", cfg.Reputation.FraudPenalty)
+	}
+	if cfg.Consumer.AlertRejectedQueue != "identity.otra.q" {
+		t.Errorf("cola de rechazos = %q", cfg.Consumer.AlertRejectedQueue)
+	}
+}
+
+func TestLoadRechazaUnaPenalizacionNegativa(t *testing.T) {
+	// Una penalización negativa sumaría reputación al fraude.
+	for nombre, valor := range map[string]string{"negativa": "-1", "no numérica": "diez"} {
+		t.Run(nombre, func(t *testing.T) {
+			env := entornoMinimo()
+			env["FRAUD_PENALTY"] = valor
+			aplicar(t, env)
+
+			if _, err := config.Load(); err == nil {
+				t.Error("se esperaba un error de configuración")
+			}
+		})
 	}
 }
 

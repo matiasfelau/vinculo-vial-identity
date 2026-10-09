@@ -7,6 +7,7 @@ import (
 	"io"
 	"log/slog"
 	"strings"
+	"sync"
 	"time"
 
 	amqp "github.com/rabbitmq/amqp091-go"
@@ -59,6 +60,43 @@ func (s Settings) validate() error {
 // dialFunc abre una conexión y un canal ya configurados. closer libera la
 // conexión. Se inyecta para poder probar la reconexión sin un broker.
 type dialFunc func() (closer io.Closer, channel Channel, err error)
+
+// Start valida la configuración y lanza un consumidor por spec, cada uno con
+// su propia conexión (ver Run). Falla de inmediato, sin lanzar nada, si algún
+// parámetro es inválido: fail-fast en el arranque. El stop devuelto cancela
+// los consumidores y espera a que terminen el mensaje en curso; hay que llamarlo
+// antes de cerrar lo que usan los handlers, como la base.
+func Start(ctx context.Context, settings Settings, specs []Spec, logger *slog.Logger) (stop func(), err error) {
+	if err := settings.validate(); err != nil {
+		return nil, err
+	}
+	for _, spec := range specs {
+		if err := spec.validate(); err != nil {
+			return nil, err
+		}
+	}
+	if logger == nil {
+		logger = slog.Default()
+	}
+
+	ctx, cancel := context.WithCancel(ctx)
+	var wg sync.WaitGroup
+	for _, spec := range specs {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			if err := Run(ctx, settings, spec, logger); err != nil {
+				logger.ErrorContext(ctx, "el consumidor terminó con error",
+					slog.String("queue", spec.Queue), slog.String("error", err.Error()))
+			}
+		}()
+	}
+
+	return func() {
+		cancel()
+		wg.Wait()
+	}, nil
+}
 
 // Run mantiene vivo un consumidor ante caídas del broker, con una conexión
 // dedicada: al perderse el canal espera un backoff exponencial acotado y
