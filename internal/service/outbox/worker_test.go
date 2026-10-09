@@ -73,6 +73,19 @@ type publisherMock struct {
 
 	mu        sync.Mutex
 	published []domain.SessionsRevoked
+	// statusPublished son los user.status.changed publicados (US-08).
+	statusPublished []domain.UserStatusChanged
+}
+
+func (m *publisherMock) PublishUserStatusChanged(_ context.Context, evt domain.UserStatusChanged) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	if m.err != nil {
+		return m.err
+	}
+	m.statusPublished = append(m.statusPublished, evt)
+	return nil
 }
 
 func (m *publisherMock) PublishSessionsRevoked(_ context.Context, evt domain.SessionsRevoked) error {

@@ -232,6 +232,9 @@ type ConsumerConfig struct {
 	// AlertRejectedQueue es la cola de trabajo de alert.rejected. La declara
 	// vinculo-vial-core; este servicio solo la consume.
 	AlertRejectedQueue string
+	// AlertReportedQueue es la cola de trabajo de alert.reported. También la
+	// declara vinculo-vial-core.
+	AlertReportedQueue string
 }
 
 // ReputationConfig son los parámetros de la reputación de los usuarios
@@ -240,6 +243,10 @@ type ReputationConfig struct {
 	// FraudPenalty son los puntos que se restan a reputation_score por cada
 	// alerta rechazada por fraude.
 	FraudPenalty int
+	// ReviewThreshold es la cantidad de reportes que pone a un usuario en
+	// revisión (UNDER_REVIEW): sin poder enviar alertas, pero con el resto de
+	// la cuenta intacta.
+	ReviewThreshold int
 }
 
 // Valores por defecto pensados para que el entorno local levante sin definir
@@ -311,6 +318,8 @@ const (
 	// declara vinculo-vial-core: ver la tabla de eventos del contrato.
 	defaultAlertRejectedQueue = "identity.alert-rejected.q"
 	defaultFraudPenalty       = 10
+	defaultAlertReportedQueue = "identity.alert-reported.q"
+	defaultReviewThreshold    = 1
 	// defaultAccessTokenTTLMinutes y defaultRefreshTokenTTLDays son los valores
 	// que fija el contrato compartido de US-02, no una elección local: Gateway
 	// asume estos mismos TTL del lado de la verificación.
@@ -383,10 +392,12 @@ func Load() (*Config, error) {
 			Prefetch:           r.integer("RABBITMQ_PREFETCH", defaultConsumerPrefetch),
 			MaxRetries:         r.integer("MAX_RETRIES", defaultConsumerMaxRetries),
 			AlertRejectedQueue: r.str("ALERT_REJECTED_QUEUE", defaultAlertRejectedQueue),
+			AlertReportedQueue: r.str("ALERT_REPORTED_QUEUE", defaultAlertReportedQueue),
 		},
 
 		Reputation: ReputationConfig{
-			FraudPenalty: r.integer("FRAUD_PENALTY", defaultFraudPenalty),
+			FraudPenalty:    r.integer("FRAUD_PENALTY", defaultFraudPenalty),
+			ReviewThreshold: r.integer("REPORT_REVIEW_THRESHOLD", defaultReviewThreshold),
 		},
 
 		Token: TokenConfig{
@@ -528,6 +539,10 @@ func (c *Config) validate() error {
 		r.fail("config: FRAUD_PENALTY no puede ser negativa, se recibió %d", c.Reputation.FraudPenalty)
 	}
 
+	if c.Reputation.ReviewThreshold < 1 {
+		r.fail("config: REPORT_REVIEW_THRESHOLD debe ser al menos 1, se recibió %d", c.Reputation.ReviewThreshold)
+	}
+
 	if c.Events.Enabled {
 		if c.Events.URL.Reveal() == "" {
 			r.fail("config: RABBITMQ_URL es obligatoria con RABBITMQ_ENABLED=true")
@@ -580,7 +595,9 @@ func (c *Config) LogValue() slog.Value {
 		slog.Int("rabbitmq_prefetch", c.Consumer.Prefetch),
 		slog.Int("max_retries", c.Consumer.MaxRetries),
 		slog.String("alert_rejected_queue", c.Consumer.AlertRejectedQueue),
+		slog.String("alert_reported_queue", c.Consumer.AlertReportedQueue),
 		slog.Int("fraud_penalty", c.Reputation.FraudPenalty),
+		slog.Int("report_review_threshold", c.Reputation.ReviewThreshold),
 		slog.Duration("renaper_timeout", c.Renaper.Timeout),
 		slog.Int("renaper_breaker_failure_threshold", c.Renaper.BreakerFailureThreshold),
 		slog.Duration("renaper_breaker_window", c.Renaper.BreakerWindow),

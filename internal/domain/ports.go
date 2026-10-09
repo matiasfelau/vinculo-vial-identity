@@ -51,6 +51,19 @@ type ReputationRepository interface {
 	// (envuelto en ErrDatabaseUnavailable si la base no respondió) y deja la
 	// transacción deshecha, para que el reintento procese el evento entero.
 	ApplyRejection(ctx context.Context, event ProcessedEvent, userID uuid.UUID, penalty int) (RejectionResult, error)
+
+	// ApplyReport registra el evento como procesado y le suma un reporte al
+	// usuario. Si con ese reporte el conteo llega a threshold y el usuario
+	// estaba ACTIVE, lo pasa a UNDER_REVIEW y persiste statusChanged en el
+	// outbox, todo en una única transacción: el cambio de estado y el evento
+	// que lo anuncia se confirman juntos o no se confirma ninguno.
+	//
+	// statusChanged es el user.status.changed ya armado: solo se persiste si
+	// hay transición, así que un usuario que ya estaba en revisión no vuelve a
+	// publicar. Un evento ya procesado (misma clave EventID + Consumer) no
+	// cambia nada y devuelve ReportDuplicate. Que el usuario no exista no es
+	// un error: devuelve ReportUserNotFound.
+	ApplyReport(ctx context.Context, event ProcessedEvent, userID uuid.UUID, threshold int, statusChanged OutboxEvent) (ReportOutcome, error)
 }
 
 // SessionRepository persiste sesiones: el registro de cada Refresh Token
@@ -150,6 +163,10 @@ type EventPublisher interface {
 	// emitirlo ahí apagaría las notificaciones push de todos los dispositivos
 	// del usuario por haber cerrado sesión en uno solo.
 	PublishSessionsRevoked(ctx context.Context, evt SessionsRevoked) error
+
+	// PublishUserStatusChanged emite el evento user.status.changed, con
+	// actor nulo: es un hecho del sistema, no de un usuario.
+	PublishUserStatusChanged(ctx context.Context, evt UserStatusChanged) error
 }
 
 // HPKEDecryptor descifra el criptograma de transporte que envía la app.

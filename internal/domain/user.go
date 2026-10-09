@@ -17,6 +17,13 @@ type AccountStatus string
 const (
 	// AccountStatusActive es el estado con el que nace toda cuenta en US-01.
 	AccountStatusActive AccountStatus = "ACTIVE"
+	// AccountStatusUnderReview es el estado de un emisor reportado por
+	// REPORT_REVIEW_THRESHOLD destinatarios (US-08). Restringe solo la creación
+	// de alertas, que decide Alert a partir de user.status.changed: no bloquea
+	// el login, el refresh, el buzón ni la gestión de vehículos. Salir de este
+	// estado es manual y fuera de alcance de US-08: hacerlo a mano en la base no
+	// alcanza, también hay que emitir user.status.changed con ACTIVE.
+	AccountStatusUnderReview AccountStatus = "UNDER_REVIEW"
 )
 
 // User es la entidad raíz del bounded context.

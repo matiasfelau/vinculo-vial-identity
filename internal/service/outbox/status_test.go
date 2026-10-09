@@ -32,6 +32,10 @@ func (publisherInerte) PublishSessionsRevoked(context.Context, domain.SessionsRe
 	return nil
 }
 
+func (publisherInerte) PublishUserStatusChanged(context.Context, domain.UserStatusChanged) error {
+	return nil
+}
+
 func esperarEstado(t *testing.T, w *Worker, estado string) {
 	t.Helper()
 	limite := time.Now().Add(2 * time.Second)
@@ -167,6 +171,10 @@ func (r *repoConEvento) FetchPending(context.Context, int) ([]domain.OutboxEvent
 type publisherQueFalla struct{}
 
 func (publisherQueFalla) PublishSessionsRevoked(context.Context, domain.SessionsRevoked) error {
+	return errors.New("el broker no responde")
+}
+
+func (publisherQueFalla) PublishUserStatusChanged(context.Context, domain.UserStatusChanged) error {
 	return errors.New("el broker no responde")
 }
 
