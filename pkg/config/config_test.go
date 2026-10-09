@@ -54,6 +54,7 @@ func aplicar(t *testing.T, env map[string]string) {
 		"RABBITMQ_DIAL_TIMEOUT", "RABBITMQ_HEARTBEAT", "RENAPER_TIMEOUT",
 		"RENAPER_BREAKER_FAILURE_THRESHOLD", "RENAPER_BREAKER_WINDOW", "RENAPER_BREAKER_OPEN_DURATION",
 		"OUTBOX_WORKER_INTERVAL", "OUTBOX_WORKER_BATCH_SIZE",
+		"RABBITMQ_PREFETCH", "MAX_RETRIES",
 	} {
 		t.Setenv(k, "")
 		os.Unsetenv(k)
@@ -277,6 +278,64 @@ func TestLoadRechazaElCircuitBreakerDeRenaperMalConfigurado(t *testing.T) {
 		"umbral negativo": {"RENAPER_BREAKER_FAILURE_THRESHOLD": "-1"},
 		"ventana cero":    {"RENAPER_BREAKER_WINDOW": "0s"},
 		"apertura cero":   {"RENAPER_BREAKER_OPEN_DURATION": "0s"},
+	}
+
+	for name, override := range cases {
+		t.Run(name, func(t *testing.T) {
+			env := entornoMinimo()
+			for k, v := range override {
+				env[k] = v
+			}
+			aplicar(t, env)
+
+			if _, err := config.Load(); err == nil {
+				t.Error("se esperaba un error de configuración")
+			}
+		})
+	}
+}
+
+func TestLoadConfiguraLosConsumidoresPorDefecto(t *testing.T) {
+	aplicar(t, entornoMinimo())
+
+	cfg, err := config.Load()
+	if err != nil {
+		t.Fatalf("error inesperado: %v", err)
+	}
+	if cfg.Consumer.Prefetch != 10 {
+		t.Errorf("prefetch = %d, se esperaban 10", cfg.Consumer.Prefetch)
+	}
+	if cfg.Consumer.MaxRetries != 5 {
+		t.Errorf("max retries = %d, se esperaban 5", cfg.Consumer.MaxRetries)
+	}
+}
+
+func TestLoadAceptaUnosConsumidoresPersonalizados(t *testing.T) {
+	env := entornoMinimo()
+	env["RABBITMQ_PREFETCH"] = "1"
+	env["MAX_RETRIES"] = "0"
+	aplicar(t, env)
+
+	cfg, err := config.Load()
+	if err != nil {
+		t.Fatalf("error inesperado: %v", err)
+	}
+	if cfg.Consumer.Prefetch != 1 {
+		t.Errorf("prefetch = %d, se esperaba 1", cfg.Consumer.Prefetch)
+	}
+	if cfg.Consumer.MaxRetries != 0 {
+		t.Errorf("max retries = %d, se esperaba 0: derivar a la DLQ sin reintentar es válido", cfg.Consumer.MaxRetries)
+	}
+}
+
+func TestLoadRechazaLosConsumidoresMalConfigurados(t *testing.T) {
+	cases := map[string]map[string]string{
+		"prefetch cero":                 {"RABBITMQ_PREFETCH": "0"},
+		"prefetch negativo":             {"RABBITMQ_PREFETCH": "-1"},
+		"prefetch sobre el límite AMQP": {"RABBITMQ_PREFETCH": "65536"},
+		"prefetch no numérico":          {"RABBITMQ_PREFETCH": "diez"},
+		"max retries negativo":          {"MAX_RETRIES": "-1"},
+		"max retries no numérico":       {"MAX_RETRIES": "cinco"},
 	}
 
 	for name, override := range cases {

@@ -38,6 +38,7 @@ type Config struct {
 	Postgres PostgresConfig
 	Crypto   CryptoConfig
 	Events   EventsConfig
+	Consumer ConsumerConfig
 	Token    TokenConfig
 	Renaper  RenaperConfig
 	Outbox   OutboxConfig
@@ -218,6 +219,17 @@ type EventsConfig struct {
 	Heartbeat time.Duration
 }
 
+// ConsumerConfig son los parámetros comunes a los consumidores de eventos
+// (US-08). La conexión con el broker es la de EventsConfig.
+type ConsumerConfig struct {
+	// Prefetch es el tope de mensajes sin ack que el broker adelanta a cada
+	// consumidor (basic.qos). Sin él, el broker empuja toda la cola al proceso.
+	Prefetch int
+	// MaxRetries es la cantidad máxima de reintentos de un fallo transitorio.
+	// Agotada, el mensaje se deriva a la DLQ.
+	MaxRetries int
+}
+
 // Valores por defecto pensados para que el entorno local levante sin definir
 // más que los secretos.
 const (
@@ -276,6 +288,12 @@ const (
 	defaultEventsPublishTimeut   = 1500 * time.Millisecond
 	defaultEventsDialTimeout     = 10 * time.Second
 	defaultEventsHeartbeat       = 10 * time.Second
+	// defaultConsumerPrefetch y defaultConsumerMaxRetries son los valores del
+	// contrato de US-08. maxConsumerPrefetch es el techo del protocolo AMQP: el
+	// prefetch de basic.qos es un entero de 16 bits sin signo.
+	defaultConsumerPrefetch   = 10
+	defaultConsumerMaxRetries = 5
+	maxConsumerPrefetch       = 65535
 	// defaultAccessTokenTTLMinutes y defaultRefreshTokenTTLDays son los valores
 	// que fija el contrato compartido de US-02, no una elección local: Gateway
 	// asume estos mismos TTL del lado de la verificación.
@@ -342,6 +360,11 @@ func Load() (*Config, error) {
 			PublishTimeout: r.duration("RABBITMQ_PUBLISH_TIMEOUT", defaultEventsPublishTimeut),
 			DialTimeout:    r.duration("RABBITMQ_DIAL_TIMEOUT", defaultEventsDialTimeout),
 			Heartbeat:      r.duration("RABBITMQ_HEARTBEAT", defaultEventsHeartbeat),
+		},
+
+		Consumer: ConsumerConfig{
+			Prefetch:   r.integer("RABBITMQ_PREFETCH", defaultConsumerPrefetch),
+			MaxRetries: r.integer("MAX_RETRIES", defaultConsumerMaxRetries),
 		},
 
 		Token: TokenConfig{
@@ -472,6 +495,13 @@ func (c *Config) validate() error {
 		r.fail("config: OUTBOX_WORKER_BATCH_SIZE debe ser al menos 1")
 	}
 
+	if c.Consumer.Prefetch < 1 || c.Consumer.Prefetch > maxConsumerPrefetch {
+		r.fail("config: RABBITMQ_PREFETCH debe estar entre 1 y %d, se recibió %d", maxConsumerPrefetch, c.Consumer.Prefetch)
+	}
+	if c.Consumer.MaxRetries < 0 {
+		r.fail("config: MAX_RETRIES no puede ser negativo, se recibió %d", c.Consumer.MaxRetries)
+	}
+
 	if c.Events.Enabled {
 		if c.Events.URL.Reveal() == "" {
 			r.fail("config: RABBITMQ_URL es obligatoria con RABBITMQ_ENABLED=true")
@@ -521,6 +551,8 @@ func (c *Config) LogValue() slog.Value {
 		slog.Duration("postgres_statement_timeout", c.Postgres.StatementTimeout),
 		slog.Bool("events_enabled", c.Events.Enabled),
 		slog.String("events_exchange", c.Events.Exchange),
+		slog.Int("rabbitmq_prefetch", c.Consumer.Prefetch),
+		slog.Int("max_retries", c.Consumer.MaxRetries),
 		slog.Duration("renaper_timeout", c.Renaper.Timeout),
 		slog.Int("renaper_breaker_failure_threshold", c.Renaper.BreakerFailureThreshold),
 		slog.Duration("renaper_breaker_window", c.Renaper.BreakerWindow),
