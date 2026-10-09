@@ -21,8 +21,13 @@ type userModel struct {
 	DNIHashed     string    `gorm:"column:dni_hashed;type:varchar(64);not null;uniqueIndex:uix_users_dni_hashed"`
 	DNIEncrypted  string    `gorm:"column:dni_encrypted;type:text;not null"`
 	AccountStatus string    `gorm:"column:account_status;type:varchar(32);not null;default:ACTIVE"`
-	CreatedAt     time.Time `gorm:"column:created_at;type:timestamptz;not null"`
-	UpdatedAt     time.Time `gorm:"column:updated_at;type:timestamptz;not null"`
+	// ReputationScore y ReportCount (US-08) se agregaron a una tabla con
+	// usuarios: el default explícito es lo que hace que AutoMigrate pueda
+	// declararlas NOT NULL y que las filas existentes queden en 0, sin backfill.
+	ReputationScore int       `gorm:"column:reputation_score;type:integer;not null;default:0"`
+	ReportCount     int       `gorm:"column:report_count;type:integer;not null;default:0"`
+	CreatedAt       time.Time `gorm:"column:created_at;type:timestamptz;not null"`
+	UpdatedAt       time.Time `gorm:"column:updated_at;type:timestamptz;not null"`
 }
 
 // TableName fija el nombre de la tabla en lugar de depender de la pluralización
@@ -31,26 +36,30 @@ func (userModel) TableName() string { return "users" }
 
 func toModel(u *domain.User) *userModel {
 	return &userModel{
-		ID:            u.ID,
-		Email:         u.Email,
-		Password:      u.PasswordHash,
-		DNIHashed:     u.DNIHashed,
-		DNIEncrypted:  u.DNIEncrypted,
-		AccountStatus: string(u.AccountStatus),
-		CreatedAt:     u.CreatedAt,
-		UpdatedAt:     u.UpdatedAt,
+		ID:              u.ID,
+		Email:           u.Email,
+		Password:        u.PasswordHash,
+		DNIHashed:       u.DNIHashed,
+		DNIEncrypted:    u.DNIEncrypted,
+		AccountStatus:   string(u.AccountStatus),
+		ReputationScore: u.ReputationScore,
+		ReportCount:     u.ReportCount,
+		CreatedAt:       u.CreatedAt,
+		UpdatedAt:       u.UpdatedAt,
 	}
 }
 
 func (m *userModel) toDomain() *domain.User {
 	return &domain.User{
-		ID:            m.ID,
-		Email:         m.Email,
-		PasswordHash:  m.Password,
-		DNIHashed:     m.DNIHashed,
-		DNIEncrypted:  m.DNIEncrypted,
-		AccountStatus: domain.AccountStatus(m.AccountStatus),
-		CreatedAt:     m.CreatedAt,
-		UpdatedAt:     m.UpdatedAt,
+		ID:              m.ID,
+		Email:           m.Email,
+		PasswordHash:    m.Password,
+		DNIHashed:       m.DNIHashed,
+		DNIEncrypted:    m.DNIEncrypted,
+		AccountStatus:   domain.AccountStatus(m.AccountStatus),
+		ReputationScore: m.ReputationScore,
+		ReportCount:     m.ReportCount,
+		CreatedAt:       m.CreatedAt,
+		UpdatedAt:       m.UpdatedAt,
 	}
 }

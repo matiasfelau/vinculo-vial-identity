@@ -37,6 +37,22 @@ type UserRepository interface {
 	FindByOwnerAndDNIHash(ctx context.Context, ownerID uuid.UUID, dniHashed string) (*User, error)
 }
 
+// ReputationRepository aplica a los usuarios los efectos de los eventos de
+// reputación de US-08.
+type ReputationRepository interface {
+	// ApplyRejection registra el evento como procesado y, si penalty es
+	// positiva, se la resta a la reputación del usuario, todo en una única
+	// transacción: el efecto y su marca de deduplicación se confirman juntos o
+	// no se confirma ninguno.
+	//
+	// Un evento ya procesado (misma clave EventID + Consumer) no cambia nada y
+	// devuelve RejectionDuplicate. Que el usuario no exista no es un error:
+	// devuelve RejectionUserNotFound. Un error de base devuelve el error
+	// (envuelto en ErrDatabaseUnavailable si la base no respondió) y deja la
+	// transacción deshecha, para que el reintento procese el evento entero.
+	ApplyRejection(ctx context.Context, event ProcessedEvent, userID uuid.UUID, penalty int) (RejectionResult, error)
+}
+
 // SessionRepository persiste sesiones: el registro de cada Refresh Token
 // emitido, identificado por su SHA-256.
 type SessionRepository interface {

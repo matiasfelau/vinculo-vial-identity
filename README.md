@@ -367,10 +367,18 @@ Tabla `users`, creada con `AutoMigrate` en la inicialización del repositorio.
 | `dni_hashed` | varchar(64) | UNIQUE — Blind Index HMAC-SHA256 |
 | `dni_encrypted` | text | AES-256-GCM |
 | `account_status` | varchar(32) | `ACTIVE` |
+| `reputation_score` | integer | NOT NULL, default 0 (US-08); baja `FRAUD_PENALTY` por cada alerta rechazada por fraude y puede quedar negativa |
+| `report_count` | integer | NOT NULL, default 0 (US-08); solo el conteo, nunca quién reportó |
 | `created_at` / `updated_at` | timestamptz | |
 
-`AutoMigrate` es una decisión de MVP: solo agrega columnas e índices. Antes de
-tener datos reales en producción hay que pasar a una herramienta con versionado.
+`AutoMigrate` es una decisión de MVP: solo agrega columnas e índices. Va contra
+la regla de migraciones versionadas de la plataforma (`.clauderules`, 14.5); la
+excepción está aceptada y es deuda técnica de todo el proyecto (ver abajo).
+
+Las columnas de US-08 se agregaron a una tabla con usuarios. Llevan default
+explícito, que es lo que deja declararlas `NOT NULL` y hace que cada usuario
+existente quede en 0 al migrar, sin backfill. Una prueba de integración migra
+una tabla `users` con filas y verifica los valores, el `NOT NULL` y el default.
 
 `tramite`, `sexo` y `selfie` **no** están en esta tabla ni lo van a estar: son
 insumos de la verificación contra RENAPER, no datos que el dominio conserve. Se
@@ -419,6 +427,21 @@ pendientes. Es idempotente y no toca la tabla si ya está migrada. Se cubre con
 pruebas de integración contra Postgres real, bajo el build tag `integration`:
 `TEST_DATABASE_URL=… go test -tags=integration -run Integracion ./internal/repository/postgres/`.
 Fallan —no se omiten— si falta la variable, y el CI las corre en un paso aparte.
+
+Tabla `processed_events` (US-08), creada con `AutoMigrate` en
+`ReputationRepository`. Es la marca de deduplicación de los consumidores, que
+son at-least-once: se inserta en la misma transacción que el efecto del evento.
+
+| campo | tipo | notas |
+|---|---|---|
+| `event_id` | uuid | PK compuesta: `eventId` del sobre |
+| `consumer` | varchar(128) | PK compuesta: cola de trabajo que lo procesó |
+| `event_type` | varchar(64) | |
+| `processed_at` | timestamptz | |
+
+La clave única `(event_id, consumer)` es lo que hace idempotente al consumidor:
+`INSERT … ON CONFLICT DO NOTHING` sin filas afectadas significa que el evento ya
+se procesó. El mismo evento visto por otra cola no es un duplicado.
 
 ### Clasificación de errores de la base
 
@@ -531,6 +554,17 @@ cola de trabajo `W`, `W.retry` y `W.dlq` las declara `vinculo-vial-core`.
   bajo un timeout (`RABBITMQ_PUBLISH_TIMEOUT`). Si la DLQ no confirma, el
   original no se confirma: vuelve por la cola de reintento.
 - La entrega es at-least-once: cada handler tiene que ser idempotente.
+
+### `alert.rejected` → reputación
+
+Consume `identity.alert-rejected.q` (`ALERT_REJECTED_QUEUE`). El `actor` del
+sobre es el emisor de la alerta rechazada. En una única transacción se registra
+el evento en `processed_events` y, si algún código de `reason_codes` es de
+fraude (`NO_VEHICLE`, `BURST_MISMATCH`, `PLATE_MISMATCH`), se resta
+`FRAUD_PENALTY` a `users.reputation_score`. `EVIDENCE_UNREADABLE` solo no
+penaliza. Un `actor` nulo o que no es un UUID, o un payload sin `alert_id`
+válido ni `reason_codes`, va directo a la DLQ; un usuario inexistente se loguea
+y se confirma; un error de base reintenta.
 
 ## Health
 
