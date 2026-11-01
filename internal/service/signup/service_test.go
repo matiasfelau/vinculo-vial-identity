@@ -52,7 +52,6 @@ type harness struct {
 	hasher    *hasherMock
 	renaper   *renaperMock
 	repo      *repositoryMock
-	publisher *publisherMock
 	logs      *strings.Builder
 }
 
@@ -66,7 +65,6 @@ func newHarness(t *testing.T, tune ...func(*signup.Deps)) *harness {
 		hasher:    &hasherMock{},
 		renaper:   &renaperMock{verified: true},
 		repo:      &repositoryMock{},
-		publisher: &publisherMock{},
 		logs:      &strings.Builder{},
 	}
 
@@ -77,7 +75,6 @@ func newHarness(t *testing.T, tune ...func(*signup.Deps)) *harness {
 		Hasher:    h.hasher,
 		Renaper:   h.renaper,
 		Users:     h.repo,
-		Publisher: h.publisher,
 		Logger:    slog.New(slog.NewTextHandler(h.logs, &slog.HandlerOptions{Level: slog.LevelDebug})),
 		Now:       func() time.Time { return fijo },
 	}
@@ -118,9 +115,6 @@ func TestSignUpFelizPersisteYPublica(t *testing.T) {
 	}
 	if !u.CreatedAt.Equal(fijo) {
 		t.Errorf("created at = %v, se esperaba el reloj inyectado %v", u.CreatedAt, fijo)
-	}
-	if h.publisher.calls != 1 {
-		t.Errorf("se publicó %d veces, se esperaba 1", h.publisher.calls)
 	}
 	if h.renaper.calls != 1 {
 		t.Errorf("se consultó RENAPER %d veces, se esperaba 1", h.renaper.calls)
@@ -246,7 +240,7 @@ func TestSignUpPropagaElFalloDeDescifrado(t *testing.T) {
 		t.Fatalf("error = %v, se esperaba ErrInvalidCryptogram", err)
 	}
 	// Nada se deriva ni se persiste si el criptograma no abrió.
-	if h.renaper.calls != 0 || h.hasher.calls != 0 || h.repo.calls != 0 || h.publisher.calls != 0 {
+	if h.renaper.calls != 0 || h.hasher.calls != 0 || h.repo.calls != 0 {
 		t.Error("no debe hacerse trabajo alguno tras un fallo de descifrado")
 	}
 }
@@ -367,56 +361,6 @@ func TestSignUpPropagaElDuplicado(t *testing.T) {
 	if !errors.Is(err, domain.ErrDuplicateUser) {
 		t.Fatalf("error = %v, se esperaba ErrDuplicateUser", err)
 	}
-	// Un alta que no ocurrió no puede generar un evento.
-	if h.publisher.calls != 0 {
-		t.Error("no debe publicarse el evento si la persistencia falló")
-	}
-}
-
-// El usuario ya está confirmado en la base: un broker caído no puede convertir
-// un alta exitosa en un 500 que la app reintentaría contra un 409.
-func TestSignUpSobreviveAlFalloDelPublisher(t *testing.T) {
-	h := newHarness(t)
-	h.publisher.err = errors.New("rabbitmq no responde")
-
-	id, err := h.svc.SignUp(t.Context(), []byte(ephemeralPublicKey), []byte(ciphertext))
-
-	if err != nil {
-		t.Fatalf("el alta debe mantenerse pese al fallo del broker, error = %v", err)
-	}
-	if id == uuid.Nil {
-		t.Error("se esperaba el identificador del usuario creado")
-	}
-	if h.repo.calls != 1 {
-		t.Errorf("se persistió %d veces, se esperaba 1", h.repo.calls)
-	}
-	if !strings.Contains(h.logs.String(), "user.created") {
-		t.Error("el fallo de publicación debe quedar registrado para poder repararlo")
-	}
-}
-
-func TestSignUpPublicaElEventoDelUsuarioCreado(t *testing.T) {
-	h := newHarness(t)
-
-	id, err := h.svc.SignUp(t.Context(), []byte(ephemeralPublicKey), []byte(ciphertext))
-	if err != nil {
-		t.Fatalf("error inesperado: %v", err)
-	}
-
-	if len(h.publisher.published) != 1 {
-		t.Fatalf("se publicaron %d eventos, se esperaba 1", len(h.publisher.published))
-	}
-	evt := h.publisher.published[0]
-
-	if evt.UserID != id {
-		t.Errorf("user id del evento = %v, se esperaba %v", evt.UserID, id)
-	}
-	if evt.AccountStatus != domain.AccountStatusActive {
-		t.Errorf("account status = %q, se esperaba %q", evt.AccountStatus, domain.AccountStatusActive)
-	}
-	if !evt.OccurredAt.Equal(fijo) {
-		t.Errorf("occurred at = %v, se esperaba %v", evt.OccurredAt, fijo)
-	}
 }
 
 func TestSignUpPropagaFallosDeLosPrimitivos(t *testing.T) {
@@ -460,7 +404,6 @@ func TestNewExigeTodasLasDependencias(t *testing.T) {
 		"sin hasher":      func(d *signup.Deps) { d.Hasher = nil },
 		"sin renaper":     func(d *signup.Deps) { d.Renaper = nil },
 		"sin repositorio": func(d *signup.Deps) { d.Users = nil },
-		"sin publisher":   func(d *signup.Deps) { d.Publisher = nil },
 	}
 
 	for name, romper := range cases {
@@ -472,7 +415,6 @@ func TestNewExigeTodasLasDependencias(t *testing.T) {
 				Hasher:    &hasherMock{},
 				Renaper:   &renaperMock{verified: true},
 				Users:     &repositoryMock{},
-				Publisher: &publisherMock{},
 			}
 			romper(&deps)
 
@@ -491,7 +433,6 @@ func TestNewAplicaValoresPorDefecto(t *testing.T) {
 		Hasher:    &hasherMock{},
 		Renaper:   &renaperMock{verified: true},
 		Users:     &repositoryMock{},
-		Publisher: &publisherMock{},
 	})
 	if err != nil {
 		t.Fatalf("error inesperado: %v", err)

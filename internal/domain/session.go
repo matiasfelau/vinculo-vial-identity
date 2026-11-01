@@ -62,12 +62,21 @@ const (
 //
 // No se emite en un logout normal de un solo dispositivo: ver la nota de
 // EventPublisher.PublishSessionsRevoked en ports.go.
+//
+// EventID es estable por evento de outbox: si una publicación se reintenta
+// (el broker nunca confirmó, o confirmó pero el worker no pudo marcarlo como
+// enviado), el reintento reutiliza el mismo EventID, para que un consumidor
+// que deduplique por event_id lo trate como el mismo evento, no uno nuevo.
 type SessionsRevoked struct {
-	UserID uuid.UUID
-	Reason SessionsRevokedReason
+	EventID uuid.UUID             `json:"event_id"`
+	UserID  uuid.UUID             `json:"user_id"`
+	Reason  SessionsRevokedReason `json:"reason"`
 }
 
-// NewSessionsRevoked construye el evento de la Defensa Activa.
-func NewSessionsRevoked(userID uuid.UUID, reason SessionsRevokedReason) SessionsRevoked {
-	return SessionsRevoked{UserID: userID, Reason: reason}
+// NewSessionsRevoked construye el evento de la Defensa Activa a partir de un
+// OutboxEvent ya persistido: eventID es el mismo OutboxEvent.ID, nunca uno
+// generado en este punto.
+func NewSessionsRevoked(eventID, userID uuid.UUID, reason SessionsRevokedReason) SessionsRevoked {
+	return SessionsRevoked{EventID: eventID, UserID: userID, Reason: reason}
 }
+

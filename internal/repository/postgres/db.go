@@ -89,10 +89,16 @@ func Open(ctx context.Context, cfg Config) (*gorm.DB, error) {
 // Ping verifica que la base responda. Alimenta el readiness del servicio: si la
 // base no contesta, el orquestador no debería derivar tráfico a esta réplica,
 // porque ningún alta podría persistirse.
+//
+// Mismo queryTimeout que el resto de las consultas: /ready no debería tardar
+// más que cualquier otra operación en darse cuenta de que la base no responde.
 func Ping(ctx context.Context, db *gorm.DB) error {
 	if db == nil {
 		return errors.New("postgres: no hay conexión")
 	}
+
+	ctx, cancel := context.WithTimeout(ctx, queryTimeout)
+	defer cancel()
 
 	sqlDB, err := db.DB()
 	if err != nil {

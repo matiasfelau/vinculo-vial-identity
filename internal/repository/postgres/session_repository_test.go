@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5/pgconn"
 	"gorm.io/gorm"
 
 	"github.com/matiasfelau/vinculo-vial-identity/internal/domain"
@@ -76,5 +77,14 @@ func TestMapSessionFindErrorNoTraduceOtrosFallos(t *testing.T) {
 	}
 	if !errors.Is(got, original) {
 		t.Errorf("el error original debe quedar envuelto para diagnóstico: %v", got)
+	}
+}
+
+// Sección Postgres del contrato de resiliencia: un SQLSTATE de conexión debe
+// mapearse a ErrDatabaseUnavailable (→ 503), no al 500 genérico.
+func TestMapSessionFindErrorClasificaIndisponibilidadDeLaBase(t *testing.T) {
+	got := mapSessionFindError(&pgconn.PgError{Code: "08006"})
+	if !errors.Is(got, domain.ErrDatabaseUnavailable) {
+		t.Errorf("error = %v, se esperaba ErrDatabaseUnavailable", got)
 	}
 }

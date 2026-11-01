@@ -57,6 +57,9 @@ func (r *UserRepository) Create(ctx context.Context, u *domain.User) error {
 		return errors.New("postgres: se requiere un usuario")
 	}
 
+	ctx, cancel := context.WithTimeout(ctx, queryTimeout)
+	defer cancel()
+
 	if err := r.db.WithContext(ctx).Create(toModel(u)).Error; err != nil {
 		return mapCreateError(err)
 	}
@@ -67,6 +70,9 @@ func (r *UserRepository) Create(ctx context.Context, u *domain.User) error {
 // vía de búsqueda del login (US-02): nunca se busca por DNI en claro, que no
 // se persiste.
 func (r *UserRepository) FindByDNIHashed(ctx context.Context, dniHashed string) (*domain.User, error) {
+	ctx, cancel := context.WithTimeout(ctx, queryTimeout)
+	defer cancel()
+
 	var m userModel
 	if err := r.db.WithContext(ctx).Where("dni_hashed = ?", dniHashed).Take(&m).Error; err != nil {
 		return nil, mapFindError(err)
@@ -81,6 +87,9 @@ func (r *UserRepository) FindByDNIHashed(ctx context.Context, dniHashed string) 
 // lo tanto el mismo domain.ErrUserNotFound— sin que este repositorio tenga
 // que distinguirlos.
 func (r *UserRepository) FindByOwnerAndDNIHash(ctx context.Context, ownerID uuid.UUID, dniHashed string) (*domain.User, error) {
+	ctx, cancel := context.WithTimeout(ctx, queryTimeout)
+	defer cancel()
+
 	var m userModel
 	if err := r.db.WithContext(ctx).Where("id = ? AND dni_hashed = ?", ownerID, dniHashed).Take(&m).Error; err != nil {
 		return nil, mapFindError(err)
@@ -92,10 +101,21 @@ func mapFindError(err error) error {
 	if errors.Is(err, gorm.ErrRecordNotFound) {
 		return domain.ErrUserNotFound
 	}
+	if classified := classifyDBError(err); errors.Is(classified, domain.ErrDatabaseUnavailable) {
+		return classified
+	}
 	return fmt.Errorf("postgres: no se pudo buscar el usuario: %w", err)
 }
 
 func mapCreateError(err error) error {
+	// La indisponibilidad de la base se distingue primero: un SQLSTATE de
+	// conexión o de recursos agotados nunca coincide con el de una violación
+	// de unicidad, así que el orden entre ambos chequeos no cambia el
+	// resultado, pero clasificar primero deja la intención más clara.
+	if classified := classifyDBError(err); errors.Is(classified, domain.ErrDatabaseUnavailable) {
+		return classified
+	}
+
 	// TranslateError de GORM cubre el caso normal; el chequeo de SQLSTATE es el
 	// respaldo si esa opción se desactiva o el driver cambia.
 	if errors.Is(err, gorm.ErrDuplicatedKey) {

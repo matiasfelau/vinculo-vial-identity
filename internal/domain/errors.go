@@ -88,6 +88,30 @@ var (
 	// Refresh Token después de rotarlo: esto es la señal de un posible robo de
 	// sesión. → 403 Forbidden (Defensa Activa).
 	ErrSessionReused = errors.New("domain: refresh token reusado")
+
+	// ErrUpstreamUnavailable indica que una dependencia síncrona propia —hoy
+	// solo RenaperService— no respondió: timeout, conexión rechazada o
+	// circuito abierto. No es un veredicto sobre la solicitud, es un fallo de
+	// infraestructura ajena a este servicio. → 503 Service Unavailable,
+	// contrato de resiliencia común a toda la plataforma.
+	ErrUpstreamUnavailable = errors.New("domain: dependencia no disponible")
+
+	// ErrUpstreamInvalidResponse indica que la dependencia síncrona sí
+	// respondió, pero con un error de su lado (5xx) o un cuerpo fuera de
+	// contrato. A diferencia de ErrUpstreamUnavailable, hubo respuesta: el
+	// fallo es del upstream, no de la conexión hacia él. → 502 Bad Gateway.
+	ErrUpstreamInvalidResponse = errors.New("domain: respuesta inválida del upstream")
+
+	// ErrDatabaseUnavailable indica que la base de datos propia no respondió
+	// a tiempo o no está disponible: deadline de contexto, falla de conexión
+	// (SQLSTATE 08xxx), recursos agotados (53xxx), statement_timeout excedido
+	// (57014) o apagado administrativo (57P0x) — sección Postgres del
+	// contrato de resiliencia. El repositorio es quien clasifica
+	// (postgres.classifyDBError); el resto del servicio solo necesita este
+	// centinela. → 503 Service Unavailable. Cualquier otro error de
+	// persistencia (ej. una violación de constraint, ya colapsada en
+	// ErrDuplicateUser) no es este caso: 502 no aplica a la base.
+	ErrDatabaseUnavailable = errors.New("domain: la base de datos no está disponible")
 )
 
 func invalidUser(reason string) error {

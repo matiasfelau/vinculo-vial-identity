@@ -380,6 +380,9 @@ func TestSignUpMapeaLosErroresDeDominio(t *testing.T) {
 		"usuario duplicado":       {domain.ErrDuplicateUser, http.StatusConflict, "registro_no_disponible"},
 		"criptograma mal formado": {domain.ErrMalformedCryptogram, http.StatusBadRequest, "solicitud_invalida"},
 		"criptograma ilegible":    {domain.ErrInvalidCryptogram, http.StatusInternalServerError, "error_interno"},
+		"renaper no disponible":   {domain.ErrUpstreamUnavailable, http.StatusServiceUnavailable, "dependencia_no_disponible"},
+		"renaper responde mal":    {domain.ErrUpstreamInvalidResponse, http.StatusBadGateway, "upstream_invalido"},
+		"base de datos caída":     {domain.ErrDatabaseUnavailable, http.StatusServiceUnavailable, "dependencia_no_disponible"},
 		"fallo inesperado":        {errors.New("la base no responde"), http.StatusInternalServerError, "error_interno"},
 	}
 
@@ -639,11 +642,11 @@ func TestHealthz(t *testing.T) {
 	}
 }
 
-func TestReadyz(t *testing.T) {
+func TestReady(t *testing.T) {
 	t.Run("200 con las dependencias sanas", func(t *testing.T) {
 		ts := newTestServer(t, func(context.Context) error { return nil })
 
-		req := httptest.NewRequest(http.MethodGet, "/readyz", nil)
+		req := httptest.NewRequest(http.MethodGet, "/ready", nil)
 		rec := httptest.NewRecorder()
 		ts.handler.ServeHTTP(rec, req)
 
@@ -655,14 +658,14 @@ func TestReadyz(t *testing.T) {
 	t.Run("503 si una dependencia no responde", func(t *testing.T) {
 		ts := newTestServer(t, func(context.Context) error { return errors.New("la base no responde") })
 
-		req := httptest.NewRequest(http.MethodGet, "/readyz", nil)
+		req := httptest.NewRequest(http.MethodGet, "/ready", nil)
 		rec := httptest.NewRecorder()
 		ts.handler.ServeHTTP(rec, req)
 
 		if rec.Code != http.StatusServiceUnavailable {
 			t.Errorf("status = %d, se esperaba 503", rec.Code)
 		}
-		// El motivo va al log, no al cuerpo: /readyz lo lee cualquiera que
+		// El motivo va al log, no al cuerpo: /ready lo lee cualquiera que
 		// alcance el puerto.
 		if strings.Contains(rec.Body.String(), "la base no responde") {
 			t.Errorf("el cuerpo revela el motivo del fallo: %s", rec.Body.String())
@@ -824,6 +827,7 @@ func TestSignInMapeaLosErroresDeDominio(t *testing.T) {
 		"credenciales inválidas":  {domain.ErrInvalidCredentials, http.StatusUnauthorized, "credenciales_invalidas"},
 		"criptograma mal formado": {domain.ErrMalformedCryptogram, http.StatusBadRequest, "solicitud_invalida"},
 		"criptograma ilegible":    {domain.ErrInvalidCryptogram, http.StatusInternalServerError, "error_interno"},
+		"base de datos caída":     {domain.ErrDatabaseUnavailable, http.StatusServiceUnavailable, "dependencia_no_disponible"},
 		"fallo inesperado":        {errors.New("la base no responde"), http.StatusInternalServerError, "error_interno"},
 	}
 
@@ -919,10 +923,10 @@ func TestRefreshDevuelve200ConLosTokensRotados(t *testing.T) {
 // ni ciphertext: el cuerpo es JSON plano con el Refresh Token opaco.
 func TestRefreshDevuelve400AnteCuerposInvalidos(t *testing.T) {
 	cases := map[string]string{
-		"cuerpo vacío":                ``,
-		"JSON malformado":             `{"refresh_token":`,
-		"cuerpo no es mapa":           `["token"]`,
-		"refresh_token no es cadena":  `{"refresh_token":42}`,
+		"cuerpo vacío":               ``,
+		"JSON malformado":            `{"refresh_token":`,
+		"cuerpo no es mapa":          `["token"]`,
+		"refresh_token no es cadena": `{"refresh_token":42}`,
 	}
 
 	for name, body := range cases {
@@ -964,10 +968,11 @@ func TestRefreshMapeaLosErroresDeDominio(t *testing.T) {
 		status int
 		code   string
 	}{
-		"sesión inexistente": {domain.ErrSessionNotFound, http.StatusUnauthorized, "sesion_invalida"},
-		"sesión expirada":    {domain.ErrSessionExpired, http.StatusUnauthorized, "sesion_invalida"},
-		"sesión reusada":     {domain.ErrSessionReused, http.StatusForbidden, "sesion_comprometida"},
-		"fallo inesperado":   {errors.New("la base no responde"), http.StatusInternalServerError, "error_interno"},
+		"sesión inexistente":  {domain.ErrSessionNotFound, http.StatusUnauthorized, "sesion_invalida"},
+		"sesión expirada":     {domain.ErrSessionExpired, http.StatusUnauthorized, "sesion_invalida"},
+		"sesión reusada":      {domain.ErrSessionReused, http.StatusForbidden, "sesion_comprometida"},
+		"base de datos caída": {domain.ErrDatabaseUnavailable, http.StatusServiceUnavailable, "dependencia_no_disponible"},
+		"fallo inesperado":    {errors.New("la base no responde"), http.StatusInternalServerError, "error_interno"},
 	}
 
 	for name, tc := range cases {
@@ -1101,6 +1106,24 @@ func TestLogoutDevuelve500SiFallaLaRevocacion(t *testing.T) {
 	}
 	if decodeError(t, rec)["code"] != "error_interno" {
 		t.Errorf("code = %v, se esperaba error_interno", decodeError(t, rec)["code"])
+	}
+}
+
+// Sección Postgres del contrato de resiliencia: la base propia caída es un
+// 503, no el 500 genérico de arriba — ni siquiera en /logout, cuyo 200
+// incondicional es sobre la existencia de la sesión (anti-enumeración), no
+// sobre si la infraestructura responde.
+func TestLogoutDevuelve503SiLaBaseDeDatosNoEstaDisponible(t *testing.T) {
+	ts := newTestServer(t, nil)
+	ts.logoutSvc.err = domain.ErrDatabaseUnavailable
+
+	rec := ts.post(t, "/api/v1/auth/logout", refreshBody("un-refresh-token"))
+
+	if rec.Code != http.StatusServiceUnavailable {
+		t.Fatalf("status = %d, se esperaba 503 (%s)", rec.Code, rec.Body.String())
+	}
+	if decodeError(t, rec)["code"] != "dependencia_no_disponible" {
+		t.Errorf("code = %v, se esperaba dependencia_no_disponible", decodeError(t, rec)["code"])
 	}
 }
 

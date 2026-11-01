@@ -64,14 +64,20 @@ func (r *SessionRepository) Create(ctx context.Context, s *domain.Session) error
 		return errors.New("postgres: se requiere una sesión")
 	}
 
+	ctx, cancel := context.WithTimeout(ctx, queryTimeout)
+	defer cancel()
+
 	if err := r.db.WithContext(ctx).Create(toSessionModel(s)).Error; err != nil {
-		return fmt.Errorf("postgres: no se pudo crear la sesión: %w", err)
+		return fmt.Errorf("postgres: no se pudo crear la sesión: %w", classifyDBError(err))
 	}
 	return nil
 }
 
 // FindByHash busca una sesión por el SHA-256 de su Refresh Token.
 func (r *SessionRepository) FindByHash(ctx context.Context, refreshTokenHash string) (*domain.Session, error) {
+	ctx, cancel := context.WithTimeout(ctx, queryTimeout)
+	defer cancel()
+
 	var m sessionModel
 	if err := r.db.WithContext(ctx).Where("refresh_token_hash = ?", refreshTokenHash).Take(&m).Error; err != nil {
 		return nil, mapSessionFindError(err)
@@ -81,11 +87,14 @@ func (r *SessionRepository) FindByHash(ctx context.Context, refreshTokenHash str
 
 // RevokeByID marca como revocada una única sesión.
 func (r *SessionRepository) RevokeByID(ctx context.Context, id uuid.UUID) error {
+	ctx, cancel := context.WithTimeout(ctx, queryTimeout)
+	defer cancel()
+
 	if err := r.db.WithContext(ctx).
 		Model(&sessionModel{}).
 		Where("id = ?", id).
 		Update("is_revoked", true).Error; err != nil {
-		return fmt.Errorf("postgres: no se pudo revocar la sesión: %w", err)
+		return fmt.Errorf("postgres: no se pudo revocar la sesión: %w", classifyDBError(err))
 	}
 	return nil
 }
@@ -94,25 +103,48 @@ func (r *SessionRepository) RevokeByID(ctx context.Context, id uuid.UUID) error 
 // coincide. Ver la nota de domain.SessionRepository.RevokeByHash: que no
 // coincida ninguna fila no es un error.
 func (r *SessionRepository) RevokeByHash(ctx context.Context, refreshTokenHash string) error {
+	ctx, cancel := context.WithTimeout(ctx, queryTimeout)
+	defer cancel()
+
 	if err := r.db.WithContext(ctx).
 		Model(&sessionModel{}).
 		Where("refresh_token_hash = ?", refreshTokenHash).
 		Update("is_revoked", true).Error; err != nil {
-		return fmt.Errorf("postgres: no se pudo revocar la sesión: %w", err)
+		return fmt.Errorf("postgres: no se pudo revocar la sesión: %w", classifyDBError(err))
 	}
 	return nil
 }
 
-// RevokeAllByUserID marca como revocadas todas las sesiones de un usuario.
+// RevokeAllByUserID marca como revocadas todas las sesiones de un usuario y,
+// si outboxEvent no es nil, lo persiste en la misma transacción (patrón
+// Transactional Outbox): si falla cualquiera de los dos INSERT/UPDATE, el
+// otro se deshace. Ninguna consulta por fuera de esta transacción puede ver
+// la revocación sin ver también el evento pendiente, ni viceversa — resuelve
+// la doble escritura no atómica que antes dejaba este método.
 //
 // No distingue si había alguna sesión vigente para ese user_id: revocar cero
 // filas no es un error, es simplemente que no había nada que revocar.
-func (r *SessionRepository) RevokeAllByUserID(ctx context.Context, userID uuid.UUID) error {
-	if err := r.db.WithContext(ctx).
-		Model(&sessionModel{}).
-		Where("user_id = ?", userID).
-		Update("is_revoked", true).Error; err != nil {
-		return fmt.Errorf("postgres: no se pudo revocar las sesiones del usuario: %w", err)
+func (r *SessionRepository) RevokeAllByUserID(ctx context.Context, userID uuid.UUID, outboxEvent *domain.OutboxEvent) error {
+	ctx, cancel := context.WithTimeout(ctx, queryTimeout)
+	defer cancel()
+
+	err := r.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		if err := tx.Model(&sessionModel{}).
+			Where("user_id = ?", userID).
+			Update("is_revoked", true).Error; err != nil {
+			return fmt.Errorf("no se pudo revocar las sesiones del usuario: %w", err)
+		}
+
+		if outboxEvent != nil {
+			if err := tx.Create(toOutboxModel(outboxEvent)).Error; err != nil {
+				return fmt.Errorf("no se pudo encolar el evento de outbox: %w", err)
+			}
+		}
+
+		return nil
+	})
+	if err != nil {
+		return fmt.Errorf("postgres: no se pudo ejecutar la defensa activa: %w", classifyDBError(err))
 	}
 	return nil
 }
@@ -125,6 +157,9 @@ func (r *SessionRepository) RotateSession(ctx context.Context, oldSessionID uuid
 	if newSession == nil {
 		return errors.New("postgres: se requiere la sesión rotada")
 	}
+
+	ctx, cancel := context.WithTimeout(ctx, queryTimeout)
+	defer cancel()
 
 	err := r.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
 		if err := tx.Model(&sessionModel{}).
@@ -140,7 +175,7 @@ func (r *SessionRepository) RotateSession(ctx context.Context, oldSessionID uuid
 		return nil
 	})
 	if err != nil {
-		return fmt.Errorf("postgres: no se pudo rotar la sesión: %w", err)
+		return fmt.Errorf("postgres: no se pudo rotar la sesión: %w", classifyDBError(err))
 	}
 	return nil
 }
@@ -148,6 +183,9 @@ func (r *SessionRepository) RotateSession(ctx context.Context, oldSessionID uuid
 func mapSessionFindError(err error) error {
 	if errors.Is(err, gorm.ErrRecordNotFound) {
 		return domain.ErrSessionNotFound
+	}
+	if classified := classifyDBError(err); errors.Is(classified, domain.ErrDatabaseUnavailable) {
+		return classified
 	}
 	return fmt.Errorf("postgres: no se pudo buscar la sesión: %w", err)
 }

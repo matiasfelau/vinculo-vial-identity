@@ -12,6 +12,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"net"
 	"strings"
 	"sync"
 	"time"
@@ -23,11 +24,21 @@ import (
 
 // Valores por defecto de la configuración del publisher.
 const (
-	DefaultExchange       = "vinculo-vial.events"
-	DefaultProducer       = "vinculo-vial-identity"
-	DefaultPublishTimeout = 5 * time.Second
-	DefaultDialTimeout    = 10 * time.Second
-	DefaultHeartbeat      = 10 * time.Second
+	// DefaultExchange es el topic exchange del contrato de la plataforma. Debe
+	// coincidir exactamente con el que declara vinculo-vial-core: ver la nota
+	// de declaración pasiva en connect().
+	DefaultExchange = "vvi.topic.exchange"
+	DefaultProducer = "vinculo-vial-identity"
+	// DefaultPublishTimeout acota el intento completo de publish (attempt,
+	// reconexión y reintento — ver publishEnvelope y dialWithDeadline). Lo
+	// consume el worker del outbox, fuera del camino de cualquier request,
+	// así que no suma a la latencia de ningún endpoint.
+	DefaultPublishTimeout = 1500 * time.Millisecond
+	// DefaultDialTimeout solo rige la conexión inicial en el arranque
+	// (NewPublisher): no es parte del presupuesto por petición, así que no
+	// comparte el recorte de DefaultPublishTimeout.
+	DefaultDialTimeout = 10 * time.Second
+	DefaultHeartbeat   = 10 * time.Second
 )
 
 // Config son los parámetros de conexión y publicación.
@@ -77,16 +88,18 @@ type Publisher struct {
 	logger *slog.Logger
 	now    func() time.Time
 
-	mu   sync.Mutex
-	conn *amqp.Connection
-	ch   *amqp.Channel
+	mu     sync.Mutex
+	conn   *amqp.Connection
+	ch     *amqp.Channel
+	closed bool
 }
 
-// NewPublisher conecta con el broker y declara el exchange.
+// NewPublisher conecta con el broker y verifica que el exchange exista.
 //
-// Se conecta en el arranque y no de forma perezosa: una URL mal configurada
-// tiene que hacer fallar el despliegue, no descubrirse recién cuando se
-// registre el primer vecino.
+// Se conecta en el arranque y no de forma perezosa: una URL mal configurada, o
+// un exchange que todavía no declaró vinculo-vial-core, tienen que hacer
+// fallar el despliegue, no descubrirse recién cuando se registre el primer
+// vecino.
 func NewPublisher(cfg Config, logger *slog.Logger) (*Publisher, error) {
 	if cfg.URL == "" {
 		return nil, errors.New("events: falta la URL del broker")
@@ -99,25 +112,32 @@ func NewPublisher(cfg Config, logger *slog.Logger) (*Publisher, error) {
 
 	p := &Publisher{cfg: cfg, logger: logger, now: time.Now}
 
-	if err := p.connect(); err != nil {
+	// En el arranque no hay un presupuesto de publish del que derivar el
+	// deadline del dial (ver dialWithDeadline): DialTimeout es, acá sí, una
+	// ventana propia.
+	ctx, cancel := context.WithTimeout(context.Background(), cfg.DialTimeout)
+	defer cancel()
+
+	if err := p.connect(ctx); err != nil {
 		return nil, err
 	}
 	return p, nil
 }
 
-// PublishUserCreated emite el evento con confirmación del broker.
+// PublishSessionsRevoked emite el evento con confirmación del broker.
 //
 // La entrega es persistente y se espera el ack: sin confirmación, un publish
 // exitoso solo prueba que el mensaje salió del proceso, no que el broker lo
-// haya aceptado, y un reinicio del broker lo perdería en silencio.
-func (p *Publisher) PublishUserCreated(ctx context.Context, evt domain.UserCreated) error {
-	return p.publishEnvelope(ctx, newEnvelope(evt, p.cfg.Producer, p.now()))
-}
-
-// PublishSessionsRevoked emite el evento con confirmación del broker, con las
-// mismas garantías que PublishUserCreated.
+// haya aceptado, y un reinicio del broker lo perdería en silencio. Toda
+// publicación va además con mandatory=true (ver send), como fija el contrato.
 func (p *Publisher) PublishSessionsRevoked(ctx context.Context, evt domain.SessionsRevoked) error {
 	return p.publishEnvelope(ctx, newSessionsRevokedEnvelope(evt, p.cfg.Producer, p.now()))
+}
+
+// PublishUserStatusChanged emite user.status.changed con confirmación del
+// broker, igual que PublishSessionsRevoked.
+func (p *Publisher) PublishUserStatusChanged(ctx context.Context, evt domain.UserStatusChanged) error {
+	return p.publishEnvelope(ctx, newUserStatusChangedEnvelope(evt, p.cfg.Producer, p.now()))
 }
 
 // publishEnvelope serializa el sobre y lo entrega con confirmación del
@@ -151,7 +171,7 @@ func (p *Publisher) publishEnvelope(ctx context.Context, envelope Envelope) erro
 			slog.String("error", err.Error()),
 		)
 
-		if reconnectErr := p.reconnect(); reconnectErr != nil {
+		if reconnectErr := p.reconnect(ctx); reconnectErr != nil {
 			return fmt.Errorf("events: no se pudo reconectar con el broker: %w", reconnectErr)
 		}
 		if err := p.publish(ctx, envelope.EventType, msg); err != nil {
@@ -194,9 +214,13 @@ func (p *Publisher) send(ctx context.Context, routingKey string, msg amqp.Publis
 		ctx,
 		p.cfg.Exchange,
 		routingKey,
-		// mandatory=false: que hoy no haya cola atada al routing key es una
-		// decisión de los consumidores, no un fallo de la publicación.
-		false,
+		// mandatory=true, sin excepciones: si ningún binding enruta el mensaje
+		// a una cola, el broker lo devuelve (ver watchReturns) en lugar de
+		// descartarlo sin dejar rastro. No cambia lo que confirma el
+		// publisher confirm: ese ack sigue significando "el broker aceptó el
+		// mensaje", nunca "una cola lo recibió"; mandatory es lo que expone
+		// esa segunda garantía.
+		true,
 		false,
 		msg,
 	)
@@ -216,10 +240,61 @@ func scrubURL(err error, url string) error {
 	return errors.New(strings.ReplaceAll(msg, url, "[url omitida]"))
 }
 
-func (p *Publisher) connect() error {
+// dialWithDeadline adapta amqp.DefaultDial para que el dial respete el
+// presupuesto que quede en ctx, en vez de abrir su propia ventana de tiempo
+// independiente de DialTimeout. Sin esto, una reconexión disparada a mitad de
+// publishEnvelope podía tardar hasta DialTimeout completo sin importar cuánto
+// del PublishTimeout total ya se había consumido, multiplicando la latencia
+// de un broker caído muy por encima del presupuesto configurado (contrato de
+// resiliencia: el publish completo, reconexión incluida, no debe superar
+// PublishTimeout).
+// remainingOrFallback calcula la ventana de tiempo disponible para el dial:
+// lo que le quede de deadline a ctx, acotado por fallback. El menor de los
+// dos manda. Separado de dialWithDeadline para poder probar el cálculo sin
+// abrir una conexión de verdad —la conversación de red queda fuera de los
+// tests unitarios de este paquete, igual que el resto del protocolo AMQP.
+func remainingOrFallback(ctx context.Context, fallback time.Duration) time.Duration {
+	timeout := fallback
+	if deadline, ok := ctx.Deadline(); ok {
+		if remaining := time.Until(deadline); remaining < timeout {
+			timeout = remaining
+		}
+	}
+	return timeout
+}
+
+func dialWithDeadline(ctx context.Context, fallback time.Duration) func(network, addr string) (net.Conn, error) {
+	return func(network, addr string) (net.Conn, error) {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+
+		timeout := remainingOrFallback(ctx, fallback)
+		if timeout <= 0 {
+			return nil, context.DeadlineExceeded
+		}
+
+		conn, err := net.DialTimeout(network, addr, timeout)
+		if err != nil {
+			return nil, err
+		}
+
+		// Igual que amqp.DefaultDial: el latido todavía no arrancó, así que se
+		// fija un deadline propio para el handshake AMQP/TLS. La librería lo
+		// limpia una vez establecida la conexión (openComplete).
+		if err := conn.SetDeadline(time.Now().Add(timeout)); err != nil {
+			_ = conn.Close()
+			return nil, err
+		}
+
+		return conn, nil
+	}
+}
+
+func (p *Publisher) connect(ctx context.Context) error {
 	conn, err := amqp.DialConfig(p.cfg.URL, amqp.Config{
 		Heartbeat: p.cfg.Heartbeat,
-		Dial:      amqp.DefaultDial(p.cfg.DialTimeout),
+		Dial:      dialWithDeadline(ctx, p.cfg.DialTimeout),
 	})
 	if err != nil {
 		// La URL lleva las credenciales del broker; nunca se incluye en el error.
@@ -232,18 +307,26 @@ func (p *Publisher) connect() error {
 		return fmt.Errorf("events: no se pudo abrir el canal: %w", err)
 	}
 
-	if err := ch.ExchangeDeclare(
+	// Declaración pasiva: este servicio solo publica, nunca declara topología
+	// (exchanges, colas, bindings) — eso es responsabilidad exclusiva de
+	// vinculo-vial-core. Antes se declaraba el exchange en modo activo, que
+	// crea silenciosamente uno propio si el nombre configurado no coincide con
+	// el que usa el resto de la plataforma: exactamente el desvío que dejaba
+	// perderse user.sessions.revoked sin que ningún log lo delatara. Con
+	// declaración pasiva, si el exchange todavía no existe, el arranque falla
+	// en lugar de crear uno nuevo.
+	if err := ch.ExchangeDeclarePassive(
 		p.cfg.Exchange,
 		amqp.ExchangeTopic,
-		true,  // durable: sobrevive al reinicio del broker
-		false, // no se autoelimina cuando no hay colas atadas
+		true,  // durable
+		false, // no se autoelimina
 		false, // no es interno
 		false, // se espera la confirmación de la declaración
 		nil,
 	); err != nil {
 		_ = ch.Close()
 		_ = conn.Close()
-		return fmt.Errorf("events: no se pudo declarar el exchange %q: %w", p.cfg.Exchange, err)
+		return fmt.Errorf("events: el exchange %q no existe: la topología la declara vinculo-vial-core, no este servicio: %w", p.cfg.Exchange, err)
 	}
 
 	if err := ch.Confirm(false); err != nil {
@@ -252,6 +335,15 @@ func (p *Publisher) connect() error {
 		return fmt.Errorf("events: el broker no aceptó el modo de confirmación: %w", err)
 	}
 
+	// Con mandatory=true (ver send) el broker devuelve acá cualquier mensaje
+	// que no pudo enrutar a ninguna cola, en vez de descartarlo en silencio.
+	// Se registra antes de publicar nada y se vuelve a registrar en cada
+	// reconexión, porque el canal AMQP anterior cierra este canal de retorno
+	// junto con él.
+	returns := make(chan amqp.Return, 8)
+	ch.NotifyReturn(returns)
+	go p.watchReturns(returns)
+
 	p.mu.Lock()
 	p.conn, p.ch = conn, ch
 	p.mu.Unlock()
@@ -259,7 +351,27 @@ func (p *Publisher) connect() error {
 	return nil
 }
 
-func (p *Publisher) reconnect() error {
+// watchReturns deja constancia en WARN de cada evento que el broker no pudo
+// enrutar a ninguna cola. No es un error para el llamador de publishEnvelope
+// —el publisher confirm ya se recibió, el broker aceptó el mensaje— pero sí es
+// una alerta operativa: significa que Core declaró el exchange sin ningún
+// binding para ese routing key, o que el consumidor esperado todavía no
+// levantó su cola. Nunca loguea el cuerpo del mensaje, solo los identificadores
+// del sobre.
+func (p *Publisher) watchReturns(returns <-chan amqp.Return) {
+	for ret := range returns {
+		p.logger.Warn("el broker no pudo enrutar el evento: ninguna cola lo consume",
+			slog.String("event_id", ret.MessageId),
+			slog.String("event_type", ret.Type),
+			slog.String("routing_key", ret.RoutingKey),
+			slog.String("exchange", ret.Exchange),
+			slog.Int("reply_code", int(ret.ReplyCode)),
+			slog.String("reply_text", ret.ReplyText),
+		)
+	}
+}
+
+func (p *Publisher) reconnect(ctx context.Context) error {
 	p.mu.Lock()
 	if p.ch != nil {
 		_ = p.ch.Close()
@@ -270,13 +382,56 @@ func (p *Publisher) reconnect() error {
 	p.ch, p.conn = nil, nil
 	p.mu.Unlock()
 
-	return p.connect()
+	return p.connect(ctx)
+}
+
+// Status informa si el publisher tiene hoy una conexión y un canal vivos hacia
+// el broker, para /health/deps. No intenta reconectar ni toca la red: es solo
+// la lectura del estado actual. La reconexión es perezosa (ocurre en el
+// próximo publish, ver publishEnvelope), así que tras una caída del broker
+// "down" puede persistir mientras no haya eventos pendientes que publicar.
+func (p *Publisher) Status() (string, bool) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
+	if p.conn == nil || p.conn.IsClosed() || p.ch == nil || p.ch.IsClosed() {
+		return "down", false
+	}
+	return "up", true
+}
+
+// EnsureConnected restablece la conexión con el broker si está caída, acotado
+// por PublishTimeout, y no hace nada si ya está viva. Existe porque la
+// reconexión de publishEnvelope es perezosa —ocurre al publicar—: sin esto, un
+// broker que se cae y vuelve mientras no hay eventos pendientes dejaría a
+// Status en "down" (y a /health/deps en degraded) hasta el próximo evento,
+// aunque el broker esté sano. Lo llama el worker del outbox cuando está ocioso.
+//
+// Solo lo usa el worker, que publica de a un evento por vez; no está pensado
+// para concurrir con otras publicaciones.
+func (p *Publisher) EnsureConnected(ctx context.Context) error {
+	if _, ok := p.Status(); ok {
+		return nil
+	}
+
+	p.mu.Lock()
+	cerrado := p.closed
+	p.mu.Unlock()
+	if cerrado {
+		return errors.New("events: el publisher está cerrado")
+	}
+
+	ctx, cancel := context.WithTimeout(ctx, p.cfg.PublishTimeout)
+	defer cancel()
+	return p.reconnect(ctx)
 }
 
 // Close libera el canal y la conexión.
 func (p *Publisher) Close() error {
 	p.mu.Lock()
 	defer p.mu.Unlock()
+
+	p.closed = true
 
 	var errs []error
 	if p.ch != nil {

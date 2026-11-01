@@ -221,6 +221,14 @@ func (h *Handler) abortRefreshError(c *gin.Context, err error) {
 	case errors.Is(err, domain.ErrSessionReused):
 		h.abort(c, http.StatusForbidden, codeSessionCompromised, "sesión comprometida", nil)
 
+	case errors.Is(err, domain.ErrDatabaseUnavailable):
+		// 503: la base propia no respondió, no es un defecto de este servicio.
+		h.logger.WarnContext(c.Request.Context(), "base de datos no disponible",
+			slog.String("request_id", requestIDOf(c)),
+			slog.String("error", err.Error()),
+		)
+		h.abort(c, http.StatusServiceUnavailable, codeUpstreamUnavailable, "el servicio no está disponible, reintentar en unos segundos", nil)
+
 	default:
 		h.logger.ErrorContext(c.Request.Context(), "fallo no esperado en el refresh",
 			slog.String("request_id", requestIDOf(c)),
@@ -235,7 +243,8 @@ func (h *Handler) abortRefreshError(c *gin.Context, err error) {
 //	200 — siempre, exista o no una sesión con ese Refresh Token, esté o no ya
 //	      revocada (anti-enumeración): nunca 401, nunca 404.
 //	400 — el cuerpo no es JSON interpretable.
-//	500 — falla algo interno (la revocación no se pudo persistir).
+//	503 — la base de datos propia no está disponible.
+//	500 — falla algo interno distinto (la revocación no se pudo persistir).
 //
 // A diferencia de /refresh, este endpoint no exige X-App-Attestation: si la
 // atestación de la app falla, el usuario tiene que poder cerrar sesión igual
@@ -253,6 +262,14 @@ func (h *Handler) Logout(c *gin.Context) {
 	}
 
 	if err := h.logout.Logout(c.Request.Context(), req.RefreshToken); err != nil {
+		if errors.Is(err, domain.ErrDatabaseUnavailable) {
+			h.logger.WarnContext(c.Request.Context(), "base de datos no disponible",
+				slog.String("request_id", requestIDOf(c)),
+				slog.String("error", err.Error()),
+			)
+			h.abort(c, http.StatusServiceUnavailable, codeUpstreamUnavailable, "el servicio no está disponible, reintentar en unos segundos", nil)
+			return
+		}
 		h.logger.ErrorContext(c.Request.Context(), "fallo no esperado en el logout",
 			slog.String("request_id", requestIDOf(c)),
 			slog.String("error", err.Error()),
@@ -366,6 +383,36 @@ func (h *Handler) abortWithDomainError(c *gin.Context, err error) {
 		// trámite, el sexo o la selfie facilitaría tantear los datos de otra
 		// persona hasta acertar.
 		h.abort(c, http.StatusBadRequest, codeIdentityNotVerified, "no fue posible verificar la identidad", nil)
+
+	case errors.Is(err, domain.ErrUpstreamUnavailable):
+		// 503, no 500: RENAPER es quien no responde, no este servicio. El
+		// cliente puede reintentar razonablemente ante este código, que es
+		// justamente la distinción que un 500 genérico no comunica.
+		h.logger.WarnContext(c.Request.Context(), "dependencia no disponible",
+			slog.String("request_id", requestIDOf(c)),
+			slog.String("error", err.Error()),
+		)
+		h.abort(c, http.StatusServiceUnavailable, codeUpstreamUnavailable, "el servicio no está disponible, reintentar en unos segundos", nil)
+
+	case errors.Is(err, domain.ErrUpstreamInvalidResponse):
+		// 502: RENAPER respondió, pero con un error de su lado o un cuerpo
+		// fuera de contrato. Se distingue de ErrUpstreamUnavailable porque acá
+		// sí hubo respuesta; el detalle queda en el log, nunca en el cuerpo.
+		h.logger.ErrorContext(c.Request.Context(), "respuesta inválida del upstream",
+			slog.String("request_id", requestIDOf(c)),
+			slog.String("error", err.Error()),
+		)
+		h.abort(c, http.StatusBadGateway, codeUpstreamError, "el servicio no está disponible, reintentar en unos segundos", nil)
+
+	case errors.Is(err, domain.ErrDatabaseUnavailable):
+		// 503: la base propia no está disponible, no RENAPER, pero el mismo
+		// motivo aplica para no mapearlo a 500 — sección Postgres del
+		// contrato de resiliencia.
+		h.logger.WarnContext(c.Request.Context(), "base de datos no disponible",
+			slog.String("request_id", requestIDOf(c)),
+			slog.String("error", err.Error()),
+		)
+		h.abort(c, http.StatusServiceUnavailable, codeUpstreamUnavailable, "el servicio no está disponible, reintentar en unos segundos", nil)
 
 	case errors.Is(err, domain.ErrMalformedCryptogram):
 		// El mensaje no tiene la forma de un mensaje HPKE. Es un cliente mal

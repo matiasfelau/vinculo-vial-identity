@@ -17,6 +17,13 @@ type AccountStatus string
 const (
 	// AccountStatusActive es el estado con el que nace toda cuenta en US-01.
 	AccountStatusActive AccountStatus = "ACTIVE"
+	// AccountStatusUnderReview es el estado de un emisor reportado por
+	// REPORT_REVIEW_THRESHOLD destinatarios (US-08). Restringe solo la creación
+	// de alertas, que decide Alert a partir de user.status.changed: no bloquea
+	// el login, el refresh, el buzón ni la gestión de vehículos. Salir de este
+	// estado es manual y fuera de alcance de US-08: hacerlo a mano en la base no
+	// alcanza, también hay que emitir user.status.changed con ACTIVE.
+	AccountStatusUnderReview AccountStatus = "UNDER_REVIEW"
 )
 
 // User es la entidad raíz del bounded context.
@@ -35,8 +42,15 @@ type User struct {
 	DNIHashed     string
 	DNIEncrypted  string
 	AccountStatus AccountStatus
-	CreatedAt     time.Time
-	UpdatedAt     time.Time
+	// ReputationScore es la reputación del usuario. Identity es su única
+	// fuente de verdad: nace en 0 y solo baja, por cada alerta rechazada por
+	// fraude. Puede quedar negativa.
+	ReputationScore int
+	// ReportCount es la cantidad de reportes recibidos de los destinatarios de
+	// sus alertas. Solo el conteo: no se guarda quién reportó.
+	ReportCount int
+	CreatedAt   time.Time
+	UpdatedAt   time.Time
 }
 
 // NewUser construye un User válido con los invariantes del alta.
@@ -67,31 +81,4 @@ func NewUser(email, passwordHash, dniHashed, dniEncrypted string, now time.Time)
 		CreatedAt:     now.UTC(),
 		UpdatedAt:     now.UTC(),
 	}, nil
-}
-
-// UserCreated es el evento de dominio que se emite tras persistir un alta. Se
-// publica como `user.created`, el nombre que fija el contrato compartido de
-// US-01.
-//
-// No transporta PII: ni email, ni DNI, ni derivados del DNI. Los consumidores
-// que necesiten datos del usuario los piden a este servicio.
-//
-// AccountStatus y OccurredAt son parte del evento de dominio pero no del sobre
-// que viaja al broker: el contrato acota el payload publicado a userId. Se
-// conservan acá porque describen el hecho ocurrido y cualquier consumidor
-// interno futuro los necesitaría; ampliarlos en el bus es una decisión del
-// contrato, no de esta entidad.
-type UserCreated struct {
-	UserID        uuid.UUID
-	AccountStatus AccountStatus
-	OccurredAt    time.Time
-}
-
-// NewUserCreated deriva el evento a partir del usuario recién persistido.
-func NewUserCreated(u *User) UserCreated {
-	return UserCreated{
-		UserID:        u.ID,
-		AccountStatus: u.AccountStatus,
-		OccurredAt:    u.CreatedAt,
-	}
 }

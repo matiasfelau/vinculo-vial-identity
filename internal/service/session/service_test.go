@@ -2,6 +2,7 @@ package session_test
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"log/slog"
 	"strings"
@@ -33,7 +34,6 @@ func vigenteSession() *domain.Session {
 type harness struct {
 	sessions *sessionsMock
 	tokens   *tokensMock
-	events   *eventsMock
 	logs     *strings.Builder
 	now      time.Time
 }
@@ -48,9 +48,8 @@ func newHarness() *harness {
 			refreshHash:      "hash-del-refresh-token-rotado",
 			refreshExpiresAt: now.Add(30 * 24 * time.Hour),
 		},
-		events: &eventsMock{},
-		logs:   &strings.Builder{},
-		now:    now,
+		logs: &strings.Builder{},
+		now:  now,
 	}
 }
 
@@ -58,11 +57,10 @@ func (h *harness) service(t *testing.T) *session.RefreshService {
 	t.Helper()
 
 	svc, err := session.NewRefreshService(session.RefreshDeps{
-		Sessions:  h.sessions,
-		Tokens:    h.tokens,
-		Publisher: h.events,
-		Logger:    slog.New(slog.NewTextHandler(h.logs, &slog.HandlerOptions{Level: slog.LevelDebug})),
-		Now:       func() time.Time { return h.now },
+		Sessions: h.sessions,
+		Tokens:   h.tokens,
+		Logger:   slog.New(slog.NewTextHandler(h.logs, &slog.HandlerOptions{Level: slog.LevelDebug})),
+		Now:      func() time.Time { return h.now },
 	})
 	if err != nil {
 		t.Fatalf("no se pudo construir el servicio: %v", err)
@@ -205,18 +203,37 @@ func TestRefreshSesionYaRevocadaDisparaLaDefensaActiva(t *testing.T) {
 		t.Errorf("se revocó al usuario %v, se esperaba %v", h.sessions.revokedUserID, h.sessions.found.UserID)
 	}
 
-	// La Defensa Activa publica exactamente un evento, con el UUID del usuario
-	// afectado como actor: es la referencia que Notification necesita para dar
-	// de baja los tokens FCM en todos sus dispositivos.
-	if h.events.callCount() != 1 {
-		t.Fatalf("se publicó %d veces, se esperaba exactamente 1", h.events.callCount())
+	// La Defensa Activa persiste exactamente un evento de outbox, en la misma
+	// llamada que la revocación (ver sessionsMock.RevokeAllByUserID): con el
+	// UUID del usuario afectado, que es la referencia que Notification
+	// necesita para dar de baja los tokens FCM en todos sus dispositivos.
+	evento := h.sessions.lastOutboxEvent()
+	if evento == nil {
+		t.Fatal("se esperaba que la Defensa Activa encolara un evento de outbox")
 	}
-	publicado := h.events.published[0]
-	if publicado.UserID != h.sessions.found.UserID {
-		t.Errorf("actor publicado = %v, se esperaba %v", publicado.UserID, h.sessions.found.UserID)
+	if evento.ID == uuid.Nil {
+		t.Error("el evento de outbox debe llevar un ID propio, reutilizable entre reintentos")
 	}
-	if publicado.Reason != domain.SessionsRevokedReasonReuseDetected {
-		t.Errorf("reason publicado = %q, se esperaba %q", publicado.Reason, domain.SessionsRevokedReasonReuseDetected)
+	if evento.Type != "user.sessions.revoked" {
+		t.Errorf("tipo de evento = %q, se esperaba user.sessions.revoked", evento.Type)
+	}
+
+	var payload struct {
+		UserID string `json:"user_id"`
+		Reason string `json:"reason"`
+	}
+	if err := json.Unmarshal(evento.Payload, &payload); err != nil {
+		t.Fatalf("payload inválido: %v", err)
+	}
+
+	if payload.UserID != h.sessions.found.UserID.String() {
+		t.Errorf("user_id del evento = %v, se esperaba %v", payload.UserID, h.sessions.found.UserID)
+	}
+	if payload.Reason != string(domain.SessionsRevokedReasonReuseDetected) {
+		t.Errorf("reason del evento = %q, se esperaba %q", payload.Reason, domain.SessionsRevokedReasonReuseDetected)
+	}
+	if !evento.CreatedAt.Equal(h.now) {
+		t.Errorf("created_at del evento = %v, se esperaba %v", evento.CreatedAt, h.now)
 	}
 
 	logs := h.logs.String()
@@ -245,10 +262,12 @@ func TestLogoutNuncaPublicaSessionsRevoked(t *testing.T) {
 	}
 }
 
-// Si la propia Defensa Activa no se pudo persistir, no debe publicarse nada:
-// publicar sobre una revocación que en verdad falló le diría a Notification
-// que borre tokens FCM de una cuenta cuyas sesiones siguen vigentes.
-func TestRefreshSiFallaLaDefensaActivaNoPublicaEvento(t *testing.T) {
+// Si la propia Defensa Activa no se pudo persistir, no debe quedar ningún
+// evento de outbox encolado: como ahora la revocación y el evento comparten
+// una única transacción (ver SessionRepository.RevokeAllByUserID), un fallo
+// de la primera deshace también al segundo — no hay forma de que quede un
+// evento sobre una revocación que en verdad falló.
+func TestRefreshSiFallaLaDefensaActivaNoDejaEventoDeOutboxEncolado(t *testing.T) {
 	h := newHarness()
 	h.sessions.found.IsRevoked = true
 	h.sessions.revokeAllErr = errors.New("la base no responde")
@@ -258,39 +277,8 @@ func TestRefreshSiFallaLaDefensaActivaNoPublicaEvento(t *testing.T) {
 		t.Fatal("se esperaba un error")
 	}
 
-	if h.events.callCount() != 0 {
-		t.Errorf("se publicó %d veces, se esperaba 0 porque la revocación falló", h.events.callCount())
-	}
-}
-
-// Un fallo del publish no debe alterar la respuesta de /refresh: la
-// revocación ya está persistida y el cliente debe recibir el mismo
-// ErrSessionReused que si el broker hubiera aceptado el mensaje. Es la misma
-// decisión, con la misma contrapartida documentada como deuda técnica, que
-// signup.Service.publish para user.created.
-func TestRefreshSiFallaElPublishNoCambiaLaRespuesta(t *testing.T) {
-	h := newHarness()
-	h.sessions.found.IsRevoked = true
-	h.events.err = errors.New("el broker no respondió")
-	svc := h.service(t)
-
-	access, refresh, err := svc.Refresh(context.Background(), validRefreshToken)
-
-	if !errors.Is(err, domain.ErrSessionReused) {
-		t.Errorf("error = %v, se esperaba ErrSessionReused pese al fallo de publish", err)
-	}
-	if access != "" || refresh != "" {
-		t.Error("un refresh token reusado no debe emitir tokens")
-	}
-	if h.events.callCount() != 1 {
-		t.Errorf("se intentó publicar %d veces, se esperaba 1", h.events.callCount())
-	}
-
-	logs := h.logs.String()
-	for _, esperado := range []string{"ERROR", "no se pudo publicar user.sessions.revoked", h.sessions.found.UserID.String()} {
-		if !strings.Contains(logs, esperado) {
-			t.Errorf("el log debería incluir %q: %s", esperado, logs)
-		}
+	if evento := h.sessions.lastOutboxEvent(); evento != nil {
+		t.Errorf("se esperaba que no quedara ningún evento de outbox encolado, quedó %+v", evento)
 	}
 }
 
@@ -400,15 +388,13 @@ func TestRefreshPropagaElErrorDeBusquedaSinTraducirlo(t *testing.T) {
 func TestNewRefreshServiceValidaLasDependencias(t *testing.T) {
 	h := newHarness()
 	base := session.RefreshDeps{
-		Sessions:  h.sessions,
-		Tokens:    h.tokens,
-		Publisher: h.events,
+		Sessions: h.sessions,
+		Tokens:   h.tokens,
 	}
 
 	cases := map[string]func(*session.RefreshDeps){
-		"sin sessions":  func(d *session.RefreshDeps) { d.Sessions = nil },
-		"sin tokens":    func(d *session.RefreshDeps) { d.Tokens = nil },
-		"sin publisher": func(d *session.RefreshDeps) { d.Publisher = nil },
+		"sin sessions": func(d *session.RefreshDeps) { d.Sessions = nil },
+		"sin tokens":   func(d *session.RefreshDeps) { d.Tokens = nil },
 	}
 
 	for name, degradar := range cases {

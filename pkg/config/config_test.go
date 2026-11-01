@@ -46,11 +46,16 @@ func aplicar(t *testing.T, env map[string]string) {
 		"HTTP_INTERNAL_PORT", "INTERNAL_SERVICE_TOKEN",
 		"POSTGRES_HOST", "POSTGRES_PORT", "POSTGRES_USER", "POSTGRES_PASSWORD",
 		"POSTGRES_DB", "POSTGRES_SSLMODE", "POSTGRES_LOG_SQL", "EPHEMERAL_DB",
-		"POSTGRES_MAX_OPEN_CONNS", "POSTGRES_MAX_IDLE_CONNS",
+		"POSTGRES_MAX_OPEN_CONNS", "POSTGRES_MAX_IDLE_CONNS", "POSTGRES_STATEMENT_TIMEOUT",
 		"IDENTITY_HPKE_PRIVATE_KEY", "IDENTITY_HPKE_INFO", "AES_KEY", "HMAC_SECRET",
 		"JWT_PRIVATE_KEY", "JWT_ISSUER", "ACCESS_TOKEN_TTL_MINUTES", "REFRESH_TOKEN_TTL_DAYS",
 		"ARGON2_MEMORY_KIB", "ARGON2_ITERATIONS", "ARGON2_PARALLELISM",
 		"RABBITMQ_ENABLED", "RABBITMQ_URL", "RABBITMQ_EXCHANGE",
+		"RABBITMQ_DIAL_TIMEOUT", "RABBITMQ_HEARTBEAT", "RENAPER_TIMEOUT",
+		"RENAPER_BREAKER_FAILURE_THRESHOLD", "RENAPER_BREAKER_WINDOW", "RENAPER_BREAKER_OPEN_DURATION",
+		"OUTBOX_WORKER_INTERVAL", "OUTBOX_WORKER_BATCH_SIZE",
+		"RABBITMQ_PREFETCH", "MAX_RETRIES", "ALERT_REJECTED_QUEUE", "FRAUD_PENALTY",
+		"ALERT_REPORTED_QUEUE", "REPORT_REVIEW_THRESHOLD",
 	} {
 		t.Setenv(k, "")
 		os.Unsetenv(k)
@@ -95,6 +100,9 @@ func TestLoadConElEntornoMinimo(t *testing.T) {
 	}
 	if cfg.Token.RefreshTokenTTL != 30*24*time.Hour {
 		t.Errorf("refresh token ttl = %v, se esperaban 30 días", cfg.Token.RefreshTokenTTL)
+	}
+	if cfg.Renaper.Timeout != 1500*time.Millisecond {
+		t.Errorf("renaper timeout = %v, se esperaban 1500ms", cfg.Renaper.Timeout)
 	}
 }
 
@@ -186,6 +194,333 @@ func TestLoadAceptaTTLPersonalizados(t *testing.T) {
 	}
 	if cfg.Token.RefreshTokenTTL != 7*24*time.Hour {
 		t.Errorf("refresh token ttl = %v, se esperaban 7 días", cfg.Token.RefreshTokenTTL)
+	}
+}
+
+// RENAPER_TIMEOUT es el presupuesto de la única dependencia síncrona saliente
+// del servicio: tiene que poder ajustarse sin recompilar, igual que cualquier
+// otro timeout de infraestructura.
+func TestLoadAceptaUnRenaperTimeoutPersonalizado(t *testing.T) {
+	env := entornoMinimo()
+	env["RENAPER_TIMEOUT"] = "500ms"
+	aplicar(t, env)
+
+	cfg, err := config.Load()
+	if err != nil {
+		t.Fatalf("error inesperado: %v", err)
+	}
+	if cfg.Renaper.Timeout != 500*time.Millisecond {
+		t.Errorf("renaper timeout = %v, se esperaban 500ms", cfg.Renaper.Timeout)
+	}
+}
+
+func TestLoadRechazaRenaperTimeoutNoPositivo(t *testing.T) {
+	cases := map[string]string{
+		"cero":     "0s",
+		"negativo": "-1s",
+	}
+
+	for name, valor := range cases {
+		t.Run(name, func(t *testing.T) {
+			env := entornoMinimo()
+			env["RENAPER_TIMEOUT"] = valor
+			aplicar(t, env)
+
+			if _, err := config.Load(); err == nil {
+				t.Error("se esperaba un error de configuración")
+			}
+		})
+	}
+}
+
+func TestLoadConfiguraElCircuitBreakerDeRenaperPorDefecto(t *testing.T) {
+	aplicar(t, entornoMinimo())
+
+	cfg, err := config.Load()
+	if err != nil {
+		t.Fatalf("error inesperado: %v", err)
+	}
+	if cfg.Renaper.BreakerFailureThreshold != 5 {
+		t.Errorf("breaker failure threshold = %d, se esperaban 5", cfg.Renaper.BreakerFailureThreshold)
+	}
+	if cfg.Renaper.BreakerWindow != time.Minute {
+		t.Errorf("breaker window = %v, se esperaba 1m", cfg.Renaper.BreakerWindow)
+	}
+	if cfg.Renaper.BreakerOpenDuration != 30*time.Second {
+		t.Errorf("breaker open duration = %v, se esperaban 30s", cfg.Renaper.BreakerOpenDuration)
+	}
+}
+
+func TestLoadAceptaUnCircuitBreakerDeRenaperPersonalizado(t *testing.T) {
+	env := entornoMinimo()
+	env["RENAPER_BREAKER_FAILURE_THRESHOLD"] = "2"
+	env["RENAPER_BREAKER_WINDOW"] = "10s"
+	env["RENAPER_BREAKER_OPEN_DURATION"] = "5s"
+	aplicar(t, env)
+
+	cfg, err := config.Load()
+	if err != nil {
+		t.Fatalf("error inesperado: %v", err)
+	}
+	if cfg.Renaper.BreakerFailureThreshold != 2 {
+		t.Errorf("breaker failure threshold = %d, se esperaban 2", cfg.Renaper.BreakerFailureThreshold)
+	}
+	if cfg.Renaper.BreakerWindow != 10*time.Second {
+		t.Errorf("breaker window = %v, se esperaban 10s", cfg.Renaper.BreakerWindow)
+	}
+	if cfg.Renaper.BreakerOpenDuration != 5*time.Second {
+		t.Errorf("breaker open duration = %v, se esperaban 5s", cfg.Renaper.BreakerOpenDuration)
+	}
+}
+
+func TestLoadRechazaElCircuitBreakerDeRenaperMalConfigurado(t *testing.T) {
+	cases := map[string]map[string]string{
+		"umbral cero":     {"RENAPER_BREAKER_FAILURE_THRESHOLD": "0"},
+		"umbral negativo": {"RENAPER_BREAKER_FAILURE_THRESHOLD": "-1"},
+		"ventana cero":    {"RENAPER_BREAKER_WINDOW": "0s"},
+		"apertura cero":   {"RENAPER_BREAKER_OPEN_DURATION": "0s"},
+	}
+
+	for name, override := range cases {
+		t.Run(name, func(t *testing.T) {
+			env := entornoMinimo()
+			for k, v := range override {
+				env[k] = v
+			}
+			aplicar(t, env)
+
+			if _, err := config.Load(); err == nil {
+				t.Error("se esperaba un error de configuración")
+			}
+		})
+	}
+}
+
+func TestLoadConfiguraLosConsumidoresPorDefecto(t *testing.T) {
+	aplicar(t, entornoMinimo())
+
+	cfg, err := config.Load()
+	if err != nil {
+		t.Fatalf("error inesperado: %v", err)
+	}
+	if cfg.Consumer.Prefetch != 10 {
+		t.Errorf("prefetch = %d, se esperaban 10", cfg.Consumer.Prefetch)
+	}
+	if cfg.Consumer.MaxRetries != 5 {
+		t.Errorf("max retries = %d, se esperaban 5", cfg.Consumer.MaxRetries)
+	}
+	if cfg.Consumer.AlertRejectedQueue != "identity.alert-rejected.q" {
+		t.Errorf("cola de rechazos = %q, se esperaba identity.alert-rejected.q", cfg.Consumer.AlertRejectedQueue)
+	}
+	if cfg.Reputation.FraudPenalty != 10 {
+		t.Errorf("fraud penalty = %d, se esperaban 10", cfg.Reputation.FraudPenalty)
+	}
+	if cfg.Consumer.AlertReportedQueue != "identity.alert-reported.q" {
+		t.Errorf("cola de reportes = %q, se esperaba identity.alert-reported.q", cfg.Consumer.AlertReportedQueue)
+	}
+	if cfg.Reputation.ReviewThreshold != 1 {
+		t.Errorf("umbral de revisión = %d, se esperaba 1", cfg.Reputation.ReviewThreshold)
+	}
+}
+
+func TestLoadAceptaUnUmbralDeRevisionPersonalizado(t *testing.T) {
+	env := entornoMinimo()
+	env["REPORT_REVIEW_THRESHOLD"] = "3"
+	env["ALERT_REPORTED_QUEUE"] = "identity.otra.q"
+	aplicar(t, env)
+
+	cfg, err := config.Load()
+	if err != nil {
+		t.Fatalf("error inesperado: %v", err)
+	}
+	if cfg.Reputation.ReviewThreshold != 3 {
+		t.Errorf("umbral de revisión = %d, se esperaba 3", cfg.Reputation.ReviewThreshold)
+	}
+	if cfg.Consumer.AlertReportedQueue != "identity.otra.q" {
+		t.Errorf("cola de reportes = %q", cfg.Consumer.AlertReportedQueue)
+	}
+}
+
+func TestLoadRechazaUnUmbralDeRevisionInvalido(t *testing.T) {
+	// Con umbral 0 todo usuario quedaría en revisión sin recibir un reporte.
+	for nombre, valor := range map[string]string{"cero": "0", "negativo": "-1", "no numérico": "uno"} {
+		t.Run(nombre, func(t *testing.T) {
+			env := entornoMinimo()
+			env["REPORT_REVIEW_THRESHOLD"] = valor
+			aplicar(t, env)
+
+			if _, err := config.Load(); err == nil {
+				t.Error("se esperaba un error de configuración")
+			}
+		})
+	}
+}
+
+func TestLoadAceptaUnaReputacionPersonalizada(t *testing.T) {
+	env := entornoMinimo()
+	env["FRAUD_PENALTY"] = "25"
+	env["ALERT_REJECTED_QUEUE"] = "identity.otra.q"
+	aplicar(t, env)
+
+	cfg, err := config.Load()
+	if err != nil {
+		t.Fatalf("error inesperado: %v", err)
+	}
+	if cfg.Reputation.FraudPenalty != 25 {
+		t.Errorf("fraud penalty = %d, se esperaban 25", cfg.Reputation.FraudPenalty)
+	}
+	if cfg.Consumer.AlertRejectedQueue != "identity.otra.q" {
+		t.Errorf("cola de rechazos = %q", cfg.Consumer.AlertRejectedQueue)
+	}
+}
+
+func TestLoadRechazaUnaPenalizacionNegativa(t *testing.T) {
+	// Una penalización negativa sumaría reputación al fraude.
+	for nombre, valor := range map[string]string{"negativa": "-1", "no numérica": "diez"} {
+		t.Run(nombre, func(t *testing.T) {
+			env := entornoMinimo()
+			env["FRAUD_PENALTY"] = valor
+			aplicar(t, env)
+
+			if _, err := config.Load(); err == nil {
+				t.Error("se esperaba un error de configuración")
+			}
+		})
+	}
+}
+
+func TestLoadAceptaUnosConsumidoresPersonalizados(t *testing.T) {
+	env := entornoMinimo()
+	env["RABBITMQ_PREFETCH"] = "1"
+	env["MAX_RETRIES"] = "0"
+	aplicar(t, env)
+
+	cfg, err := config.Load()
+	if err != nil {
+		t.Fatalf("error inesperado: %v", err)
+	}
+	if cfg.Consumer.Prefetch != 1 {
+		t.Errorf("prefetch = %d, se esperaba 1", cfg.Consumer.Prefetch)
+	}
+	if cfg.Consumer.MaxRetries != 0 {
+		t.Errorf("max retries = %d, se esperaba 0: derivar a la DLQ sin reintentar es válido", cfg.Consumer.MaxRetries)
+	}
+}
+
+func TestLoadRechazaLosConsumidoresMalConfigurados(t *testing.T) {
+	cases := map[string]map[string]string{
+		"prefetch cero":                 {"RABBITMQ_PREFETCH": "0"},
+		"prefetch negativo":             {"RABBITMQ_PREFETCH": "-1"},
+		"prefetch sobre el límite AMQP": {"RABBITMQ_PREFETCH": "65536"},
+		"prefetch no numérico":          {"RABBITMQ_PREFETCH": "diez"},
+		"max retries negativo":          {"MAX_RETRIES": "-1"},
+		"max retries no numérico":       {"MAX_RETRIES": "cinco"},
+	}
+
+	for name, override := range cases {
+		t.Run(name, func(t *testing.T) {
+			env := entornoMinimo()
+			for k, v := range override {
+				env[k] = v
+			}
+			aplicar(t, env)
+
+			if _, err := config.Load(); err == nil {
+				t.Error("se esperaba un error de configuración")
+			}
+		})
+	}
+}
+
+func TestLoadConfiguraElWorkerDeOutboxPorDefecto(t *testing.T) {
+	aplicar(t, entornoMinimo())
+
+	cfg, err := config.Load()
+	if err != nil {
+		t.Fatalf("error inesperado: %v", err)
+	}
+	if cfg.Outbox.WorkerInterval != 2*time.Second {
+		t.Errorf("worker interval = %v, se esperaban 2s", cfg.Outbox.WorkerInterval)
+	}
+	if cfg.Outbox.WorkerBatchSize != 20 {
+		t.Errorf("worker batch size = %d, se esperaban 20", cfg.Outbox.WorkerBatchSize)
+	}
+}
+
+func TestLoadAceptaUnWorkerDeOutboxPersonalizado(t *testing.T) {
+	env := entornoMinimo()
+	env["OUTBOX_WORKER_INTERVAL"] = "500ms"
+	env["OUTBOX_WORKER_BATCH_SIZE"] = "5"
+	aplicar(t, env)
+
+	cfg, err := config.Load()
+	if err != nil {
+		t.Fatalf("error inesperado: %v", err)
+	}
+	if cfg.Outbox.WorkerInterval != 500*time.Millisecond {
+		t.Errorf("worker interval = %v, se esperaban 500ms", cfg.Outbox.WorkerInterval)
+	}
+	if cfg.Outbox.WorkerBatchSize != 5 {
+		t.Errorf("worker batch size = %d, se esperaban 5", cfg.Outbox.WorkerBatchSize)
+	}
+}
+
+func TestLoadRechazaElWorkerDeOutboxMalConfigurado(t *testing.T) {
+	cases := map[string]map[string]string{
+		"intervalo cero":     {"OUTBOX_WORKER_INTERVAL": "0s"},
+		"intervalo negativo": {"OUTBOX_WORKER_INTERVAL": "-1s"},
+		"batch size cero":    {"OUTBOX_WORKER_BATCH_SIZE": "0"},
+		"batch size negativo": {"OUTBOX_WORKER_BATCH_SIZE": "-1"},
+	}
+
+	for name, override := range cases {
+		t.Run(name, func(t *testing.T) {
+			env := entornoMinimo()
+			for k, v := range override {
+				env[k] = v
+			}
+			aplicar(t, env)
+
+			if _, err := config.Load(); err == nil {
+				t.Error("se esperaba un error de configuración")
+			}
+		})
+	}
+}
+
+// DialTimeout y Heartbeat no tenían variable de entorno propia: quedaban
+// fijos en los defaults del paquete events sin forma de ajustarlos sin
+// recompilar, al margen del resto de los timeouts salientes del servicio.
+func TestLoadConfiguraElDialTimeoutYElHeartbeatDelBrokerPorDefecto(t *testing.T) {
+	aplicar(t, entornoMinimo())
+
+	cfg, err := config.Load()
+	if err != nil {
+		t.Fatalf("error inesperado: %v", err)
+	}
+	if cfg.Events.DialTimeout != 10*time.Second {
+		t.Errorf("dial timeout = %v, se esperaban 10s", cfg.Events.DialTimeout)
+	}
+	if cfg.Events.Heartbeat != 10*time.Second {
+		t.Errorf("heartbeat = %v, se esperaban 10s", cfg.Events.Heartbeat)
+	}
+}
+
+func TestLoadAceptaUnDialTimeoutYHeartbeatPersonalizados(t *testing.T) {
+	env := entornoMinimo()
+	env["RABBITMQ_DIAL_TIMEOUT"] = "2s"
+	env["RABBITMQ_HEARTBEAT"] = "30s"
+	aplicar(t, env)
+
+	cfg, err := config.Load()
+	if err != nil {
+		t.Fatalf("error inesperado: %v", err)
+	}
+	if cfg.Events.DialTimeout != 2*time.Second {
+		t.Errorf("dial timeout = %v, se esperaban 2s", cfg.Events.DialTimeout)
+	}
+	if cfg.Events.Heartbeat != 30*time.Second {
+		t.Errorf("heartbeat = %v, se esperaban 30s", cfg.Events.Heartbeat)
 	}
 }
 
@@ -468,6 +803,54 @@ func TestLosSecretosNoSeImprimen(t *testing.T) {
 	}
 	if !strings.Contains(cfg.Postgres.DSN(), password) {
 		t.Error("el DSN debería llevar la contraseña real")
+	}
+}
+
+// statement_timeout protege del lado del servidor contra una sentencia
+// colgada, defensa en profundidad junto al deadline por consulta del
+// cliente (internal/repository/postgres.queryTimeout).
+func TestDSNIncluyeElStatementTimeoutPorDefecto(t *testing.T) {
+	aplicar(t, entornoMinimo())
+
+	cfg, err := config.Load()
+	if err != nil {
+		t.Fatalf("error inesperado: %v", err)
+	}
+	if !strings.Contains(cfg.Postgres.DSN(), "statement_timeout=1500") {
+		t.Errorf("DSN = %q, se esperaba statement_timeout=1500 (1500ms por defecto)", cfg.Postgres.DSN())
+	}
+}
+
+func TestDSNRespetaUnStatementTimeoutPersonalizado(t *testing.T) {
+	env := entornoMinimo()
+	env["POSTGRES_STATEMENT_TIMEOUT"] = "500ms"
+	aplicar(t, env)
+
+	cfg, err := config.Load()
+	if err != nil {
+		t.Fatalf("error inesperado: %v", err)
+	}
+	if !strings.Contains(cfg.Postgres.DSN(), "statement_timeout=500") {
+		t.Errorf("DSN = %q, se esperaba statement_timeout=500", cfg.Postgres.DSN())
+	}
+}
+
+func TestLoadRechazaStatementTimeoutNoPositivo(t *testing.T) {
+	cases := map[string]string{
+		"cero":     "0s",
+		"negativo": "-1s",
+	}
+
+	for name, valor := range cases {
+		t.Run(name, func(t *testing.T) {
+			env := entornoMinimo()
+			env["POSTGRES_STATEMENT_TIMEOUT"] = valor
+			aplicar(t, env)
+
+			if _, err := config.Load(); err == nil {
+				t.Error("se esperaba un error de configuración")
+			}
+		})
 	}
 }
 

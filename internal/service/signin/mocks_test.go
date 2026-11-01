@@ -180,7 +180,7 @@ func (m *sessionsMock) RevokeByHash(context.Context, string) error {
 	panic("signin: RevokeByHash no se usa en el login")
 }
 
-func (m *sessionsMock) RevokeAllByUserID(context.Context, uuid.UUID) error {
+func (m *sessionsMock) RevokeAllByUserID(context.Context, uuid.UUID, *domain.OutboxEvent) error {
 	panic("signin: RevokeAllByUserID no se usa en el login")
 }
 

@@ -26,15 +26,6 @@ func NewNoopPublisher(logger *slog.Logger) *NoopPublisher {
 	return &NoopPublisher{logger: logger}
 }
 
-// PublishUserCreated registra el evento que se habría publicado.
-func (p *NoopPublisher) PublishUserCreated(ctx context.Context, evt domain.UserCreated) error {
-	p.logger.WarnContext(ctx, "publisher inerte: el evento no se publicó",
-		slog.String("event_type", EventTypeUserCreated),
-		slog.String("user_id", evt.UserID.String()),
-	)
-	return nil
-}
-
 // PublishSessionsRevoked registra el evento que se habría publicado.
 func (p *NoopPublisher) PublishSessionsRevoked(ctx context.Context, evt domain.SessionsRevoked) error {
 	p.logger.WarnContext(ctx, "publisher inerte: el evento no se publicó",
@@ -43,6 +34,20 @@ func (p *NoopPublisher) PublishSessionsRevoked(ctx context.Context, evt domain.S
 	)
 	return nil
 }
+
+// PublishUserStatusChanged registra el evento que se habría publicado.
+func (p *NoopPublisher) PublishUserStatusChanged(ctx context.Context, evt domain.UserStatusChanged) error {
+	p.logger.WarnContext(ctx, "publisher inerte: el evento no se publicó",
+		slog.String("event_type", EventTypeUserStatusChanged),
+		slog.String("user_id", evt.UserID.String()),
+	)
+	return nil
+}
+
+// Status informa que el broker está deshabilitado: es el modo de desarrollo,
+// que la configuración rechaza con APP_ENV=production. Deshabilitado no es una
+// falla, así que /health/deps no lo cuenta como degradación.
+func (p *NoopPublisher) Status() (string, bool) { return "disabled", true }
 
 // Close no tiene nada que liberar.
 func (p *NoopPublisher) Close() error { return nil }

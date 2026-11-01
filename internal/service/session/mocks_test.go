@@ -29,16 +29,17 @@ type sessionsMock struct {
 
 	revokeByHashErr error
 
-	mu              sync.Mutex
-	findCalls       int
-	findHashes      []string
-	rotateCalls     int
-	rotatedOld      uuid.UUID
-	rotatedNew      domain.Session
-	revokeAllCalls  int
-	revokedUserID   uuid.UUID
-	revokeHashCalls int
-	revokedHashes   []string
+	mu                sync.Mutex
+	findCalls         int
+	findHashes        []string
+	rotateCalls       int
+	rotatedOld        uuid.UUID
+	rotatedNew        domain.Session
+	revokeAllCalls    int
+	revokedUserID     uuid.UUID
+	revokedOutboxEvts []*domain.OutboxEvent
+	revokeHashCalls   int
+	revokedHashes     []string
 }
 
 func (m *sessionsMock) Create(context.Context, *domain.Session) error {
@@ -73,7 +74,7 @@ func (m *sessionsMock) RevokeByHash(_ context.Context, hash string) error {
 	return nil
 }
 
-func (m *sessionsMock) RevokeAllByUserID(_ context.Context, userID uuid.UUID) error {
+func (m *sessionsMock) RevokeAllByUserID(_ context.Context, userID uuid.UUID, outboxEvent *domain.OutboxEvent) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
@@ -82,6 +83,9 @@ func (m *sessionsMock) RevokeAllByUserID(_ context.Context, userID uuid.UUID) er
 	if m.revokeAllErr != nil {
 		return m.revokeAllErr
 	}
+	// Simula la transacción real: el evento solo queda "persistido" si la
+	// revocación en sí no falló, igual que SessionRepository.RevokeAllByUserID.
+	m.revokedOutboxEvts = append(m.revokedOutboxEvts, outboxEvent)
 	return nil
 }
 
@@ -108,6 +112,17 @@ func (m *sessionsMock) revokeAllCallCount() int {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	return m.revokeAllCalls
+}
+
+// lastOutboxEvent devuelve el evento de outbox de la última llamada a
+// RevokeAllByUserID que no haya fallado, o nil si ninguna lo persistió.
+func (m *sessionsMock) lastOutboxEvent() *domain.OutboxEvent {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if len(m.revokedOutboxEvts) == 0 {
+		return nil
+	}
+	return m.revokedOutboxEvts[len(m.revokedOutboxEvts)-1]
 }
 
 func (m *sessionsMock) revokeHashCallCount() int {
@@ -168,37 +183,4 @@ func (m *tokensMock) NewRefreshToken() (token, hash string, expiresAt time.Time,
 		return "", "", time.Time{}, m.refreshErr
 	}
 	return m.refreshToken, m.refreshHash, m.refreshExpiresAt, nil
-}
-
-// eventsMock implementa domain.EventPublisher. Solo RefreshService la usa,
-// exclusivamente en la rama de Defensa Activa; LogoutService ni siquiera
-// declara esta dependencia.
-type eventsMock struct {
-	err error
-
-	mu        sync.Mutex
-	calls     int
-	published []domain.SessionsRevoked
-}
-
-func (m *eventsMock) PublishUserCreated(context.Context, domain.UserCreated) error {
-	panic("session: PublishUserCreated no se usa en este paquete")
-}
-
-func (m *eventsMock) PublishSessionsRevoked(_ context.Context, evt domain.SessionsRevoked) error {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-
-	m.calls++
-	if m.err != nil {
-		return m.err
-	}
-	m.published = append(m.published, evt)
-	return nil
-}
-
-func (m *eventsMock) callCount() int {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	return m.calls
 }

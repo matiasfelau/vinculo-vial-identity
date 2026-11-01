@@ -33,12 +33,16 @@ type Config struct {
 	Env      string
 	LogLevel slog.Level
 
-	HTTP     HTTPConfig
-	Internal InternalConfig
-	Postgres PostgresConfig
-	Crypto   CryptoConfig
-	Events   EventsConfig
-	Token    TokenConfig
+	HTTP       HTTPConfig
+	Internal   InternalConfig
+	Postgres   PostgresConfig
+	Crypto     CryptoConfig
+	Events     EventsConfig
+	Consumer   ConsumerConfig
+	Reputation ReputationConfig
+	Token      TokenConfig
+	Renaper    RenaperConfig
+	Outbox     OutboxConfig
 }
 
 // HTTPConfig son los parámetros del servidor.
@@ -97,13 +101,25 @@ type PostgresConfig struct {
 	// levante con una base vacía. Es destructivo por diseño: nunca admisible
 	// con APP_ENV=production (ver (*Config).validate()).
 	EphemeralDB bool
+	// StatementTimeout acota, del lado del servidor, cualquier sentencia que
+	// exceda este plazo (protege contra una consulta colgada aunque el
+	// cliente Go no respete su propio contexto). Es defensa en profundidad
+	// junto al deadline por consulta que aplica cada repositorio
+	// (internal/repository/postgres.queryTimeout): ese protege contra la
+	// espera por una conexión libre del pool, este contra una sentencia que
+	// ya arrancó y se cuelga.
+	StatementTimeout time.Duration
 }
 
-// DSN arma la cadena de conexión.
+// DSN arma la cadena de conexión. pgx trata un parámetro que no reconoce como
+// propio de la cadena de conexión como un parámetro de sesión de PostgreSQL
+// (equivalente a un SET tras conectar), así que alcanza con incluir
+// statement_timeout acá, sin tocar el driver.
 func (c PostgresConfig) DSN() string {
 	return fmt.Sprintf(
-		"host=%s port=%d user=%s password=%s dbname=%s sslmode=%s",
+		"host=%s port=%d user=%s password=%s dbname=%s sslmode=%s statement_timeout=%d",
 		c.Host, c.Port, c.User, c.Password.Reveal(), c.Database, c.SSLMode,
+		c.StatementTimeout.Milliseconds(),
 	)
 }
 
@@ -155,6 +171,36 @@ type TokenConfig struct {
 	Issuer string
 }
 
+// RenaperConfig son los parámetros de la consulta a RENAPER (US-01).
+type RenaperConfig struct {
+	// Timeout acota la consulta completa —conexión y lectura—. Sin este plazo
+	// propio, una llamada a RENAPER solo queda limitada por el contexto de la
+	// petición HTTP entrante, que no tiene por qué dejarle a esta única
+	// dependencia síncrona del servicio un presupuesto razonable dentro del
+	// total de /auth/signup.
+	Timeout time.Duration
+	// BreakerFailureThreshold es la cantidad de fallas —timeout, conexión
+	// rechazada, 5xx del upstream— dentro de BreakerWindow que abren el
+	// circuito hacia RENAPER.
+	BreakerFailureThreshold int
+	// BreakerWindow es la ventana deslizante sobre la que se cuentan esas
+	// fallas.
+	BreakerWindow time.Duration
+	// BreakerOpenDuration es cuánto permanece abierto el circuito antes de
+	// admitir una única llamada de prueba (medio abierto).
+	BreakerOpenDuration time.Duration
+}
+
+// OutboxConfig son los parámetros del worker en background que publica los
+// eventos del patrón Transactional Outbox (US-06).
+type OutboxConfig struct {
+	// WorkerInterval es cada cuánto corre un ciclo de publicación.
+	WorkerInterval time.Duration
+	// WorkerBatchSize acota cuántos eventos pendientes se intentan publicar
+	// por ciclo.
+	WorkerBatchSize int
+}
+
 // EventsConfig son los parámetros del broker.
 type EventsConfig struct {
 	// Enabled en false usa el publisher inerte. El broker es global y no forma
@@ -165,6 +211,42 @@ type EventsConfig struct {
 	Exchange       string
 	Producer       string
 	PublishTimeout time.Duration
+	// DialTimeout acota el establecimiento de la conexión AMQP, incluida una
+	// reconexión a mitad de un publish: ver la nota de dialWithDeadline en
+	// internal/delivery/events.
+	DialTimeout time.Duration
+	// Heartbeat es el latido de la conexión AMQP; permite detectar un broker
+	// caído sin esperar al timeout de TCP.
+	Heartbeat time.Duration
+}
+
+// ConsumerConfig son los parámetros comunes a los consumidores de eventos
+// (US-08). La conexión con el broker es la de EventsConfig.
+type ConsumerConfig struct {
+	// Prefetch es el tope de mensajes sin ack que el broker adelanta a cada
+	// consumidor (basic.qos). Sin él, el broker empuja toda la cola al proceso.
+	Prefetch int
+	// MaxRetries es la cantidad máxima de reintentos de un fallo transitorio.
+	// Agotada, el mensaje se deriva a la DLQ.
+	MaxRetries int
+	// AlertRejectedQueue es la cola de trabajo de alert.rejected. La declara
+	// vinculo-vial-core; este servicio solo la consume.
+	AlertRejectedQueue string
+	// AlertReportedQueue es la cola de trabajo de alert.reported. También la
+	// declara vinculo-vial-core.
+	AlertReportedQueue string
+}
+
+// ReputationConfig son los parámetros de la reputación de los usuarios
+// (US-08). Se configuran por entorno: nunca van fijos en el código.
+type ReputationConfig struct {
+	// FraudPenalty son los puntos que se restan a reputation_score por cada
+	// alerta rechazada por fraude.
+	FraudPenalty int
+	// ReviewThreshold es la cantidad de reportes que pone a un usuario en
+	// revisión (UNDER_REVIEW): sin poder enviar alertas, pero con el resto de
+	// la cuenta intacta.
+	ReviewThreshold int
 }
 
 // Valores por defecto pensados para que el entorno local levante sin definir
@@ -191,15 +273,53 @@ const (
 	// atrapado acá, y lo bastante por debajo del default (10 MiB) como para
 	// dejarle margen real a un operador que sepa que su app produce selfies
 	// livianas y quiera ajustar el límite hacia abajo a propósito.
-	minViableMaxBodyBytes      = 512 << 10
-	defaultMaxOpenConns        = 20
-	defaultMaxIdleConns        = 5
-	defaultConnMaxLifetime     = 30 * time.Minute
-	defaultConnMaxIdleTime     = 5 * time.Minute
-	defaultHPKEInfo            = ""
-	defaultEventsExchange      = "vinculo-vial.events"
-	defaultEventsProducer      = "vinculo-vial-identity"
-	defaultEventsPublishTimeut = 5 * time.Second
+	minViableMaxBodyBytes  = 512 << 10
+	defaultMaxOpenConns    = 20
+	defaultMaxIdleConns    = 5
+	defaultConnMaxLifetime = 30 * time.Minute
+	defaultConnMaxIdleTime = 5 * time.Minute
+	// defaultStatementTimeout y defaultRenaperTimeout son las dos
+	// dependencias síncronas que /auth/signup encadena en el peor caso
+	// (RENAPER y la escritura en base): 1500 ms × 2 + ~500 ms de margen para
+	// Argon2id y el resto de la CPU propia (cifrado, framework) ≈ 3500 ms,
+	// bajo el techo de 5000 ms del contrato de resiliencia para el request
+	// completo. defaultEventsPublishTimeut tiene el mismo valor por
+	// coherencia, pero lo consume el worker del outbox, fuera de cualquier
+	// request.
+	defaultStatementTimeout = 1500 * time.Millisecond
+	defaultHPKEInfo         = ""
+	defaultRenaperTimeout   = 1500 * time.Millisecond
+	// Mismos valores que renaper.DefaultBreaker*: no hay un import cruzado
+	// entre este paquete y renaper —acá solo se leen variables de entorno—,
+	// así que el default se repite a propósito, igual que ya ocurre con
+	// defaultEventsExchange frente a events.DefaultExchange.
+	defaultRenaperBreakerFailureThreshold = 5
+	defaultRenaperBreakerWindow           = time.Minute
+	defaultRenaperBreakerOpenDuration     = 30 * time.Second
+	// defaultOutboxWorkerInterval y defaultOutboxWorkerBatchSize no derivan
+	// del presupuesto de ningún request: el worker corre fuera del camino
+	// síncrono de /refresh, así que su cadencia es una decisión operativa
+	// (cuánto puede demorar en salir un evento), no de latencia.
+	defaultOutboxWorkerInterval  = 2 * time.Second
+	defaultOutboxWorkerBatchSize = 20
+	defaultEventsExchange        = "vvi.topic.exchange"
+	defaultEventsProducer        = "vinculo-vial-identity"
+	defaultEventsPublishTimeut   = 1500 * time.Millisecond
+	defaultEventsDialTimeout     = 10 * time.Second
+	defaultEventsHeartbeat       = 10 * time.Second
+	// defaultConsumerPrefetch y defaultConsumerMaxRetries son los valores del
+	// contrato de US-08. maxConsumerPrefetch es el techo del protocolo AMQP: el
+	// prefetch de basic.qos es un entero de 16 bits sin signo.
+	defaultConsumerPrefetch   = 10
+	defaultConsumerMaxRetries = 5
+	maxConsumerPrefetch       = 65535
+	// defaultAlertRejectedQueue y defaultFraudPenalty son los valores del
+	// contrato de US-08. El nombre de la cola es parte de la topología que
+	// declara vinculo-vial-core: ver la tabla de eventos del contrato.
+	defaultAlertRejectedQueue = "identity.alert-rejected.q"
+	defaultFraudPenalty       = 10
+	defaultAlertReportedQueue = "identity.alert-reported.q"
+	defaultReviewThreshold    = 1
 	// defaultAccessTokenTTLMinutes y defaultRefreshTokenTTLDays son los valores
 	// que fija el contrato compartido de US-02, no una elección local: Gateway
 	// asume estos mismos TTL del lado de la verificación.
@@ -232,18 +352,19 @@ func Load() (*Config, error) {
 		},
 
 		Postgres: PostgresConfig{
-			Host:            r.str("POSTGRES_HOST", "localhost"),
-			Port:            r.integer("POSTGRES_PORT", 5432),
-			User:            r.required("POSTGRES_USER"),
-			Password:        Secret(r.required("POSTGRES_PASSWORD")),
-			Database:        r.required("POSTGRES_DB"),
-			SSLMode:         r.str("POSTGRES_SSLMODE", "disable"),
-			MaxOpenConns:    r.integer("POSTGRES_MAX_OPEN_CONNS", defaultMaxOpenConns),
-			MaxIdleConns:    r.integer("POSTGRES_MAX_IDLE_CONNS", defaultMaxIdleConns),
-			ConnMaxLifetime: r.duration("POSTGRES_CONN_MAX_LIFETIME", defaultConnMaxLifetime),
-			ConnMaxIdleTime: r.duration("POSTGRES_CONN_MAX_IDLE_TIME", defaultConnMaxIdleTime),
-			LogSQL:          r.boolean("POSTGRES_LOG_SQL", false),
-			EphemeralDB:     r.boolean("EPHEMERAL_DB", false),
+			Host:             r.str("POSTGRES_HOST", "localhost"),
+			Port:             r.integer("POSTGRES_PORT", 5432),
+			User:             r.required("POSTGRES_USER"),
+			Password:         Secret(r.required("POSTGRES_PASSWORD")),
+			Database:         r.required("POSTGRES_DB"),
+			SSLMode:          r.str("POSTGRES_SSLMODE", "disable"),
+			MaxOpenConns:     r.integer("POSTGRES_MAX_OPEN_CONNS", defaultMaxOpenConns),
+			MaxIdleConns:     r.integer("POSTGRES_MAX_IDLE_CONNS", defaultMaxIdleConns),
+			ConnMaxLifetime:  r.duration("POSTGRES_CONN_MAX_LIFETIME", defaultConnMaxLifetime),
+			ConnMaxIdleTime:  r.duration("POSTGRES_CONN_MAX_IDLE_TIME", defaultConnMaxIdleTime),
+			LogSQL:           r.boolean("POSTGRES_LOG_SQL", false),
+			EphemeralDB:      r.boolean("EPHEMERAL_DB", false),
+			StatementTimeout: r.duration("POSTGRES_STATEMENT_TIMEOUT", defaultStatementTimeout),
 		},
 
 		Crypto: CryptoConfig{
@@ -263,12 +384,38 @@ func Load() (*Config, error) {
 			Exchange:       r.str("RABBITMQ_EXCHANGE", defaultEventsExchange),
 			Producer:       r.str("RABBITMQ_PRODUCER", defaultEventsProducer),
 			PublishTimeout: r.duration("RABBITMQ_PUBLISH_TIMEOUT", defaultEventsPublishTimeut),
+			DialTimeout:    r.duration("RABBITMQ_DIAL_TIMEOUT", defaultEventsDialTimeout),
+			Heartbeat:      r.duration("RABBITMQ_HEARTBEAT", defaultEventsHeartbeat),
+		},
+
+		Consumer: ConsumerConfig{
+			Prefetch:           r.integer("RABBITMQ_PREFETCH", defaultConsumerPrefetch),
+			MaxRetries:         r.integer("MAX_RETRIES", defaultConsumerMaxRetries),
+			AlertRejectedQueue: r.str("ALERT_REJECTED_QUEUE", defaultAlertRejectedQueue),
+			AlertReportedQueue: r.str("ALERT_REPORTED_QUEUE", defaultAlertReportedQueue),
+		},
+
+		Reputation: ReputationConfig{
+			FraudPenalty:    r.integer("FRAUD_PENALTY", defaultFraudPenalty),
+			ReviewThreshold: r.integer("REPORT_REVIEW_THRESHOLD", defaultReviewThreshold),
 		},
 
 		Token: TokenConfig{
 			AccessTokenTTL:  time.Duration(r.integer("ACCESS_TOKEN_TTL_MINUTES", defaultAccessTokenTTLMinutes)) * time.Minute,
 			RefreshTokenTTL: time.Duration(r.integer("REFRESH_TOKEN_TTL_DAYS", defaultRefreshTokenTTLDays)) * 24 * time.Hour,
 			Issuer:          r.str("JWT_ISSUER", defaultJWTIssuer),
+		},
+
+		Renaper: RenaperConfig{
+			Timeout:                 r.duration("RENAPER_TIMEOUT", defaultRenaperTimeout),
+			BreakerFailureThreshold: r.integer("RENAPER_BREAKER_FAILURE_THRESHOLD", defaultRenaperBreakerFailureThreshold),
+			BreakerWindow:           r.duration("RENAPER_BREAKER_WINDOW", defaultRenaperBreakerWindow),
+			BreakerOpenDuration:     r.duration("RENAPER_BREAKER_OPEN_DURATION", defaultRenaperBreakerOpenDuration),
+		},
+
+		Outbox: OutboxConfig{
+			WorkerInterval:  r.duration("OUTBOX_WORKER_INTERVAL", defaultOutboxWorkerInterval),
+			WorkerBatchSize: r.integer("OUTBOX_WORKER_BATCH_SIZE", defaultOutboxWorkerBatchSize),
 		},
 	}
 
@@ -324,6 +471,9 @@ func (c *Config) validate() error {
 		r.fail("config: POSTGRES_MAX_IDLE_CONNS (%d) no puede superar POSTGRES_MAX_OPEN_CONNS (%d)",
 			c.Postgres.MaxIdleConns, c.Postgres.MaxOpenConns)
 	}
+	if c.Postgres.StatementTimeout <= 0 {
+		r.fail("config: POSTGRES_STATEMENT_TIMEOUT debe ser positivo")
+	}
 
 	// sslmode=disable manda el tráfico en claro. Vale en el compose local, donde
 	// la base vive en la misma red de Docker, pero nunca fuera de ahí.
@@ -356,6 +506,41 @@ func (c *Config) validate() error {
 	}
 	if c.Token.RefreshTokenTTL <= 0 {
 		r.fail("config: REFRESH_TOKEN_TTL_DAYS debe ser positivo")
+	}
+
+	if c.Renaper.Timeout <= 0 {
+		r.fail("config: RENAPER_TIMEOUT debe ser positivo")
+	}
+	if c.Renaper.BreakerFailureThreshold <= 0 {
+		r.fail("config: RENAPER_BREAKER_FAILURE_THRESHOLD debe ser al menos 1")
+	}
+	if c.Renaper.BreakerWindow <= 0 {
+		r.fail("config: RENAPER_BREAKER_WINDOW debe ser positivo")
+	}
+	if c.Renaper.BreakerOpenDuration <= 0 {
+		r.fail("config: RENAPER_BREAKER_OPEN_DURATION debe ser positivo")
+	}
+
+	if c.Outbox.WorkerInterval <= 0 {
+		r.fail("config: OUTBOX_WORKER_INTERVAL debe ser positivo")
+	}
+	if c.Outbox.WorkerBatchSize < 1 {
+		r.fail("config: OUTBOX_WORKER_BATCH_SIZE debe ser al menos 1")
+	}
+
+	if c.Consumer.Prefetch < 1 || c.Consumer.Prefetch > maxConsumerPrefetch {
+		r.fail("config: RABBITMQ_PREFETCH debe estar entre 1 y %d, se recibió %d", maxConsumerPrefetch, c.Consumer.Prefetch)
+	}
+	if c.Consumer.MaxRetries < 0 {
+		r.fail("config: MAX_RETRIES no puede ser negativo, se recibió %d", c.Consumer.MaxRetries)
+	}
+
+	if c.Reputation.FraudPenalty < 0 {
+		r.fail("config: FRAUD_PENALTY no puede ser negativa, se recibió %d", c.Reputation.FraudPenalty)
+	}
+
+	if c.Reputation.ReviewThreshold < 1 {
+		r.fail("config: REPORT_REVIEW_THRESHOLD debe ser al menos 1, se recibió %d", c.Reputation.ReviewThreshold)
 	}
 
 	if c.Events.Enabled {
@@ -404,8 +589,21 @@ func (c *Config) LogValue() slog.Value {
 		slog.String("postgres_db", c.Postgres.Database),
 		slog.String("postgres_sslmode", c.Postgres.SSLMode),
 		slog.Bool("postgres_ephemeral_db", c.Postgres.EphemeralDB),
+		slog.Duration("postgres_statement_timeout", c.Postgres.StatementTimeout),
 		slog.Bool("events_enabled", c.Events.Enabled),
 		slog.String("events_exchange", c.Events.Exchange),
+		slog.Int("rabbitmq_prefetch", c.Consumer.Prefetch),
+		slog.Int("max_retries", c.Consumer.MaxRetries),
+		slog.String("alert_rejected_queue", c.Consumer.AlertRejectedQueue),
+		slog.String("alert_reported_queue", c.Consumer.AlertReportedQueue),
+		slog.Int("fraud_penalty", c.Reputation.FraudPenalty),
+		slog.Int("report_review_threshold", c.Reputation.ReviewThreshold),
+		slog.Duration("renaper_timeout", c.Renaper.Timeout),
+		slog.Int("renaper_breaker_failure_threshold", c.Renaper.BreakerFailureThreshold),
+		slog.Duration("renaper_breaker_window", c.Renaper.BreakerWindow),
+		slog.Duration("renaper_breaker_open_duration", c.Renaper.BreakerOpenDuration),
+		slog.Duration("outbox_worker_interval", c.Outbox.WorkerInterval),
+		slog.Int("outbox_worker_batch_size", c.Outbox.WorkerBatchSize),
 		slog.Int("argon2_memory_kib", c.Crypto.Argon2MemoryKiB),
 		slog.Duration("access_token_ttl", c.Token.AccessTokenTTL),
 		slog.Duration("refresh_token_ttl", c.Token.RefreshTokenTTL),

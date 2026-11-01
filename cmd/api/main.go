@@ -20,12 +20,15 @@ import (
 	"github.com/matiasfelau/vinculo-vial-identity/internal/crypto/hpke"
 	"github.com/matiasfelau/vinculo-vial-identity/internal/crypto/password"
 	"github.com/matiasfelau/vinculo-vial-identity/internal/crypto/symmetric"
+	"github.com/matiasfelau/vinculo-vial-identity/internal/delivery/consumer"
 	"github.com/matiasfelau/vinculo-vial-identity/internal/delivery/events"
 	delivery "github.com/matiasfelau/vinculo-vial-identity/internal/delivery/http"
 	"github.com/matiasfelau/vinculo-vial-identity/internal/domain"
 	"github.com/matiasfelau/vinculo-vial-identity/internal/renaper"
 	"github.com/matiasfelau/vinculo-vial-identity/internal/repository/postgres"
+	"github.com/matiasfelau/vinculo-vial-identity/internal/service/outbox"
 	"github.com/matiasfelau/vinculo-vial-identity/internal/service/ownership"
+	"github.com/matiasfelau/vinculo-vial-identity/internal/service/reputation"
 	"github.com/matiasfelau/vinculo-vial-identity/internal/service/session"
 	"github.com/matiasfelau/vinculo-vial-identity/internal/service/signin"
 	"github.com/matiasfelau/vinculo-vial-identity/internal/service/signup"
@@ -99,6 +102,21 @@ func run() error {
 		return err
 	}
 
+	// outbox_events no depende de users ni de sessions: es la tabla del
+	// patrón Transactional Outbox de la Defensa Activa (US-06), ver
+	// domain.OutboxEvent.
+	outboxRepo, err := postgres.NewOutboxRepository(ctx, db)
+	if err != nil {
+		return err
+	}
+
+	// processed_events: la marca de deduplicación de los consumidores (US-08).
+	// Requiere que users ya esté migrada: actualiza sus columnas de reputación.
+	reputationRepo, err := postgres.NewReputationRepository(ctx, db)
+	if err != nil {
+		return err
+	}
+
 	tokens, err := buildTokenGenerator(cfg)
 	if err != nil {
 		return err
@@ -114,7 +132,25 @@ func run() error {
 		}
 	}()
 
-	renaperSvc := buildRenaper(logger)
+	// El worker de outbox publica en background: RefreshService ya no
+	// depende de domain.EventPublisher en absoluto, así que /refresh no se
+	// ve afectado por la disponibilidad del broker al ejecutar la Defensa
+	// Activa (más allá de que el evento tarde en salir mientras el worker
+	// reintenta). Comparte el ctx cancelable por SIGTERM de run(): al apagar
+	// el servicio dejan de programarse nuevos ciclos, en vez de que el
+	// worker sobreviva al resto del proceso.
+	outboxWorker := outbox.NewWorker(outboxRepo, publisher, cfg.Outbox.WorkerBatchSize, logger)
+	go outboxWorker.Run(ctx, cfg.Outbox.WorkerInterval)
+
+	stopConsumers, err := startConsumers(ctx, cfg, reputationRepo, logger)
+	if err != nil {
+		return err
+	}
+	// Se declara después de cerrar la base, así que corre antes: los consumidores
+	// terminan el mensaje en curso mientras la base todavía responde.
+	defer stopConsumers()
+
+	renaperSvc := buildRenaper(cfg, logger)
 
 	signUpService, err := signup.New(signup.Deps{
 		Decryptor: decryptor,
@@ -123,7 +159,6 @@ func run() error {
 		Hasher:    hasher,
 		Renaper:   renaperSvc,
 		Users:     users,
-		Publisher: publisher,
 		Logger:    logger,
 	})
 	if err != nil {
@@ -144,10 +179,9 @@ func run() error {
 	}
 
 	refreshService, err := session.NewRefreshService(session.RefreshDeps{
-		Sessions:  sessions,
-		Tokens:    tokens,
-		Publisher: publisher,
-		Logger:    logger,
+		Sessions: sessions,
+		Tokens:   tokens,
+		Logger:   logger,
 	})
 	if err != nil {
 		return err
@@ -183,6 +217,16 @@ func run() error {
 		// Readiness apoyada en la base: si no responde, ni un alta ni un login
 		// podrían persistirse y el orquestador no debería mandar tráfico acá.
 		ReadinessCheck: func(ctx context.Context) error { return postgres.Ping(ctx, db) },
+		// /health/deps es aparte de /ready: informa el broker, el worker del
+		// outbox y el breaker hacia RENAPER sin afectar al balanceo.
+		DepsHealth: delivery.NewDepsHealthHandler(
+			delivery.DepCheck{Name: "broker", Check: publisher.Status},
+			delivery.DepCheck{Name: "outbox_worker", Check: outboxWorker.Status},
+			delivery.DepCheck{Name: "renaper_breaker", Check: func() (string, bool) {
+				state := renaperSvc.State()
+				return string(state), state == renaper.BreakerStateClosed
+			}},
+		),
 	})
 	if err != nil {
 		return err
@@ -247,12 +291,19 @@ func buildTokenGenerator(cfg *config.Config) (domain.TokenGenerator, error) {
 	return token.New(cfg.Crypto.JWTPrivateKey.Reveal(), cfg.Token.AccessTokenTTL, cfg.Token.RefreshTokenTTL, cfg.Token.Issuer)
 }
 
+// statusPublisher es un domain.EventPublisher que además informa su estado
+// para /health/deps: tanto el publisher real como el inerte lo implementan.
+type statusPublisher interface {
+	domain.EventPublisher
+	Status() (state string, ok bool)
+}
+
 // buildPublisher elige entre el publisher real y el inerte.
 //
 // El broker es un recurso global de la plataforma y no está en el compose de
 // este servicio; la configuración ya impide que el modo inerte llegue a
 // producción.
-func buildPublisher(cfg *config.Config, logger *slog.Logger) (domain.EventPublisher, func() error, error) {
+func buildPublisher(cfg *config.Config, logger *slog.Logger) (statusPublisher, func() error, error) {
 	if !cfg.Events.Enabled {
 		p := events.NewNoopPublisher(logger)
 		logger.Warn("publisher de eventos deshabilitado: las altas no se publicarán")
@@ -264,12 +315,76 @@ func buildPublisher(cfg *config.Config, logger *slog.Logger) (domain.EventPublis
 		Exchange:       cfg.Events.Exchange,
 		Producer:       cfg.Events.Producer,
 		PublishTimeout: cfg.Events.PublishTimeout,
+		DialTimeout:    cfg.Events.DialTimeout,
+		Heartbeat:      cfg.Events.Heartbeat,
 	}, logger)
 	if err != nil {
 		return nil, nil, err
 	}
 
 	return p, p.Close, nil
+}
+
+// startConsumers arma y lanza los consumidores de eventos de US-08: los
+// rechazos de alertas (reputación) y los reportes (revisión).
+//
+// Con el broker deshabilitado (solo desarrollo; la configuración lo rechaza en
+// producción) no hay nada que consumir: queda constancia en WARN, igual que con
+// el publisher inerte.
+func startConsumers(ctx context.Context, cfg *config.Config, reputationRepo domain.ReputationRepository, logger *slog.Logger) (func(), error) {
+	if !cfg.Events.Enabled {
+		logger.Warn("consumo de eventos deshabilitado: no se procesarán rechazos ni reportes de alertas")
+		return func() {}, nil
+	}
+
+	rejections, err := reputation.NewRejectionService(reputation.RejectionDeps{
+		Repo:         reputationRepo,
+		Consumer:     cfg.Consumer.AlertRejectedQueue,
+		FraudPenalty: cfg.Reputation.FraudPenalty,
+		Logger:       logger,
+	})
+	if err != nil {
+		return nil, err
+	}
+	rejectedHandler, err := consumer.NewAlertRejectedHandler(rejections)
+	if err != nil {
+		return nil, err
+	}
+
+	reports, err := reputation.NewReportService(reputation.ReportDeps{
+		Repo:            reputationRepo,
+		Consumer:        cfg.Consumer.AlertReportedQueue,
+		ReviewThreshold: cfg.Reputation.ReviewThreshold,
+		Logger:          logger,
+	})
+	if err != nil {
+		return nil, err
+	}
+	reportedHandler, err := consumer.NewAlertReportedHandler(reports)
+	if err != nil {
+		return nil, err
+	}
+
+	return consumer.Start(ctx, consumer.Settings{
+		URL:            cfg.Events.URL.Reveal(),
+		Prefetch:       cfg.Consumer.Prefetch,
+		DialTimeout:    cfg.Events.DialTimeout,
+		Heartbeat:      cfg.Events.Heartbeat,
+		PublishTimeout: cfg.Events.PublishTimeout,
+	}, []consumer.Spec{
+		{
+			Queue:      cfg.Consumer.AlertRejectedQueue,
+			EventType:  reputation.EventTypeAlertRejected,
+			MaxRetries: cfg.Consumer.MaxRetries,
+			Handler:    rejectedHandler,
+		},
+		{
+			Queue:      cfg.Consumer.AlertReportedQueue,
+			EventType:  reputation.EventTypeAlertReported,
+			MaxRetries: cfg.Consumer.MaxRetries,
+			Handler:    reportedHandler,
+		},
+	}, logger)
 }
 
 // buildRenaper construye el verificador de identidad.
@@ -280,9 +395,21 @@ func buildPublisher(cfg *config.Config, logger *slog.Logger) (domain.EventPublis
 // una alternativa real que cablear. El WARN en cada arranque es la única
 // salvaguarda: que quede imposible de ignorar que ninguna identidad se está
 // verificando de verdad.
-func buildRenaper(logger *slog.Logger) domain.RenaperService {
+//
+// Se envuelve con renaper.WithTimeout y renaper.WithCircuitBreaker incluso
+// sobre el Mock: así ambos mecanismos quedan probados de punta a punta antes
+// de que exista un cliente real que los necesite de verdad. El breaker es la
+// capa más externa: con el circuito abierto, ValidateIdentity no debe
+// intentar nada, ni siquiera esperar el timeout.
+func buildRenaper(cfg *config.Config, logger *slog.Logger) *renaper.CircuitBreaker {
 	logger.Warn("RenaperService en modo mock: ninguna identidad se verifica realmente; no usar en producción")
-	return &renaper.Mock{}
+
+	svc := renaper.WithTimeout(&renaper.Mock{}, cfg.Renaper.Timeout)
+	return renaper.WithCircuitBreaker(svc, renaper.BreakerConfig{
+		FailureThreshold: cfg.Renaper.BreakerFailureThreshold,
+		Window:           cfg.Renaper.BreakerWindow,
+		OpenDuration:     cfg.Renaper.BreakerOpenDuration,
+	}, logger)
 }
 
 // serve levanta el servidor público y el interno (US-04) a la vez, cada uno

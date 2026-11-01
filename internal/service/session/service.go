@@ -12,18 +12,20 @@ import (
 	"log/slog"
 	"time"
 
-	"github.com/google/uuid"
-
 	"github.com/matiasfelau/vinculo-vial-identity/internal/domain"
 )
 
 // RefreshDeps son las dependencias de RefreshService. Todas son puertos de
 // domain.
+//
+// No incluye domain.EventPublisher: la Defensa Activa persiste el evento de
+// outbox junto con la revocación (ver SessionRepository.RevokeAllByUserID),
+// y es internal/service/outbox.Worker quien lo publica después, en
+// background. RefreshService nunca habla con el broker.
 type RefreshDeps struct {
-	Sessions  domain.SessionRepository
-	Tokens    domain.TokenGenerator
-	Publisher domain.EventPublisher
-	Logger    *slog.Logger
+	Sessions domain.SessionRepository
+	Tokens   domain.TokenGenerator
+	Logger   *slog.Logger
 	// Now permite fijar el reloj en los tests. Si es nil se usa time.Now.
 	Now func() time.Time
 }
@@ -42,8 +44,6 @@ func NewRefreshService(d RefreshDeps) (*RefreshService, error) {
 		return nil, errors.New("session: falta el repositorio de sesiones")
 	case d.Tokens == nil:
 		return nil, errors.New("session: falta el generador de tokens")
-	case d.Publisher == nil:
-		return nil, errors.New("session: falta el publisher de eventos")
 	}
 
 	if d.Logger == nil {
@@ -92,18 +92,26 @@ func (s *RefreshService) Refresh(ctx context.Context, refreshToken string) (acce
 		// implementado que reintenta un token ya rotado paga un re-login) al
 		// falso negativo (una cuenta secuestrada), así que la revocación
 		// alcanza a todas las sesiones del usuario, vigentes o no.
-		if err := s.deps.Sessions.RevokeAllByUserID(ctx, found.UserID); err != nil {
+		//
+		// El evento de outbox se persiste en la misma transacción que la
+		// revocación (ver SessionRepository.RevokeAllByUserID): no hay doble
+		// escritura, y por lo tanto no hay forma de que la revocación quede
+		// persistida sin que el evento a publicar también lo quede, ni
+		// viceversa.
+		outboxEvent, err := domain.NewOutboxEvent("user.sessions.revoked", map[string]string{
+			"user_id": found.UserID.String(),
+			"reason":  string(domain.SessionsRevokedReasonReuseDetected),
+		})
+		if err != nil {
+			return "", "", fmt.Errorf("session: no se pudo armar el evento de outbox: %w", err)
+		}
+		outboxEvent.CreatedAt = s.deps.Now()
+		if err := s.deps.Sessions.RevokeAllByUserID(ctx, found.UserID, &outboxEvent); err != nil {
 			return "", "", fmt.Errorf("session: no se pudo ejecutar la defensa activa: %w", err)
 		}
 		s.deps.Logger.WarnContext(ctx, "reúso de refresh token detectado: defensa activa ejecutada",
 			slog.String("user_id", found.UserID.String()),
 		)
-
-		// TECH DEBT (MVP): doble escritura no atómica.
-		// La revocación de sesiones y el publish a RabbitMQ no comparten transacción:
-		// si el publish falla, los tokens FCM del usuario no se borran.
-		// Solución pendiente: patrón Outbox. Aprobado como limitación conocida para el MVP.
-		s.publishSessionsRevoked(ctx, found.UserID)
 
 		return "", "", domain.ErrSessionReused
 	}
@@ -130,22 +138,6 @@ func (s *RefreshService) Refresh(ctx context.Context, refreshToken string) (acce
 	s.deps.Logger.InfoContext(ctx, "sesión rotada", slog.String("user_id", found.UserID.String()))
 
 	return accessToken, newRefreshToken, nil
-}
-
-// publishSessionsRevoked emite user.sessions.revoked tras la Defensa Activa,
-// sin poner en riesgo la respuesta de /refresh: la revocación ya está
-// persistida y devolver un error acá haría que el cliente reintentara sobre
-// un Refresh Token que la Defensa Activa ya invalidó. Se registra el fallo y
-// se sigue, con la misma contrapartida (deuda técnica de doble escritura no
-// atómica) documentada en el comentario del llamador.
-func (s *RefreshService) publishSessionsRevoked(ctx context.Context, userID uuid.UUID) {
-	evt := domain.NewSessionsRevoked(userID, domain.SessionsRevokedReasonReuseDetected)
-	if err := s.deps.Publisher.PublishSessionsRevoked(ctx, evt); err != nil {
-		s.deps.Logger.ErrorContext(ctx, "no se pudo publicar user.sessions.revoked; la defensa activa se mantiene",
-			slog.String("user_id", userID.String()),
-			slog.String("error", err.Error()),
-		)
-	}
 }
 
 // logFailedAttempt deja constancia de un intento de refresh rechazado.

@@ -37,6 +37,35 @@ type UserRepository interface {
 	FindByOwnerAndDNIHash(ctx context.Context, ownerID uuid.UUID, dniHashed string) (*User, error)
 }
 
+// ReputationRepository aplica a los usuarios los efectos de los eventos de
+// reputación de US-08.
+type ReputationRepository interface {
+	// ApplyRejection registra el evento como procesado y, si penalty es
+	// positiva, se la resta a la reputación del usuario, todo en una única
+	// transacción: el efecto y su marca de deduplicación se confirman juntos o
+	// no se confirma ninguno.
+	//
+	// Un evento ya procesado (misma clave EventID + Consumer) no cambia nada y
+	// devuelve RejectionDuplicate. Que el usuario no exista no es un error:
+	// devuelve RejectionUserNotFound. Un error de base devuelve el error
+	// (envuelto en ErrDatabaseUnavailable si la base no respondió) y deja la
+	// transacción deshecha, para que el reintento procese el evento entero.
+	ApplyRejection(ctx context.Context, event ProcessedEvent, userID uuid.UUID, penalty int) (RejectionResult, error)
+
+	// ApplyReport registra el evento como procesado y le suma un reporte al
+	// usuario. Si con ese reporte el conteo llega a threshold y el usuario
+	// estaba ACTIVE, lo pasa a UNDER_REVIEW y persiste statusChanged en el
+	// outbox, todo en una única transacción: el cambio de estado y el evento
+	// que lo anuncia se confirman juntos o no se confirma ninguno.
+	//
+	// statusChanged es el user.status.changed ya armado: solo se persiste si
+	// hay transición, así que un usuario que ya estaba en revisión no vuelve a
+	// publicar. Un evento ya procesado (misma clave EventID + Consumer) no
+	// cambia nada y devuelve ReportDuplicate. Que el usuario no exista no es
+	// un error: devuelve ReportUserNotFound.
+	ApplyReport(ctx context.Context, event ProcessedEvent, userID uuid.UUID, threshold int, statusChanged OutboxEvent) (ReportOutcome, error)
+}
+
 // SessionRepository persiste sesiones: el registro de cada Refresh Token
 // emitido, identificado por su SHA-256.
 type SessionRepository interface {
@@ -60,10 +89,18 @@ type SessionRepository interface {
 	RevokeByHash(ctx context.Context, refreshTokenHash string) error
 
 	// RevokeAllByUserID marca como revocadas todas las sesiones de un usuario,
-	// vigentes o no. Es la Defensa Activa de US-03: se dispara al detectar el
-	// reúso de un Refresh Token ya revocado, y asume que toda la familia de
-	// sesiones del usuario puede estar comprometida.
-	RevokeAllByUserID(ctx context.Context, userID uuid.UUID) error
+	// vigentes o no, y persiste outboxEvent en la misma transacción (patrón
+	// Transactional Outbox). Es la Defensa Activa de US-03: se dispara al
+	// detectar el reúso de un Refresh Token ya revocado, y asume que toda la
+	// familia de sesiones del usuario puede estar comprometida.
+	//
+	// outboxEvent nunca es nil en el único llamador actual (RefreshService):
+	// a diferencia de un evento con destinatarios opcionales, la Defensa
+	// Activa siempre tiene un usuario al que notificar. Se acepta como
+	// puntero, igual que otros puertos de este archivo, para que un futuro
+	// llamador sin nada que publicar pueda pasar nil sin forzar un tipo
+	// vacío.
+	RevokeAllByUserID(ctx context.Context, userID uuid.UUID, outboxEvent *OutboxEvent) error
 
 	// RotateSession revoca la sesión vieja e inserta la sesión rotada como una
 	// única operación atómica: si un paso falla, el otro se deshace.
@@ -76,6 +113,27 @@ type SessionRepository interface {
 	// garantizada por la forma del puerto, no por una convención que el
 	// llamador podría romper sin darse cuenta.
 	RotateSession(ctx context.Context, oldSessionID uuid.UUID, newSession *Session) error
+}
+
+// OutboxRepository expone las operaciones que el worker de publicación en
+// background (internal/service/outbox) necesita: traer eventos pendientes y
+// registrar el resultado del intento de publicarlos. Las filas las escribe
+// SessionRepository.RevokeAllByUserID, dentro de su propia transacción; este
+// puerto solo las lee y actualiza su estado.
+type OutboxRepository interface {
+	// FetchPending devuelve hasta limit eventos todavía no enviados,
+	// ordenados por antigüedad, para no dejar eventos varados detrás de un
+	// alud de eventos nuevos.
+	FetchPending(ctx context.Context, limit int) ([]OutboxEvent, error)
+
+	// MarkSent registra que el evento se publicó y el broker lo confirmó
+	// (publisher confirms). Antes de este punto, el evento sigue pendiente.
+	MarkSent(ctx context.Context, id uuid.UUID) error
+
+	// MarkFailed registra un intento fallido sin cambiar el estado pendiente:
+	// el worker lo va a reintentar en el próximo ciclo, reutilizando el mismo
+	// id como EventID (ver SessionsRevoked).
+	MarkFailed(ctx context.Context, id uuid.UUID, lastErr string) error
 }
 
 // TokenGenerator emite el par de tokens de una sesión nueva tras un login
@@ -97,9 +155,6 @@ type TokenGenerator interface {
 
 // EventPublisher publica eventos de dominio hacia el broker de la plataforma.
 type EventPublisher interface {
-	// PublishUserCreated emite el evento user.created.
-	PublishUserCreated(ctx context.Context, evt UserCreated) error
-
 	// PublishSessionsRevoked emite el evento user.sessions.revoked.
 	//
 	// Se dispara únicamente desde la Defensa Activa de US-03 (revocación
@@ -108,6 +163,10 @@ type EventPublisher interface {
 	// emitirlo ahí apagaría las notificaciones push de todos los dispositivos
 	// del usuario por haber cerrado sesión en uno solo.
 	PublishSessionsRevoked(ctx context.Context, evt SessionsRevoked) error
+
+	// PublishUserStatusChanged emite el evento user.status.changed, con
+	// actor nulo: es un hecho del sistema, no de un usuario.
+	PublishUserStatusChanged(ctx context.Context, evt UserStatusChanged) error
 }
 
 // HPKEDecryptor descifra el criptograma de transporte que envía la app.
@@ -163,9 +222,13 @@ type RenaperService interface {
 	// ValidateIdentity devuelve (true, nil) cuando la identidad se confirma;
 	// (false, nil) cuando RENAPER respondió pero no pudo confirmarla —dato
 	// inválido o selfie que no coincide, sin distinguir cuál de las dos—; y
-	// (_, error) cuando el propio servicio de RENAPER no pudo consultarse (caído,
-	// timeout, credenciales rechazadas). Esta última categoría no implica nada
-	// sobre la identidad: es un fallo de la dependencia externa, no un veredicto.
+	// (_, error) cuando el propio servicio de RENAPER no pudo consultarse. Esta
+	// última categoría no implica nada sobre la identidad: es un fallo de la
+	// dependencia externa, no un veredicto, y el error debe envolver uno de los
+	// dos centinelas de domain que lo clasifican para la capa HTTP:
+	// ErrUpstreamUnavailable si RENAPER no respondió (timeout, conexión
+	// rechazada, circuito abierto), o ErrUpstreamInvalidResponse si respondió
+	// con un error de su lado o un cuerpo fuera de contrato.
 	//
 	// El llamador es responsable de limpiar dni, tramite, sexo y selfie cuando
 	// termina de usarlos.
