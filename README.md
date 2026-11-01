@@ -596,9 +596,15 @@ sobre es el emisor de la alerta rechazada. En una única transacción se registr
 el evento en `processed_events` y, si algún código de `reason_codes` es de
 fraude (`NO_VEHICLE`, `BURST_MISMATCH`, `PLATE_MISMATCH`), se resta
 `FRAUD_PENALTY` a `users.reputation_score`. `EVIDENCE_UNREADABLE` solo no
-penaliza. Un `actor` nulo o que no es un UUID, o un payload sin `alert_id`
-válido ni `reason_codes`, va directo a la DLQ; un usuario inexistente se loguea
-y se confirma; un error de base reintenta.
+penaliza. Un `actor` que no es un UUID, o un payload sin `alert_id` válido ni
+`reason_codes`, va directo a la DLQ; un error de base reintenta.
+
+Un evento sin `actor` (`null` o ausente) es el de una alerta cuyo emisor fue
+dado de baja (`issuer_id = NULL`, US-11): no hay a quién penalizar, así que se
+confirma sin efecto, con un log INFO y sin pasar por la DLQ ni por el reintento.
+Lo mismo si el usuario ya no existe: se loguea y se confirma. El payload se
+valida antes de mirar el actor, así que un payload inválido va a la DLQ aunque
+el actor falte.
 
 ### `alert.reported` → revisión
 
@@ -609,6 +615,11 @@ si el conteo llega a `REPORT_REVIEW_THRESHOLD` y el usuario estaba `ACTIVE`, se
 lo pasa a `UNDER_REVIEW` y se escribe `user.status.changed` en el outbox. Un
 usuario que ya está en revisión sigue contando pero no vuelve a publicar, y un
 duplicado no incrementa.
+
+Igual que con `alert.rejected`, un evento sin `actor` (alerta de un emisor dado
+de baja, US-11) o cuyo usuario ya no existe se confirma sin efecto: nadie queda
+en revisión, no se encola `user.status.changed` y el mensaje no va a la DLQ. Un
+`actor` que no es un UUID o un payload inválido sí va a la DLQ.
 
 `UNDER_REVIEW` restringe solo la creación de alertas, y esa restricción la
 aplica Alert: en Identity no bloquea el login, el refresh ni nada más (ningún

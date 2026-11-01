@@ -346,7 +346,7 @@ func startConsumers(ctx context.Context, cfg *config.Config, reputationRepo doma
 	if err != nil {
 		return nil, err
 	}
-	rejectedHandler, err := consumer.NewAlertRejectedHandler(rejections)
+	rejectedHandler, err := consumer.NewAlertRejectedHandler(rejections, logger)
 	if err != nil {
 		return nil, err
 	}
@@ -360,7 +360,7 @@ func startConsumers(ctx context.Context, cfg *config.Config, reputationRepo doma
 	if err != nil {
 		return nil, err
 	}
-	reportedHandler, err := consumer.NewAlertReportedHandler(reports)
+	reportedHandler, err := consumer.NewAlertReportedHandler(reports, logger)
 	if err != nil {
 		return nil, err
 	}
