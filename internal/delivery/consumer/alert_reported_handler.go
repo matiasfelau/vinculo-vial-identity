@@ -3,6 +3,7 @@ package consumer
 import (
 	"context"
 	"errors"
+	"log/slog"
 
 	"github.com/google/uuid"
 
@@ -19,16 +20,21 @@ type ReportApplier interface {
 // fallo permanente y va directo a la DLQ.
 type AlertReportedHandler struct {
 	applier ReportApplier
+	logger  *slog.Logger
 }
 
 var _ Handler = (*AlertReportedHandler)(nil)
 
-// NewAlertReportedHandler construye el handler.
-func NewAlertReportedHandler(applier ReportApplier) (*AlertReportedHandler, error) {
+// NewAlertReportedHandler construye el handler. Si logger es nil usa
+// slog.Default.
+func NewAlertReportedHandler(applier ReportApplier, logger *slog.Logger) (*AlertReportedHandler, error) {
 	if applier == nil {
 		return nil, errors.New("consumer: falta el caso de uso de reportes")
 	}
-	return &AlertReportedHandler{applier: applier}, nil
+	if logger == nil {
+		logger = slog.Default()
+	}
+	return &AlertReportedHandler{applier: applier, logger: logger}, nil
 }
 
 // alertReportedPayload es el payload de alert.reported. No trae el
@@ -39,14 +45,14 @@ type alertReportedPayload struct {
 	Reason  string `json:"reason"`
 }
 
-// Handle procesa un alert.reported. El actor del sobre es el emisor
-// reportado: sin actor, o con uno que no es un UUID, el mensaje es inválido.
+// Handle procesa un alert.reported. El actor del sobre es el emisor reportado.
+// Un actor que no es un UUID hace inválido el mensaje; un actor nulo, en
+// cambio, no: la alerta es de un emisor dado de baja (issuer_id = NULL), no hay
+// a quién poner en revisión y el mensaje se confirma sin efecto.
+//
+// El payload se valida antes de mirar el actor: un payload inválido es un
+// defecto del productor y va a la DLQ aunque el actor falte.
 func (h *AlertReportedHandler) Handle(ctx context.Context, envelope Envelope) error {
-	userID, err := actorUserID(envelope)
-	if err != nil {
-		return err
-	}
-
 	var payload alertReportedPayload
 	if err := decodePayload(envelope.Payload, &payload); err != nil {
 		return err
@@ -56,6 +62,16 @@ func (h *AlertReportedHandler) Handle(ctx context.Context, envelope Envelope) er
 	}
 	if !domain.IsValidReportReason(payload.Reason) {
 		return Permanent(errors.New("payload con un reason fuera del contrato"))
+	}
+
+	userID, hasActor, err := actorUserID(envelope)
+	if err != nil {
+		return err
+	}
+	if !hasActor {
+		h.logger.InfoContext(ctx, "reporte sin actor: el emisor fue dado de baja, no hay a quién poner en revisión",
+			slog.String("event_id", envelope.EventID.String()))
+		return nil
 	}
 
 	// Un error del caso de uso es de infraestructura (la base): transitorio, se

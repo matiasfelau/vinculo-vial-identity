@@ -1,10 +1,13 @@
 package consumer
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
+	"log/slog"
 	"slices"
+	"strings"
 	"sync"
 	"testing"
 
@@ -91,7 +94,15 @@ func payloadDeRechazo(codes ...string) map[string]any {
 func consumidorDeRechazos(t *testing.T, aplicador *aplicadorFalso, dlq *dlqFalsa) *Consumer {
 	t.Helper()
 
-	h, err := NewAlertRejectedHandler(aplicador)
+	return consumidorDeRechazosConLogger(t, aplicador, dlq, loggerMudo())
+}
+
+// consumidorDeRechazosConLogger es consumidorDeRechazos con el logger del
+// handler a elección, para las pruebas que inspeccionan lo que se loguea.
+func consumidorDeRechazosConLogger(t *testing.T, aplicador *aplicadorFalso, dlq *dlqFalsa, logger *slog.Logger) *Consumer {
+	t.Helper()
+
+	h, err := NewAlertRejectedHandler(aplicador, logger)
 	if err != nil {
 		t.Fatalf("error inesperado: %v", err)
 	}
@@ -130,23 +141,94 @@ func TestAlertRejectedEntregaElRechazoAlCasoDeUso(t *testing.T) {
 	}
 }
 
-// El actor es el emisor penalizado: sin él no hay a quién penalizar y el
-// mensaje es inválido, no transitorio.
-func TestAlertRejectedConActorNuloVaALaDLQ(t *testing.T) {
-	aplicador, dlq := &aplicadorFalso{}, &dlqFalsa{}
-	c := consumidorDeRechazos(t, aplicador, dlq)
+// La alerta de un emisor dado de baja tiene issuer_id = NULL y su alert.rejected
+// sale sin actor: no hay a quién penalizar. El mensaje se confirma sin efecto y
+// nunca va a la DLQ ni se reintenta.
+func TestAlertRejectedSinActorSeConfirmaSinEfecto(t *testing.T) {
+	cuerpoSinClave, err := json.Marshal(map[string]any{
+		"eventId":   uuid.NewString(),
+		"eventType": "alert.rejected",
+		"payload":   payloadDeRechazo("NO_VEHICLE"),
+	})
+	if err != nil {
+		t.Fatalf("no se pudo armar el cuerpo: %v", err)
+	}
 
-	d, a := entrega(cuerpoRechazo(t, uuid.New(), nil, payloadDeRechazo("NO_VEHICLE")), 0)
+	casos := map[string][]byte{
+		"actor null":         cuerpoRechazo(t, uuid.New(), nil, payloadDeRechazo("NO_VEHICLE")),
+		"sin clave actor":    cuerpoSinClave,
+		"rechazo sin fraude": cuerpoRechazo(t, uuid.New(), nil, payloadDeRechazo("EVIDENCE_UNREADABLE")),
+	}
+
+	for nombre, cuerpo := range casos {
+		t.Run(nombre, func(t *testing.T) {
+			aplicador, dlq := &aplicadorFalso{}, &dlqFalsa{}
+			c := consumidorDeRechazos(t, aplicador, dlq)
+
+			d, a := entrega(cuerpo, 0)
+			c.process(t.Context(), d)
+
+			if len(aplicador.recibidos) != 0 {
+				t.Errorf("sin actor no hay a quién penalizar: no se debe aplicar nada")
+			}
+			if acks, nacks, _ := a.contadores(); acks != 1 || nacks != 0 {
+				t.Errorf("acks=%d nacks=%d, se esperaba un único ack", acks, nacks)
+			}
+			if dlq.llamadas != 0 {
+				t.Errorf("la falta de actor no manda el mensaje a la dlq")
+			}
+		})
+	}
+}
+
+// El ack sin actor deja constancia en INFO, con el eventId y sin más datos.
+func TestAlertRejectedSinActorDejaConstanciaEnInfo(t *testing.T) {
+	var salida bytes.Buffer
+	logger := slog.New(slog.NewTextHandler(&salida, &slog.HandlerOptions{Level: slog.LevelDebug}))
+	c := consumidorDeRechazosConLogger(t, &aplicadorFalso{}, &dlqFalsa{}, logger)
+
+	eventID := uuid.New()
+	d, _ := entrega(cuerpoRechazo(t, eventID, nil, payloadDeRechazo("NO_VEHICLE")), 0)
 	c.process(t.Context(), d)
 
-	if len(aplicador.recibidos) != 0 {
-		t.Errorf("no se debe aplicar nada sin actor")
+	log := salida.String()
+	if !strings.Contains(log, "level=INFO") || !strings.Contains(log, eventID.String()) {
+		t.Errorf("se esperaba un log INFO con el eventId, hubo: %q", log)
 	}
-	if acks, nacks, _ := a.contadores(); acks != 1 || nacks != 0 {
-		t.Errorf("acks=%d nacks=%d, se esperaba ack tras derivar a la dlq", acks, nacks)
+	if strings.Contains(log, "level=WARN") || strings.Contains(log, "level=ERROR") {
+		t.Errorf("la falta de actor es un caso esperado, no un aviso ni un error: %q", log)
 	}
-	if dlq.derivados() != 1 || dlq.colas[0] != colaDePrueba {
-		t.Errorf("se esperaba una derivación a %q, hubo %v", colaDePrueba, dlq.colas)
+}
+
+// Sin actor no se salta la validación: un payload inválido es un defecto del
+// productor y va a la DLQ aunque el actor falte.
+func TestAlertRejectedSinActorConPayloadInvalidoVaALaDLQ(t *testing.T) {
+	casos := map[string]any{
+		"sin payload":          nil,
+		"payload no es objeto": "texto",
+		"sin alert_id":         map[string]any{"reason_codes": []string{"NO_VEHICLE"}},
+		"sin reason_codes":     map[string]any{"alert_id": uuid.NewString()},
+		"reason_codes vacío":   payloadDeRechazo(),
+	}
+
+	for nombre, payload := range casos {
+		t.Run(nombre, func(t *testing.T) {
+			aplicador, dlq := &aplicadorFalso{}, &dlqFalsa{}
+			c := consumidorDeRechazos(t, aplicador, dlq)
+
+			d, a := entrega(cuerpoRechazo(t, uuid.New(), nil, payload), 0)
+			c.process(t.Context(), d)
+
+			if len(aplicador.recibidos) != 0 {
+				t.Errorf("un mensaje inválido no debe llegar al caso de uso")
+			}
+			if acks, nacks, _ := a.contadores(); acks != 1 || nacks != 0 {
+				t.Errorf("acks=%d nacks=%d, se esperaba ack tras derivar a la dlq", acks, nacks)
+			}
+			if dlq.derivados() != 1 || dlq.colas[0] != colaDePrueba {
+				t.Errorf("se esperaba una derivación a %q, hubo %v", colaDePrueba, dlq.colas)
+			}
+		})
 	}
 }
 
@@ -247,7 +329,7 @@ func TestAlertRejectedConErrorDeBaseNoConfirma(t *testing.T) {
 }
 
 func TestNewAlertRejectedHandlerExigeElCasoDeUso(t *testing.T) {
-	if _, err := NewAlertRejectedHandler(nil); err == nil {
+	if _, err := NewAlertRejectedHandler(nil, loggerMudo()); err == nil {
 		t.Error("se esperaba un error sin caso de uso")
 	}
 }
