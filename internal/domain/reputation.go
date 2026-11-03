@@ -120,6 +120,9 @@ const (
 	// UserStatusReasonReportsThreshold indica que el usuario pasó a revisión
 	// por alcanzar REPORT_REVIEW_THRESHOLD reportes.
 	UserStatusReasonReportsThreshold UserStatusReason = "REPORTS_THRESHOLD"
+	// UserStatusReasonInheritedOnSignup indica que la cuenta nació en revisión
+	// porque el mismo DNI había sido dado de baja con una sanción vigente (US-11).
+	UserStatusReasonInheritedOnSignup UserStatusReason = "INHERITED_ON_SIGNUP"
 )
 
 // EventTypeUserStatusChanged es el tipo del evento que anuncia un cambio de
@@ -137,6 +140,25 @@ type UserStatusChanged struct {
 	UserID        uuid.UUID
 	AccountStatus AccountStatus
 	Reason        UserStatusReason
+}
+
+// userStatusChangedPayload es el payload de user.status.changed en el outbox,
+// en snake_case como fija el contrato. El worker lo lee con la misma forma.
+type userStatusChangedPayload struct {
+	UserID        string `json:"user_id"`
+	AccountStatus string `json:"account_status"`
+	Reason        string `json:"reason"`
+}
+
+// NewUserStatusChangedOutboxEvent arma la fila de outbox de un
+// user.status.changed, lista para persistirse en la misma transacción que el
+// cambio de estado.
+func NewUserStatusChangedOutboxEvent(userID uuid.UUID, status AccountStatus, reason UserStatusReason) (OutboxEvent, error) {
+	return NewOutboxEvent(EventTypeUserStatusChanged, userStatusChangedPayload{
+		UserID:        userID.String(),
+		AccountStatus: string(status),
+		Reason:        string(reason),
+	})
 }
 
 // NewUserStatusChanged arma el evento a partir de un OutboxEvent ya

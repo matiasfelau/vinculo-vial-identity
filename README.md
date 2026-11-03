@@ -259,6 +259,234 @@ además el secreto `INTERNAL_SERVICE_TOKEN` en la cabecera
 con uno incorrecto), el servidor responde `401` — incluso para una ruta que
 no existe, para no delatar por el status qué rutas expone.
 
+## Baja de cuenta y retención legal (US-11)
+
+El usuario puede eliminar su cuenta desde la app, confirmándola con su
+contraseña. La baja borra todo lo operativo y deja un único registro mínimo,
+aislado y cifrado, por tres años: el que exige el art. 16 inc. 5 de la Ley
+25.326 y que se destruye al vencer (art. 4 inc. 7).
+
+```
+App       Configuración → Eliminar cuenta → pantalla informativa → contraseña
+          DELETE /api/v1/users/me { "password": "…" }
+Kong      jwt → token-offloading (X-User-Id) → rate-limiting (3/min, 10/h)
+Identity  verifica la contraseña (Argon2) → 401 INVALID_PASSWORD si no coincide
+          TX:
+            legal_hold.user_holds ← user_id, dni_sealed, deleted_at, destroy_at
+                                    (+ dni_hmac y sanción, si estaba penalizada)
+            borra las sesiones · borra la fila de users
+            outbox ← user.sessions.revoked + user.deleted   (actor = user_id)
+          → 204
+```
+
+### Endpoint
+
+`DELETE /api/v1/users/me`, detrás de Kong con `jwt` y `token-offloading`. Kong
+inyecta `X-User-Id`, que este servicio toma como el usuario autenticado: la baja
+actúa siempre sobre ese usuario, sin ningún identificador en la ruta ni en el
+body, así que no hay forma de pedir la baja de otra cuenta. Como pasa con el
+resto de las rutas públicas, el servicio confía en que solo Kong lo alcanza
+(puerto sin publicar fuera de la red de la plataforma); una petición sin un
+`X-User-Id` válido se rechaza.
+
+Body: `{ "password": "<string>" }`, JSON plano (la reautenticación sobre una
+sesión ya validada no lleva el wrapper HPKE; la confidencialidad la aporta
+HTTPS). Máximo 4 KiB y, como en el alta, hasta 128 caracteres.
+
+| Status | `code` | Caso | Emite |
+|---|---|---|---|
+| 204 | — | Baja realizada. También si el usuario ya no existe: es idempotente y no revela nada | Identity |
+| 400 | `INVALID_BODY` | Body ausente, ilegible o sin `password` | Identity |
+| 401 | — | JWT ausente o inválido | Kong |
+| 401 | `INVALID_PASSWORD` | La contraseña no coincide | Identity |
+| 401 | `UNAUTHORIZED` | Falta `X-User-Id` o no es un UUID: la petición no pasó por Kong | Identity |
+| 429 | — | Rate limit | Kong |
+| 503 | `DEPENDENCY_UNAVAILABLE` | Base caída o en timeout; header `Retry-After` | Identity |
+
+Los errores usan el formato vigente (`{ "error": "…", "code": "…" }`). Un fallo
+inesperado es un `500` genérico: el detalle queda en el log, nunca en la
+respuesta. La baja no hace ninguna llamada síncrona saliente: lo único externo
+es la base, acotada por `POSTGRES_STATEMENT_TIMEOUT`.
+
+`UNAUTHORIZED` no está en la tabla del contrato de US-11: es el caso de una
+petición que se saltó el gateway, que el contrato asigna a Kong. Se agrega para
+que el servicio falle cerrado en vez de actuar sobre un usuario sin autenticar.
+
+### Qué se borra y qué se conserva
+
+| Se borra | Se conserva (aislado) |
+|---|---|
+| La fila de `users` (email, contraseña, `dni_hashed`, `dni_encrypted`, estado y reputación) | `legal_hold.user_holds` |
+| Las `sessions` del usuario | |
+
+Todo el resto lo borran los demás servicios al consumir `user.sessions.revoked`
+(Notification: device tokens) y `user.deleted` (Alert y Vehicle). La baja es una
+única transacción: el hold, el borrado de sesiones y de usuario, y los dos
+eventos del outbox se confirman juntos o no se confirma ninguno. La fila del
+usuario se lee con `SELECT … FOR UPDATE` dentro de esa transacción, así que un
+reporte o una penalización que llega a la vez espera, y el hold nunca guarda una
+sanción más vieja que la fila que se borra.
+
+### Eventos
+
+`user.sessions.revoked` (con `reason: ACCOUNT_DELETED`) y `user.deleted` salen
+por el outbox con el usuario como `actor`. Ver [Eventos publicados](#eventos-publicados).
+
+### `legal_hold.user_holds`
+
+Esquema `legal_hold`, tabla `user_holds`. Se crea con una migración explícita
+(SQL en `internal/repository/postgres/legal_hold_schema.go`), no con
+`AutoMigrate`, que solo crea tablas en el esquema por defecto.
+
+| Columna | Tipo | Nota |
+|---|---|---|
+| `user_id` | uuid PK | |
+| `dni_sealed` | text not null | base64 de `enc‖ct`: el DNI sellado con HPKE |
+| `deleted_at` | timestamptz not null | |
+| `destroy_at` | timestamptz not null, indexada | `deleted_at + LEGAL_HOLD_DAYS` |
+| `dni_hmac` | varchar(64) null, indexada (parcial) | El mismo Blind Index que `users.dni_hashed`; solo si estaba penalizada |
+| `account_status`, `reputation_score`, `report_count` | null | Solo si estaba penalizada |
+
+"Penalizada" es `account_status = UNDER_REVIEW`, `report_count > 0` o
+`reputation_score < 0`. Reglas:
+
+- **Ningún endpoint lee los holds.** Solo los tocan la baja, el signup
+  (únicamente `dni_hmac` y los campos de sanción) y el sweeper.
+- **Nunca se loguean** el DNI, la contraseña, `dni_sealed` ni `dni_hmac`.
+- **Esquema y rol propios en producción.** La migración del arranque no ejecuta
+  nada si la tabla ya existe, así que el servicio no necesita permisos de DDL:
+  el DBA crea el esquema con un rol propio y le da al rol del servicio solo lo
+  que usa.
+
+  ```sql
+  -- una sola vez, con un administrador: usar el SQL de migrateLegalHold, y después
+  CREATE ROLE legal_hold_owner NOLOGIN;
+  ALTER SCHEMA legal_hold OWNER TO legal_hold_owner;
+  ALTER TABLE legal_hold.user_holds OWNER TO legal_hold_owner;
+  REVOKE ALL ON SCHEMA legal_hold FROM PUBLIC;
+  GRANT USAGE ON SCHEMA legal_hold TO identity_app;           -- rol de conexión del servicio
+  GRANT SELECT, INSERT, UPDATE, DELETE ON legal_hold.user_holds TO identity_app;
+  ```
+
+  El servicio usa una única conexión, porque la baja escribe `legal_hold` y borra
+  `users` en la misma transacción. Quien necesite leer los holds a mano (el
+  procedimiento legal de abajo) se conecta con otro rol, no con el del servicio.
+
+### Herencia de la sanción al registrarse otra vez
+
+Si el mismo DNI se vuelve a registrar mientras el hold sigue vigente
+(`destroy_at > now`) y tiene sanción, la cuenta nueva **hereda** `account_status`,
+`reputation_score` y `report_count`, y esos campos —junto con `dni_hmac`— se
+anulan en el hold. Todo ocurre en la misma transacción que el `INSERT` del
+usuario (`UserRepository.Create`):
+
+- Un alta que falla (email repetido, base caída, outbox caído) no consume la
+  sanción del hold: el reclamo se deshace con el resto.
+- La sanción no se hereda dos veces: tras el primer alta el hold ya no tiene
+  `dni_hmac`. Dos altas simultáneas con el mismo DNI se serializan en el
+  bloqueo del hold y en el índice único de `users.dni_hashed`.
+- Si la cuenta queda `UNDER_REVIEW`, se encola `user.status.changed` con
+  `reason: INHERITED_ON_SIGNUP` en la misma transacción. Con una sanción que no
+  llega a revisión (solo reputación o reportes) se hereda sin publicar nada.
+- Un hold vencido pero todavía no barrido no se hereda.
+
+### Sweeper
+
+`internal/service/legalhold` destruye los holds con `destroy_at <= now`: una vez
+al arrancar y después cada `LEGAL_HOLD_SWEEP_INTERVAL`, de a lotes de
+`LEGAL_HOLD_SWEEP_BATCH_SIZE`. Es el primer proceso periódico propio del
+servicio. Es seguro con varias réplicas (`FOR UPDATE SKIP LOCKED` sobre un CTE
+materializado: se reparten el trabajo y nunca borran más que el lote) y se
+apaga ordenadamente: al recibir `SIGTERM` el barrido en curso se corta y el
+proceso espera a que termine antes de cerrar la base. Un fallo se loguea en
+ERROR y el próximo ciclo reintenta. Solo loguea cuántos holds destruyó.
+
+### Custodia de la clave y procedimiento ante un requerimiento judicial
+
+El DNI del hold se sella con **HPKE RFC 9180, modo base** (DHKEM(X25519,
+HKDF-SHA256) / HKDF-SHA256 / AES-256-GCM, la misma suite del resto del
+servicio) hacia una clave que este servicio no tiene:
+
+| | |
+|---|---|
+| Clave pública | `LEGAL_HOLD_PUBLIC_KEY`, en el entorno del servicio. Con ella solo se puede sellar |
+| Clave privada | La genera el responsable legal **fuera de línea**. Ningún servicio la carga y nunca entra al repo |
+| `info` HPKE | UTF-8 de `"vv-legal-hold:" + user_id`: un criptograma copiado a la fila de otro usuario no abre |
+| Texto plano | El DNI canónico (solo dígitos) |
+| `dni_sealed` | base64 de `enc‖ct` |
+
+Cada sellado usa una clave efímera nueva, así que dos bajas del mismo DNI dan
+criptogramas distintos: el hold no permite saber que dos bajas son de la misma
+persona (para eso existe `dni_hmac`, y solo en cuentas penalizadas).
+
+**Generar el par** (una sola vez, en la máquina del responsable legal):
+
+```bash
+go run ./cmd/legalhold-keygen -out /ruta/fuera/del/repo/legal-hold.key
+```
+
+Imprime la clave pública por la salida estándar (es el valor de
+`LEGAL_HOLD_PUBLIC_KEY`) y escribe la privada en esa ruta, con permisos `0600`.
+Rechaza la ruta —antes de generar nada— si cae dentro de un repositorio
+(cualquier ancestro con `.git` o `go.mod`, resolviendo enlaces simbólicos), y
+nunca pisa un archivo existente. La privada nunca se imprime.
+
+**Custodia.** La privada se guarda sin conexión (un medio cifrado, en poder del
+responsable legal, con una copia de resguardo): perderla es perder el acceso a
+todos los holds, y filtrarla es poder abrirlos todos. No va en variables de
+entorno, en el orquestador, en un gestor de secretos del servicio ni en ningún
+repo. Rotarla no vuelve a sellar los holds existentes: cada hold se abre con la
+clave con que se selló, así que las privadas retiradas se conservan hasta que
+venza el último hold sellado con ellas.
+
+**Ante un requerimiento judicial** que exija el DNI de un usuario dado de baja,
+dentro del plazo de retención:
+
+1. Con un rol que pueda leer `legal_hold` (no el del servicio), obtener la fila
+   del usuario por su `user_id`:
+
+   ```sql
+   SELECT user_id, dni_sealed FROM legal_hold.user_holds WHERE user_id = '<uuid>';
+   ```
+
+2. En la máquina que custodia la clave, abrirla. La clave llega **por la entrada
+   estándar** (nunca por flag ni por variable de entorno, que quedan en el
+   historial y en la lista de procesos); el `user_id` y el `dni_sealed`, por
+   flags:
+
+   ```bash
+   go run ./cmd/legalhold-open -user-id <uuid> -sealed <dni_sealed> < /ruta/segura/legal-hold.key
+   ```
+
+   Imprime el DNI por la salida estándar. Con una clave, un usuario o un
+   criptograma que no coinciden falla con un mensaje genérico, sin detalle
+   criptográfico y sin imprimir nada.
+
+3. Dejar constancia del requerimiento fuera de este servicio (quién lo pidió,
+   cuándo y a qué usuario se abrió): el servicio no registra aperturas porque
+   nunca participa de ellas.
+
+Un hold vencido ya no existe: lo destruyó el sweeper.
+
+### Variables
+
+| Variable | Valor | Nota |
+|---|---|---|
+| `LEGAL_HOLD_PUBLIC_KEY` | Pública X25519 en base64 | **Obligatoria.** Se valida al arrancar sellando un valor de prueba: una clave que no sirve hace fallar el arranque |
+| `LEGAL_HOLD_DAYS` | `1095` | 3 años (art. 2561 del CCyC y art. 62 del CP). Tiene que coincidir con Alert |
+| `LEGAL_HOLD_SWEEP_INTERVAL` | `1h` | Cada cuánto corre el sweeper |
+| `LEGAL_HOLD_SWEEP_BATCH_SIZE` | `500` | Holds por sentencia de borrado |
+
+Para ver el barrido funcionando en local, bajar `LEGAL_HOLD_SWEEP_INTERVAL` y
+mover `destroy_at` al pasado de un hold de prueba.
+
+### Residual aceptado
+
+Un Access Token emitido antes de la baja sigue siendo válido hasta su `exp`
+(`ACCESS_TOKEN_TTL_MINUTES`, 15 minutos): son JWT stateless. Alert lo cubre con
+la restricción `DELETED` (`403 ACCOUNT_DELETED`) durante ese plazo; Identity no
+puede revocarlos.
+
 ## Puesta en marcha
 
 ```bash
@@ -272,6 +500,16 @@ son las dos claves que salen de acá: la primera se embebe en el frontend para
 cifrar el payload del registro, la segunda va al Gateway para verificar los
 Access Token. Cada par (privada + pública) tiene que salir de la misma
 corrida.
+
+`LEGAL_HOLD_PUBLIC_KEY` es obligatoria (el servicio no arranca sin ella, ni
+compose) y **no** sale de `genkeys`: el par del responsable legal se genera con
+`cmd/legalhold-keygen`, fuera de línea y con la privada fuera del repo. Ver
+[Baja de cuenta y retención legal](#baja-de-cuenta-y-retención-legal-us-11).
+Para desarrollo local alcanza con generar un par de prueba:
+
+```bash
+go run ./cmd/legalhold-keygen -out ~/legal-hold-dev.key   # imprime la pública
+```
 
 Para correr el servicio fuera del contenedor hace falta un Postgres accesible y
 `POSTGRES_HOST` apuntando a él:
@@ -315,6 +553,8 @@ se despliega como instancia única por entorno.
 ```bash
 go run ./cmd/api                              # levantar el servicio
 go run ./cmd/genkeys                          # generar el material criptográfico
+go run ./cmd/legalhold-keygen -out <ruta>     # par del responsable legal (US-11), privada fuera del repo
+go run ./cmd/legalhold-open -user-id <uuid> -sealed <b64> < clave.key   # abrir un hold (solo ante un requerimiento judicial)
 go test ./...                                 # tests unitarios
 go test -cover ./...                          # con cobertura
 go vet ./...                                  # análisis estático
@@ -411,8 +651,8 @@ interna del patrón Transactional Outbox (US-06), no un dato de negocio.
 | campo | tipo | notas |
 |---|---|---|
 | `id` | uuid | PK; mismo valor que `eventId` al publicarse |
-| `type` | varchar(64) | tipo de evento; hoy solo `user.sessions.revoked` |
-| `payload` | jsonb | `{"user_id": "…", "reason": "REUSE_DETECTED"}` |
+| `type` | varchar(64) | tipo de evento: `user.sessions.revoked`, `user.status.changed` (US-08) o `user.deleted` (US-11) |
+| `payload` | jsonb | por tipo; p. ej. `{"user_id": "…", "reason": "REUSE_DETECTED"}` |
 | `status` | varchar(16) | `pending` / `sent`, indexada junto a `created_at` |
 | `attempts` | int | incrementado en cada intento fallido |
 | `last_error` | text | nullable; diagnóstico del último fallo |
@@ -443,6 +683,13 @@ La clave única `(event_id, consumer)` es lo que hace idempotente al consumidor:
 `INSERT … ON CONFLICT DO NOTHING` sin filas afectadas significa que el evento ya
 se procesó. El mismo evento visto por otra cola no es un duplicado.
 
+Tabla `legal_hold.user_holds` (US-11), en su propio esquema y con una migración
+explícita en `ensureLegalHoldSchema`. Es el registro mínimo que sobrevive a la
+baja de cuenta; su estructura, sus reglas y la custodia de la clave están en
+[Baja de cuenta y retención legal](#baja-de-cuenta-y-retención-legal-us-11).
+`EPHEMERAL_DB` también borra este esquema: un hold de una corrida anterior le
+haría heredar una sanción a un registro de la siguiente.
+
 ### Clasificación de errores de la base
 
 `internal/repository/postgres.classifyDBError` traduce cualquier error de
@@ -458,9 +705,9 @@ un equivalente al "5xx del upstream" de una dependencia HTTP.
 
 ## Eventos publicados
 
-El servicio publica dos eventos, `user.sessions.revoked` y
-`user.status.changed` (US-08), con el Event Envelope estándar de la plataforma.
-Los dos salen por el outbox. El payload no lleva PII: quien necesite datos de
+El servicio publica tres eventos, `user.sessions.revoked`,
+`user.status.changed` (US-08) y `user.deleted` (US-11), con el Event Envelope
+estándar de la plataforma. Los tres salen por el outbox. El payload no lleva PII: quien necesite datos de
 la persona los pide a este servicio. El alta no publica nada: Core confirmó que
 `user.created` no tiene consumidor.
 
@@ -558,11 +805,41 @@ publica con el mismo `eventId` entre reintentos.
 }
 ```
 
+`reason` puede ser `REPORTS_THRESHOLD` (el emisor llegó al umbral de reportes) o,
+desde US-11, `INHERITED_ON_SIGNUP`: la cuenta nació en revisión porque el mismo
+DNI había sido dado de baja con una sanción vigente. Alert ignora el `reason`.
+
 **Levantar la revisión** queda fuera de alcance de US-08 (es manual, para un
 caso de uso futuro de administración). Hacerlo a mano en la base **no alcanza**:
 Alert mantiene una proyección alimentada por este evento, así que además de
 poner `account_status = 'ACTIVE'` hay que emitir `user.status.changed` con
 `ACTIVE`. Sin ese evento, Alert sigue bloqueando al emisor.
+
+### `user.deleted`
+
+Anuncia la baja de una cuenta (US-11). Alert lo consume para desvincular al
+usuario de las alertas que emitió y recibió, y Vehicle para borrar sus
+vehículos. `actor` es el usuario dado de baja; el payload solo lleva cuándo, sin
+ningún dato personal.
+
+Se escribe en `outbox_events` en la misma transacción que el borrado, junto con
+`user.sessions.revoked` (con `reason: ACCOUNT_DELETED`, que Notification usa
+para borrar los device tokens), y el worker lo publica con el mismo `eventId`
+entre reintentos. `deleted_at` es el de la baja, no el del intento de
+publicación.
+
+```json
+{
+  "eventId": "…",
+  "eventType": "user.deleted",
+  "timestamp": "2026-11-02T15:04:06Z",
+  "producer": "vinculo-vial-identity",
+  "actor": "6f2a4c1e-9d3b-4f5a-8c7d-1e2f3a4b5c6d",
+  "payload": {
+    "deleted_at": "2026-11-02T15:04:05.123456789Z"
+  }
+}
+```
 
 ## Consumo de eventos (US-08)
 
@@ -673,7 +950,13 @@ nombre del estado, nunca el detalle de un error.
 - **Contrato desincronizado con Frontend y Gateway.** El payload interno
   reemplazó `biometric_verified` por `tramite`/`sexo`/`selfie`; hasta que los
   otros dos repos repliquen el cambio, no son interoperables entre sí.
-- **Migraciones versionadas**, en lugar de `AutoMigrate`.
+- **Migraciones versionadas**, en lugar de `AutoMigrate`. El esquema
+  `legal_hold` (US-11) ya usa SQL explícito e idempotente, pero tampoco está
+  versionado.
+- **Auditoría de la apertura de holds.** Abrir un hold con `legalhold-open` no
+  deja registro en ningún sistema: el servicio nunca participa, y el Audit
+  Service quedó fuera del alcance de US-11. El procedimiento legal pide dejar
+  constancia por fuera.
 - **Rate limiting** de los endpoints de alta y login. Argon2id reserva 64 MiB
   por derivación concurrente (el login también deriva uno, vía `Verify`, en
   cada intento) y RENAPER agrega una llamada de red externa por alta, así que

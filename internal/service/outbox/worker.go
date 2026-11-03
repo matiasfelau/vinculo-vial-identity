@@ -20,8 +20,9 @@ import (
 )
 
 // eventTypeSessionsRevoked es el tipo del evento de la Defensa Activa de
-// US-03. Coincide con el tipo con que lo arma session.RefreshService. El otro
-// tipo que pasa por el outbox es domain.EventTypeUserStatusChanged (US-08).
+// US-03. Coincide con el tipo con que lo arma session.RefreshService. Los otros
+// tipos que pasan por el outbox son domain.EventTypeUserStatusChanged (US-08) y
+// domain.EventTypeUserDeleted (US-11).
 const eventTypeSessionsRevoked = "user.sessions.revoked"
 
 // connectionKeeper lo implementa el publisher real: restablece la conexión con
@@ -175,6 +176,25 @@ func (w *Worker) publish(ctx context.Context, event domain.OutboxEvent) error {
 		}
 		evt := domain.NewUserStatusChanged(event.ID, userID, domain.AccountStatus(payload.AccountStatus), domain.UserStatusReason(payload.Reason))
 		return w.publisher.PublishUserStatusChanged(ctx, evt)
+
+	case domain.EventTypeUserDeleted:
+		var payload struct {
+			UserID    string `json:"user_id"`
+			DeletedAt string `json:"deleted_at"`
+		}
+		if err := json.Unmarshal(event.Payload, &payload); err != nil {
+			return fmt.Errorf("outbox worker: payload de %s ilegible: %w", event.Type, err)
+		}
+		userID, err := uuid.Parse(payload.UserID)
+		if err != nil {
+			return fmt.Errorf("outbox worker: user_id de %s inválido: %w", event.Type, err)
+		}
+		deletedAt, err := time.Parse(time.RFC3339Nano, payload.DeletedAt)
+		if err != nil {
+			return fmt.Errorf("outbox worker: deleted_at de %s inválido: %w", event.Type, err)
+		}
+		evt := domain.NewUserDeleted(event.ID, userID, deletedAt)
+		return w.publisher.PublishUserDeleted(ctx, evt)
 
 	default:
 		return fmt.Errorf("outbox worker: tipo de evento desconocido: %s", event.Type)

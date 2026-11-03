@@ -36,6 +36,10 @@ func (publisherInerte) PublishUserStatusChanged(context.Context, domain.UserStat
 	return nil
 }
 
+func (publisherInerte) PublishUserDeleted(context.Context, domain.UserDeleted) error {
+	return nil
+}
+
 func esperarEstado(t *testing.T, w *Worker, estado string) {
 	t.Helper()
 	limite := time.Now().Add(2 * time.Second)
@@ -175,6 +179,10 @@ func (publisherQueFalla) PublishSessionsRevoked(context.Context, domain.Sessions
 }
 
 func (publisherQueFalla) PublishUserStatusChanged(context.Context, domain.UserStatusChanged) error {
+	return errors.New("el broker no responde")
+}
+
+func (publisherQueFalla) PublishUserDeleted(context.Context, domain.UserDeleted) error {
 	return errors.New("el broker no responde")
 }
 

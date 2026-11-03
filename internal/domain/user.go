@@ -53,6 +53,22 @@ type User struct {
 	UpdatedAt   time.Time
 }
 
+// IsPenalized informa si la cuenta tiene alguna sanción (US-11): está en
+// revisión, recibió reportes o tiene reputación negativa. Es lo que decide si
+// la baja guarda en el hold los datos con que reconocer al mismo DNI si se
+// vuelve a registrar.
+func (u *User) IsPenalized() bool {
+	return u.AccountStatus == AccountStatusUnderReview || u.ReportCount > 0 || u.ReputationScore < 0
+}
+
+// InheritSanction hace que la cuenta nazca con la sanción que dejó un hold
+// previo del mismo DNI (US-11).
+func (u *User) InheritSanction(s HoldSanction) {
+	u.AccountStatus = s.AccountStatus
+	u.ReputationScore = s.ReputationScore
+	u.ReportCount = s.ReportCount
+}
+
 // NewUser construye un User válido con los invariantes del alta.
 //
 // Recibe los valores ya derivados criptográficamente: la entidad nunca ve un

@@ -85,8 +85,12 @@ type usersMock struct {
 	dniHashes []string
 }
 
-func (m *usersMock) Create(context.Context, *domain.User) error {
+func (m *usersMock) Create(context.Context, *domain.User, domain.OutboxEvent) error {
 	panic("ownership: Create no se usa en verify-ownership")
+}
+
+func (m *usersMock) FindByID(context.Context, uuid.UUID) (*domain.User, error) {
+	panic("ownership: FindByID no se usa en verify-ownership")
 }
 
 func (m *usersMock) FindByDNIHashed(context.Context, string) (*domain.User, error) {

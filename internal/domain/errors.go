@@ -65,6 +65,12 @@ var (
 	// distinguirlos habilitaría enumerar qué DNIs están registrados.
 	ErrInvalidCredentials = errors.New("domain: credenciales inválidas")
 
+	// ErrInvalidPassword indica que la contraseña con la que el usuario
+	// reautentica la baja de su cuenta (US-11) no coincide con la guardada. Es
+	// seguro distinguirlo de "usuario inexistente" porque el usuario ya está
+	// autenticado: el JWT que Kong validó es suyo. → 401 INVALID_PASSWORD.
+	ErrInvalidPassword = errors.New("domain: contraseña inválida")
+
 	// ErrInvalidSession indica que se intentó construir una sesión inconsistente.
 	// Es un error de programación, no un dato inválido del cliente. → 500.
 	ErrInvalidSession = errors.New("domain: sesión inconsistente")

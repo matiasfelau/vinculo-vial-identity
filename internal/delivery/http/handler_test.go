@@ -97,6 +97,7 @@ type testServer struct {
 	signInSvc  *signInServiceMock
 	refreshSvc *refreshServiceMock
 	logoutSvc  *logoutServiceMock
+	deleteSvc  *deleteAccountServiceMock
 	logs       *strings.Builder
 }
 
@@ -107,6 +108,7 @@ func newTestServer(t *testing.T, ready func(context.Context) error) *testServer 
 	signInSvc := &signInServiceMock{accessToken: "access-token", refreshToken: "refresh-token"}
 	refreshSvc := &refreshServiceMock{accessToken: "access-token-rotado", refreshToken: "refresh-token-rotado"}
 	logoutSvc := &logoutServiceMock{}
+	deleteSvc := &deleteAccountServiceMock{}
 	logs := &strings.Builder{}
 
 	router, err := delivery.NewRouter(delivery.RouterConfig{
@@ -114,6 +116,7 @@ func newTestServer(t *testing.T, ready func(context.Context) error) *testServer 
 		SignIn:         signInSvc,
 		Refresh:        refreshSvc,
 		Logout:         logoutSvc,
+		DeleteAccount:  deleteSvc,
 		Logger:         slog.New(slog.NewTextHandler(logs, &slog.HandlerOptions{Level: slog.LevelDebug})),
 		ReadinessCheck: ready,
 	})
@@ -121,7 +124,7 @@ func newTestServer(t *testing.T, ready func(context.Context) error) *testServer 
 		t.Fatalf("no se pudo armar el router: %v", err)
 	}
 
-	return &testServer{handler: router, svc: svc, signInSvc: signInSvc, refreshSvc: refreshSvc, logoutSvc: logoutSvc, logs: logs}
+	return &testServer{handler: router, svc: svc, signInSvc: signInSvc, refreshSvc: refreshSvc, logoutSvc: logoutSvc, deleteSvc: deleteSvc, logs: logs}
 }
 
 func (ts *testServer) post(t *testing.T, path, body string) *httptest.ResponseRecorder {
@@ -703,10 +706,11 @@ func TestRutasYMetodosNoSoportados(t *testing.T) {
 func TestNewRouterExigeElServicio(t *testing.T) {
 	t.Run("sin servicio de registro", func(t *testing.T) {
 		cfg := delivery.RouterConfig{
-			SignIn:  &signInServiceMock{},
-			Refresh: &refreshServiceMock{},
-			Logout:  &logoutServiceMock{},
-			Logger:  slog.New(slog.NewTextHandler(io.Discard, nil)),
+			SignIn:        &signInServiceMock{},
+			Refresh:       &refreshServiceMock{},
+			Logout:        &logoutServiceMock{},
+			DeleteAccount: &deleteAccountServiceMock{},
+			Logger:        slog.New(slog.NewTextHandler(io.Discard, nil)),
 		}
 		if _, err := delivery.NewRouter(cfg); err == nil {
 			t.Error("se esperaba un error al armar el router sin servicio de registro")
@@ -715,10 +719,11 @@ func TestNewRouterExigeElServicio(t *testing.T) {
 
 	t.Run("sin servicio de login", func(t *testing.T) {
 		cfg := delivery.RouterConfig{
-			SignUp:  &serviceMock{},
-			Refresh: &refreshServiceMock{},
-			Logout:  &logoutServiceMock{},
-			Logger:  slog.New(slog.NewTextHandler(io.Discard, nil)),
+			SignUp:        &serviceMock{},
+			Refresh:       &refreshServiceMock{},
+			Logout:        &logoutServiceMock{},
+			DeleteAccount: &deleteAccountServiceMock{},
+			Logger:        slog.New(slog.NewTextHandler(io.Discard, nil)),
 		}
 		if _, err := delivery.NewRouter(cfg); err == nil {
 			t.Error("se esperaba un error al armar el router sin servicio de login")
@@ -727,10 +732,11 @@ func TestNewRouterExigeElServicio(t *testing.T) {
 
 	t.Run("sin servicio de refresh", func(t *testing.T) {
 		cfg := delivery.RouterConfig{
-			SignUp: &serviceMock{},
-			SignIn: &signInServiceMock{},
-			Logout: &logoutServiceMock{},
-			Logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
+			SignUp:        &serviceMock{},
+			SignIn:        &signInServiceMock{},
+			Logout:        &logoutServiceMock{},
+			DeleteAccount: &deleteAccountServiceMock{},
+			Logger:        slog.New(slog.NewTextHandler(io.Discard, nil)),
 		}
 		if _, err := delivery.NewRouter(cfg); err == nil {
 			t.Error("se esperaba un error al armar el router sin servicio de refresh")
@@ -739,13 +745,27 @@ func TestNewRouterExigeElServicio(t *testing.T) {
 
 	t.Run("sin servicio de logout", func(t *testing.T) {
 		cfg := delivery.RouterConfig{
-			SignUp:  &serviceMock{},
-			SignIn:  &signInServiceMock{},
-			Refresh: &refreshServiceMock{},
-			Logger:  slog.New(slog.NewTextHandler(io.Discard, nil)),
+			SignUp:        &serviceMock{},
+			SignIn:        &signInServiceMock{},
+			Refresh:       &refreshServiceMock{},
+			DeleteAccount: &deleteAccountServiceMock{},
+			Logger:        slog.New(slog.NewTextHandler(io.Discard, nil)),
 		}
 		if _, err := delivery.NewRouter(cfg); err == nil {
 			t.Error("se esperaba un error al armar el router sin servicio de logout")
+		}
+	})
+
+	t.Run("sin servicio de baja de cuenta", func(t *testing.T) {
+		cfg := delivery.RouterConfig{
+			SignUp:  &serviceMock{},
+			SignIn:  &signInServiceMock{},
+			Refresh: &refreshServiceMock{},
+			Logout:  &logoutServiceMock{},
+			Logger:  slog.New(slog.NewTextHandler(io.Discard, nil)),
+		}
+		if _, err := delivery.NewRouter(cfg); err == nil {
+			t.Error("se esperaba un error al armar el router sin servicio de baja de cuenta")
 		}
 	})
 }

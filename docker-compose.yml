@@ -64,6 +64,11 @@ services:
       # Dentro de la red de Compose el tráfico no sale del host. Fuera de acá,
       # la configuración rechaza sslmode=disable con APP_ENV=production.
       POSTGRES_SSLMODE: disable
+      # Baja de cuenta (US-11). La clave pública del responsable legal es
+      # obligatoria: el servicio no arranca sin ella, y compose tampoco. La
+      # retención tiene que coincidir con la de Alert.
+      LEGAL_HOLD_PUBLIC_KEY: "${LEGAL_HOLD_PUBLIC_KEY:?falta LEGAL_HOLD_PUBLIC_KEY, generarla con go run ./cmd/legalhold-keygen}"
+      LEGAL_HOLD_DAYS: ${LEGAL_HOLD_DAYS:-1095}
     ports:
       - "127.0.0.1:${HTTP_PORT:-8080}:8080"
     # Deliberadamente sin publicar HTTP_INTERNAL_PORT: las rutas /internal/*

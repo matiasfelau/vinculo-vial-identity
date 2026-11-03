@@ -64,6 +64,14 @@ type logoutRequest struct {
 	RefreshToken string `json:"refresh_token"`
 }
 
+// deleteAccountRequest es el único dato que la baja de cuenta (US-11) acepta:
+// la contraseña actual, en JSON plano, sin el wrapper HPKE. La baja es una
+// reautenticación sobre una sesión ya validada por Kong, y la confidencialidad
+// la aporta HTTPS, igual que con el Refresh Token de /refresh.
+type deleteAccountRequest struct {
+	Password string `json:"password"`
+}
+
 // verifyOwnershipRequest es el payload interno de US-04 que envía
 // vinculo-vial-vehicle: el contrato compartido lo transporta tal cual, sin
 // que Vehicle lo abra. DNIEnc es un único blob HPKE (enc || ciphertext), a
@@ -109,6 +117,23 @@ const (
 	// RENAPER sí respondió, pero con un error de su lado o un cuerpo fuera de
 	// contrato.
 	codeUpstreamError = "upstream_invalido"
+)
+
+// Códigos de error de la baja de cuenta (US-11). A diferencia de los de arriba,
+// los fija el contrato compartido de esa US, en mayúsculas, y no son
+// intercambiables con los de las rutas de autenticación.
+const (
+	// codeInvalidBody es el 400 de la baja: body ausente, ilegible, sin password
+	// o con una contraseña que ninguna cuenta puede tener.
+	codeInvalidBody = "INVALID_BODY"
+	// codeInvalidPassword es el 401 de la baja cuando la contraseña no coincide.
+	codeInvalidPassword = "INVALID_PASSWORD"
+	// codeUnauthorized es el 401 de la baja cuando la petición no trae un
+	// X-User-Id válido: no pasó por Kong. Kong ya rechaza antes un JWT ausente o
+	// inválido, así que acá solo llega una petición que se saltó el gateway.
+	codeUnauthorized = "UNAUTHORIZED"
+	// codeDependencyUnavailable es el 503 de la baja cuando la base no responde.
+	codeDependencyUnavailable = "DEPENDENCY_UNAVAILABLE"
 )
 
 // errorResponse es la forma única de todos los errores de la API.

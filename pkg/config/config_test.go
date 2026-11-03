@@ -26,6 +26,9 @@ func entornoMinimo() map[string]string {
 		"HMAC_SECRET":               clave,
 		"JWT_PRIVATE_KEY":           clavePEMDePrueba,
 		"INTERNAL_SERVICE_TOKEN":    strings.Repeat("a", 32),
+		// Clave pública del responsable legal (US-11): config.Load no la interpreta,
+		// solo la exige; internal/crypto/legalhold la valida de verdad.
+		"LEGAL_HOLD_PUBLIC_KEY": clave,
 	}
 }
 
@@ -56,6 +59,7 @@ func aplicar(t *testing.T, env map[string]string) {
 		"OUTBOX_WORKER_INTERVAL", "OUTBOX_WORKER_BATCH_SIZE",
 		"RABBITMQ_PREFETCH", "MAX_RETRIES", "ALERT_REJECTED_QUEUE", "FRAUD_PENALTY",
 		"ALERT_REPORTED_QUEUE", "REPORT_REVIEW_THRESHOLD",
+		"LEGAL_HOLD_PUBLIC_KEY", "LEGAL_HOLD_DAYS", "LEGAL_HOLD_SWEEP_INTERVAL", "LEGAL_HOLD_SWEEP_BATCH_SIZE",
 	} {
 		t.Setenv(k, "")
 		os.Unsetenv(k)
@@ -467,9 +471,9 @@ func TestLoadAceptaUnWorkerDeOutboxPersonalizado(t *testing.T) {
 
 func TestLoadRechazaElWorkerDeOutboxMalConfigurado(t *testing.T) {
 	cases := map[string]map[string]string{
-		"intervalo cero":     {"OUTBOX_WORKER_INTERVAL": "0s"},
-		"intervalo negativo": {"OUTBOX_WORKER_INTERVAL": "-1s"},
-		"batch size cero":    {"OUTBOX_WORKER_BATCH_SIZE": "0"},
+		"intervalo cero":      {"OUTBOX_WORKER_INTERVAL": "0s"},
+		"intervalo negativo":  {"OUTBOX_WORKER_INTERVAL": "-1s"},
+		"batch size cero":     {"OUTBOX_WORKER_BATCH_SIZE": "0"},
 		"batch size negativo": {"OUTBOX_WORKER_BATCH_SIZE": "-1"},
 	}
 
@@ -528,7 +532,7 @@ func TestLoadExigeLosSecretos(t *testing.T) {
 	obligatorias := []string{
 		"POSTGRES_USER", "POSTGRES_PASSWORD", "POSTGRES_DB",
 		"IDENTITY_HPKE_PRIVATE_KEY", "AES_KEY", "HMAC_SECRET", "JWT_PRIVATE_KEY",
-		"INTERNAL_SERVICE_TOKEN",
+		"INTERNAL_SERVICE_TOKEN", "LEGAL_HOLD_PUBLIC_KEY",
 	}
 
 	for _, faltante := range obligatorias {
@@ -558,7 +562,7 @@ func TestLoadAcumulaLosErrores(t *testing.T) {
 		t.Fatal("se esperaba un error")
 	}
 
-	for _, faltante := range []string{"POSTGRES_USER", "IDENTITY_HPKE_PRIVATE_KEY", "AES_KEY", "HMAC_SECRET", "JWT_PRIVATE_KEY", "INTERNAL_SERVICE_TOKEN"} {
+	for _, faltante := range []string{"POSTGRES_USER", "IDENTITY_HPKE_PRIVATE_KEY", "AES_KEY", "HMAC_SECRET", "JWT_PRIVATE_KEY", "INTERNAL_SERVICE_TOKEN", "LEGAL_HOLD_PUBLIC_KEY"} {
 		if !strings.Contains(err.Error(), faltante) {
 			t.Errorf("el error debería mencionar %s: %v", faltante, err)
 		}
@@ -911,5 +915,99 @@ func TestLoadDotEnvRechazaLineasMalFormadas(t *testing.T) {
 
 	if err := config.LoadDotEnv(path); err == nil {
 		t.Error("se esperaba un error por una línea sin la forma CLAVE=valor")
+	}
+}
+
+// Retención legal de la baja de cuenta (US-11): 1095 días por defecto, con el
+// barrido a intervalo y lote operativos.
+func TestLoadUsaLosDefaultsDelHold(t *testing.T) {
+	aplicar(t, entornoMinimo())
+
+	cfg, err := config.Load()
+	if err != nil {
+		t.Fatalf("error inesperado: %v", err)
+	}
+	if cfg.LegalHold.Days != 1095 {
+		t.Errorf("LEGAL_HOLD_DAYS = %d, se esperaban 1095", cfg.LegalHold.Days)
+	}
+	if cfg.LegalHold.SweepInterval != time.Hour {
+		t.Errorf("LEGAL_HOLD_SWEEP_INTERVAL = %v, se esperaba 1h", cfg.LegalHold.SweepInterval)
+	}
+	if cfg.LegalHold.SweepBatchSize != 500 {
+		t.Errorf("LEGAL_HOLD_SWEEP_BATCH_SIZE = %d, se esperaban 500", cfg.LegalHold.SweepBatchSize)
+	}
+	if cfg.LegalHold.PublicKey == "" {
+		t.Errorf("LEGAL_HOLD_PUBLIC_KEY no se cargó")
+	}
+}
+
+func TestLoadAceptaElHoldPersonalizado(t *testing.T) {
+	env := entornoMinimo()
+	env["LEGAL_HOLD_DAYS"] = "1"
+	env["LEGAL_HOLD_SWEEP_INTERVAL"] = "30s"
+	env["LEGAL_HOLD_SWEEP_BATCH_SIZE"] = "10"
+	aplicar(t, env)
+
+	cfg, err := config.Load()
+	if err != nil {
+		t.Fatalf("error inesperado: %v", err)
+	}
+	if cfg.LegalHold.Days != 1 || cfg.LegalHold.SweepInterval != 30*time.Second || cfg.LegalHold.SweepBatchSize != 10 {
+		t.Errorf("LegalHold = %+v", cfg.LegalHold)
+	}
+}
+
+func TestLoadRechazaUnHoldMalConfigurado(t *testing.T) {
+	casos := map[string]struct {
+		env      map[string]string
+		variable string
+	}{
+		"días en cero":       {map[string]string{"LEGAL_HOLD_DAYS": "0"}, "LEGAL_HOLD_DAYS"},
+		"días negativos":     {map[string]string{"LEGAL_HOLD_DAYS": "-5"}, "LEGAL_HOLD_DAYS"},
+		"días no numéricos":  {map[string]string{"LEGAL_HOLD_DAYS": "tres años"}, "LEGAL_HOLD_DAYS"},
+		"intervalo en cero":  {map[string]string{"LEGAL_HOLD_SWEEP_INTERVAL": "0s"}, "LEGAL_HOLD_SWEEP_INTERVAL"},
+		"intervalo negativo": {map[string]string{"LEGAL_HOLD_SWEEP_INTERVAL": "-1m"}, "LEGAL_HOLD_SWEEP_INTERVAL"},
+		"lote en cero":       {map[string]string{"LEGAL_HOLD_SWEEP_BATCH_SIZE": "0"}, "LEGAL_HOLD_SWEEP_BATCH_SIZE"},
+		"clave vacía":        {map[string]string{"LEGAL_HOLD_PUBLIC_KEY": "   "}, "LEGAL_HOLD_PUBLIC_KEY"},
+	}
+
+	for nombre, caso := range casos {
+		t.Run(nombre, func(t *testing.T) {
+			env := entornoMinimo()
+			for k, v := range caso.env {
+				env[k] = v
+			}
+			aplicar(t, env)
+
+			_, err := config.Load()
+			if err == nil {
+				t.Fatal("se esperaba un error")
+			}
+			if !strings.Contains(err.Error(), caso.variable) {
+				t.Errorf("el error debería nombrar %s: %v", caso.variable, err)
+			}
+		})
+	}
+}
+
+// El log de arranque informa la retención, pero no vuelca la clave.
+func TestLaConfiguracionLogueaElHoldSinLaClave(t *testing.T) {
+	env := entornoMinimo()
+	env["LEGAL_HOLD_PUBLIC_KEY"] = "clave-publica-que-no-debe-aparecer-en-el-log"
+	aplicar(t, env)
+
+	cfg, err := config.Load()
+	if err != nil {
+		t.Fatalf("error inesperado: %v", err)
+	}
+
+	var salida strings.Builder
+	slog.New(slog.NewTextHandler(&salida, nil)).Info("config", slog.Any("config", cfg))
+
+	if !strings.Contains(salida.String(), "legal_hold_days=1095") {
+		t.Errorf("el log debería informar legal_hold_days: %s", salida.String())
+	}
+	if strings.Contains(salida.String(), "clave-publica-que-no-debe-aparecer") {
+		t.Errorf("el log no debería volcar la clave: %s", salida.String())
 	}
 }

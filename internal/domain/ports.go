@@ -17,7 +17,21 @@ type UserRepository interface {
 	// cuando la base rechaza la inserción por violación de unicidad de email o
 	// de dni_hashed; la detección del duplicado se delega a la base para evitar
 	// la condición de carrera de un chequeo previo.
-	Create(ctx context.Context, u *User) error
+	//
+	// Herencia de sanción (US-11): si existe un hold vigente con el mismo Blind
+	// Index de DNI y campos de sanción, el usuario se crea con esa sanción (u se
+	// actualiza en el lugar, solo si el alta se confirma), los campos se anulan
+	// en el hold y, si el usuario queda UNDER_REVIEW, inheritedStatus se
+	// persiste en el outbox. Todo en una única transacción: un alta que falla no
+	// consume la sanción del hold, y una sanción nunca se hereda dos veces.
+	// inheritedStatus es el user.status.changed ya armado; solo se persiste si
+	// hay herencia y el estado heredado es UNDER_REVIEW.
+	Create(ctx context.Context, u *User, inheritedStatus OutboxEvent) error
+
+	// FindByID busca un usuario por su identificador. Debe devolver
+	// ErrUserNotFound (envuelto o no) cuando no existe. Lo usa la baja de
+	// cuenta (US-11), donde el identificador viene del JWT ya validado.
+	FindByID(ctx context.Context, id uuid.UUID) (*User, error)
 
 	// FindByDNIHashed busca un usuario por el Blind Index de su DNI. Es la única
 	// vía de búsqueda del login (US-02): nunca se busca por DNI en claro, que no
@@ -64,6 +78,36 @@ type ReputationRepository interface {
 	// cambia nada y devuelve ReportDuplicate. Que el usuario no exista no es
 	// un error: devuelve ReportUserNotFound.
 	ApplyReport(ctx context.Context, event ProcessedEvent, userID uuid.UUID, threshold int, statusChanged OutboxEvent) (ReportOutcome, error)
+}
+
+// AccountDeletionRepository ejecuta la baja de una cuenta (US-11).
+type AccountDeletionRepository interface {
+	// DeleteAccount, en una única transacción: bloquea la fila del usuario,
+	// crea su hold en legal_hold.user_holds (con la sanción solo si la cuenta
+	// estaba penalizada), borra sus sesiones y su fila de users, y encola los
+	// eventos de la baja en el outbox. Si cualquier paso falla no se deshace
+	// parcialmente: no queda nada hecho.
+	//
+	// Devuelve ErrUserNotFound (envuelto o no) si el usuario ya no existe, y un
+	// error envuelto en ErrDatabaseUnavailable si la base no respondió.
+	DeleteAccount(ctx context.Context, deletion AccountDeletion) error
+}
+
+// LegalHoldRepository administra el ciclo de vida de los holds ya creados.
+type LegalHoldRepository interface {
+	// DestroyExpired borra hasta limit holds con destroy_at <= now y devuelve
+	// cuántos borró. Es idempotente y seguro con varias réplicas corriendo a la
+	// vez: dos barridos concurrentes nunca toman el mismo hold.
+	DestroyExpired(ctx context.Context, now time.Time, limit int) (int64, error)
+}
+
+// LegalHoldSealer sella el DNI de un usuario hacia el responsable legal: solo
+// quien tenga la clave privada, que este servicio nunca carga, puede abrirlo.
+type LegalHoldSealer interface {
+	// Seal devuelve el DNI canónico (solo dígitos) cifrado con HPKE, con el
+	// `info` atado a userID, como base64 de enc‖ct. El llamador es responsable
+	// de limpiar dni.
+	Seal(userID uuid.UUID, dni []byte) (string, error)
 }
 
 // SessionRepository persiste sesiones: el registro de cada Refresh Token
@@ -167,6 +211,10 @@ type EventPublisher interface {
 	// PublishUserStatusChanged emite el evento user.status.changed, con
 	// actor nulo: es un hecho del sistema, no de un usuario.
 	PublishUserStatusChanged(ctx context.Context, evt UserStatusChanged) error
+
+	// PublishUserDeleted emite el evento user.deleted (US-11), con el usuario
+	// dado de baja como actor.
+	PublishUserDeleted(ctx context.Context, evt UserDeleted) error
 }
 
 // HPKEDecryptor descifra el criptograma de transporte que envía la app.
