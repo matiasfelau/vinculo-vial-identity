@@ -33,6 +33,7 @@ func routerConDeps(t *testing.T, ready func(context.Context) error, deps *delive
 		SignIn:         &signInServiceMock{},
 		Refresh:        &refreshServiceMock{},
 		Logout:         &logoutServiceMock{},
+		DeleteAccount:  &deleteAccountServiceMock{},
 		Logger:         slog.New(slog.NewTextHandler(&strings.Builder{}, nil)),
 		ReadinessCheck: ready,
 		DepsHealth:     deps,

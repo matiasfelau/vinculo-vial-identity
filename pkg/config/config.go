@@ -40,6 +40,7 @@ type Config struct {
 	Events     EventsConfig
 	Consumer   ConsumerConfig
 	Reputation ReputationConfig
+	LegalHold  LegalHoldConfig
 	Token      TokenConfig
 	Renaper    RenaperConfig
 	Outbox     OutboxConfig
@@ -249,11 +250,38 @@ type ReputationConfig struct {
 	ReviewThreshold int
 }
 
+// LegalHoldConfig son los parámetros del registro mínimo que se conserva tras la
+// baja de una cuenta (US-11).
+type LegalHoldConfig struct {
+	// PublicKey es la clave pública X25519 del responsable legal, en base64
+	// (LEGAL_HOLD_PUBLIC_KEY). Con ella se sella el DNI de cada baja; la privada
+	// se genera fuera de línea con cmd/legalhold-keygen y ningún servicio la
+	// carga. Es obligatoria: sin ella no hay forma de sellar el DNI, y el
+	// servicio no arranca. No es un secreto, pero tampoco se vuelca al log.
+	PublicKey string
+	// Days son los días que se conserva el hold (LEGAL_HOLD_DAYS): 1095, tres
+	// años, por el art. 2561 del CCyC y el art. 62 del CP. Tiene que coincidir
+	// con el valor de Alert.
+	Days int
+	// SweepInterval es cada cuánto corre el barrido que destruye los holds
+	// vencidos.
+	SweepInterval time.Duration
+	// SweepBatchSize acota cuántos holds borra cada sentencia del barrido.
+	SweepBatchSize int
+}
+
 // Valores por defecto pensados para que el entorno local levante sin definir
 // más que los secretos.
 const (
-	defaultHTTPPort     = 8080
-	defaultInternalPort = 8081
+	// defaultLegalHoldDays es el contrato de US-11: tres años.
+	defaultLegalHoldDays = 1095
+	// defaultLegalHoldSweepInterval y defaultLegalHoldSweepBatchSize son una
+	// decisión operativa: el plazo es de años, así que destruir un hold con una
+	// hora de demora no cambia nada.
+	defaultLegalHoldSweepInterval  = time.Hour
+	defaultLegalHoldSweepBatchSize = 500
+	defaultHTTPPort                = 8080
+	defaultInternalPort            = 8081
 	// minServiceTokenLength es el piso de entropía admitido para
 	// INTERNAL_SERVICE_TOKEN: es un secreto compartido comparado byte a byte
 	// (no una contraseña con Argon2 detrás), así que su propia longitud es
@@ -400,6 +428,13 @@ func Load() (*Config, error) {
 			ReviewThreshold: r.integer("REPORT_REVIEW_THRESHOLD", defaultReviewThreshold),
 		},
 
+		LegalHold: LegalHoldConfig{
+			PublicKey:      r.required("LEGAL_HOLD_PUBLIC_KEY"),
+			Days:           r.integer("LEGAL_HOLD_DAYS", defaultLegalHoldDays),
+			SweepInterval:  r.duration("LEGAL_HOLD_SWEEP_INTERVAL", defaultLegalHoldSweepInterval),
+			SweepBatchSize: r.integer("LEGAL_HOLD_SWEEP_BATCH_SIZE", defaultLegalHoldSweepBatchSize),
+		},
+
 		Token: TokenConfig{
 			AccessTokenTTL:  time.Duration(r.integer("ACCESS_TOKEN_TTL_MINUTES", defaultAccessTokenTTLMinutes)) * time.Minute,
 			RefreshTokenTTL: time.Duration(r.integer("REFRESH_TOKEN_TTL_DAYS", defaultRefreshTokenTTLDays)) * 24 * time.Hour,
@@ -543,6 +578,16 @@ func (c *Config) validate() error {
 		r.fail("config: REPORT_REVIEW_THRESHOLD debe ser al menos 1, se recibió %d", c.Reputation.ReviewThreshold)
 	}
 
+	if c.LegalHold.Days < 1 {
+		r.fail("config: LEGAL_HOLD_DAYS debe ser al menos 1, se recibió %d", c.LegalHold.Days)
+	}
+	if c.LegalHold.SweepInterval <= 0 {
+		r.fail("config: LEGAL_HOLD_SWEEP_INTERVAL debe ser positivo")
+	}
+	if c.LegalHold.SweepBatchSize < 1 {
+		r.fail("config: LEGAL_HOLD_SWEEP_BATCH_SIZE debe ser al menos 1, se recibió %d", c.LegalHold.SweepBatchSize)
+	}
+
 	if c.Events.Enabled {
 		if c.Events.URL.Reveal() == "" {
 			r.fail("config: RABBITMQ_URL es obligatoria con RABBITMQ_ENABLED=true")
@@ -598,6 +643,9 @@ func (c *Config) LogValue() slog.Value {
 		slog.String("alert_reported_queue", c.Consumer.AlertReportedQueue),
 		slog.Int("fraud_penalty", c.Reputation.FraudPenalty),
 		slog.Int("report_review_threshold", c.Reputation.ReviewThreshold),
+		slog.Int("legal_hold_days", c.LegalHold.Days),
+		slog.Duration("legal_hold_sweep_interval", c.LegalHold.SweepInterval),
+		slog.Int("legal_hold_sweep_batch_size", c.LegalHold.SweepBatchSize),
 		slog.Duration("renaper_timeout", c.Renaper.Timeout),
 		slog.Int("renaper_breaker_failure_threshold", c.Renaper.BreakerFailureThreshold),
 		slog.Duration("renaper_breaker_window", c.Renaper.BreakerWindow),

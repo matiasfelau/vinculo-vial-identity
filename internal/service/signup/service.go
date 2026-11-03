@@ -186,11 +186,25 @@ func (s *Service) SignUp(ctx context.Context, ephemeralPublicKey, ciphertext []b
 		return uuid.Nil, err
 	}
 
-	if err := s.deps.Users.Create(ctx, user); err != nil {
+	// Si el mismo DNI fue dado de baja con una sanción vigente (US-11), el
+	// repositorio hace que la cuenta la herede y, si queda en revisión, persiste
+	// este evento en la misma transacción. El evento se arma acá porque no
+	// depende de lo que lea la base: solo del usuario nuevo.
+	inheritedStatus, err := domain.NewUserStatusChangedOutboxEvent(
+		user.ID, domain.AccountStatusUnderReview, domain.UserStatusReasonInheritedOnSignup)
+	if err != nil {
+		return uuid.Nil, fmt.Errorf("signup: no se pudo armar user.status.changed: %w", err)
+	}
+	inheritedStatus.CreatedAt = s.deps.Now().UTC()
+
+	if err := s.deps.Users.Create(ctx, user, inheritedStatus); err != nil {
 		return uuid.Nil, err
 	}
 
-	s.deps.Logger.InfoContext(ctx, "usuario registrado", slog.String("user_id", user.ID.String()))
+	s.deps.Logger.InfoContext(ctx, "usuario registrado",
+		slog.String("user_id", user.ID.String()),
+		slog.String("account_status", string(user.AccountStatus)),
+	)
 
 	return user.ID, nil
 }

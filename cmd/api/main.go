@@ -18,6 +18,7 @@ import (
 
 	"github.com/matiasfelau/vinculo-vial-identity/internal/crypto/blindindex"
 	"github.com/matiasfelau/vinculo-vial-identity/internal/crypto/hpke"
+	"github.com/matiasfelau/vinculo-vial-identity/internal/crypto/legalhold"
 	"github.com/matiasfelau/vinculo-vial-identity/internal/crypto/password"
 	"github.com/matiasfelau/vinculo-vial-identity/internal/crypto/symmetric"
 	"github.com/matiasfelau/vinculo-vial-identity/internal/delivery/consumer"
@@ -26,6 +27,8 @@ import (
 	"github.com/matiasfelau/vinculo-vial-identity/internal/domain"
 	"github.com/matiasfelau/vinculo-vial-identity/internal/renaper"
 	"github.com/matiasfelau/vinculo-vial-identity/internal/repository/postgres"
+	"github.com/matiasfelau/vinculo-vial-identity/internal/service/account"
+	legalholdsvc "github.com/matiasfelau/vinculo-vial-identity/internal/service/legalhold"
 	"github.com/matiasfelau/vinculo-vial-identity/internal/service/outbox"
 	"github.com/matiasfelau/vinculo-vial-identity/internal/service/ownership"
 	"github.com/matiasfelau/vinculo-vial-identity/internal/service/reputation"
@@ -117,7 +120,25 @@ func run() error {
 		return err
 	}
 
+	// Baja de cuenta (US-11). Los dos repositorios migran el esquema legal_hold
+	// y requieren que users, sessions y outbox_events ya estén migradas.
+	accountDeletions, err := postgres.NewAccountDeletionRepository(ctx, db)
+	if err != nil {
+		return err
+	}
+	legalHolds, err := postgres.NewLegalHoldRepository(ctx, db)
+	if err != nil {
+		return err
+	}
+
 	tokens, err := buildTokenGenerator(cfg)
+	if err != nil {
+		return err
+	}
+
+	// Falla el arranque si la clave pública del responsable legal falta o no es
+	// utilizable: sin ella ninguna baja puede sellar el DNI.
+	legalHoldSealer, err := legalhold.New(cfg.LegalHold.PublicKey)
 	if err != nil {
 		return err
 	}
@@ -149,6 +170,24 @@ func run() error {
 	// Se declara después de cerrar la base, así que corre antes: los consumidores
 	// terminan el mensaje en curso mientras la base todavía responde.
 	defer stopConsumers()
+
+	// Sweeper de holds vencidos (US-11): el primer proceso periódico propio del
+	// servicio. Se espera a que termine antes de cerrar la base (los defers
+	// corren al revés: este se declara después del cierre de la base), así un
+	// borrado en curso no pierde la conexión a mitad de una sentencia.
+	sweeper, err := legalholdsvc.NewSweeper(legalHolds, cfg.LegalHold.SweepInterval, cfg.LegalHold.SweepBatchSize, logger)
+	if err != nil {
+		return err
+	}
+	sweeperDone := make(chan struct{})
+	go func() {
+		defer close(sweeperDone)
+		sweeper.Run(ctx)
+	}()
+	defer func() {
+		stop()
+		<-sweeperDone
+	}()
 
 	renaperSvc := buildRenaper(cfg, logger)
 
@@ -196,6 +235,19 @@ func run() error {
 		return err
 	}
 
+	deleteAccountService, err := account.NewDeleteService(account.DeleteDeps{
+		Users:         users,
+		Deletions:     accountDeletions,
+		Hasher:        hasher,
+		Cipher:        cipher,
+		Sealer:        legalHoldSealer,
+		LegalHoldDays: cfg.LegalHold.Days,
+		Logger:        logger,
+	})
+	if err != nil {
+		return err
+	}
+
 	verifyOwnershipService, err := ownership.New(ownership.Deps{
 		Decryptor: decryptor,
 		Indexer:   indexer,
@@ -207,13 +259,14 @@ func run() error {
 	}
 
 	router, err := delivery.NewRouter(delivery.RouterConfig{
-		SignUp:       signUpService,
-		SignIn:       signInService,
-		Refresh:      refreshService,
-		Logout:       logoutService,
-		Logger:       logger,
-		MaxBodyBytes: cfg.HTTP.MaxBodyBytes,
-		Debug:        cfg.HTTP.Debug,
+		SignUp:        signUpService,
+		SignIn:        signInService,
+		Refresh:       refreshService,
+		Logout:        logoutService,
+		DeleteAccount: deleteAccountService,
+		Logger:        logger,
+		MaxBodyBytes:  cfg.HTTP.MaxBodyBytes,
+		Debug:         cfg.HTTP.Debug,
 		// Readiness apoyada en la base: si no responde, ni un alta ni un login
 		// podrían persistirse y el orquestador no debería mandar tráfico acá.
 		ReadinessCheck: func(ctx context.Context) error { return postgres.Ping(ctx, db) },

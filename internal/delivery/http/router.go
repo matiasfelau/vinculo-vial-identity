@@ -23,7 +23,9 @@ type RouterConfig struct {
 	SignIn  SignInService
 	Refresh RefreshService
 	Logout  LogoutService
-	Logger  *slog.Logger
+	// DeleteAccount atiende DELETE /api/v1/users/me (US-11).
+	DeleteAccount DeleteAccountService
+	Logger        *slog.Logger
 	// ReadinessCheck reporta si las dependencias externas responden. Si es nil,
 	// /ready se limita a informar que el proceso está vivo.
 	ReadinessCheck func(context.Context) error
@@ -42,6 +44,11 @@ type RouterConfig struct {
 // NewRouter arma el router con sus middlewares y rutas.
 func NewRouter(cfg RouterConfig) (*gin.Engine, error) {
 	handler, err := NewHandler(cfg.SignUp, cfg.SignIn, cfg.Refresh, cfg.Logout, cfg.Logger)
+	if err != nil {
+		return nil, err
+	}
+
+	accountHandler, err := NewAccountHandler(cfg.DeleteAccount, cfg.Logger)
 	if err != nil {
 		return nil, err
 	}
@@ -112,6 +119,9 @@ func NewRouter(cfg RouterConfig) (*gin.Engine, error) {
 	auth.POST("/signin", handler.SignIn)
 	auth.POST("/refresh", handler.Refresh)
 	auth.POST("/logout", handler.Logout)
+
+	users := r.Group("/api/v1/users", limitBody(maxAccountBodyBytes), noStore())
+	users.DELETE("/me", accountHandler.Delete)
 
 	r.NoRoute(func(c *gin.Context) {
 		c.JSON(http.StatusNotFound, errorResponse{Code: codeInvalidRequest, Error: "recurso no encontrado", RequestID: requestIDOf(c)})
