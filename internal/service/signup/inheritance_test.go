@@ -10,10 +10,10 @@ import (
 	"github.com/matiasfelau/vinculo-vial-identity/internal/domain"
 )
 
-// Un alta sin hold previo nace limpia, y el servicio igual entrega al
+// Un alta sin sanción previa nace limpia, y el servicio igual entrega al
 // repositorio el user.status.changed por si hubiera herencia: solo se persiste
 // si el repositorio la encuentra.
-func TestSignUpSinHoldNaceLimpia(t *testing.T) {
+func TestSignUpSinSancionPreviaNaceLimpia(t *testing.T) {
 	h := newHarness(t)
 
 	if _, err := h.svc.SignUp(t.Context(), []byte(ephemeralPublicKey), []byte(ciphertext)); err != nil {
@@ -64,11 +64,11 @@ func TestSignUpEntregaAlRepositorioElEventoDeLaSancionHeredada(t *testing.T) {
 	}
 }
 
-// Con un hold vigente que dejó la cuenta en revisión, el alta nace en revisión
+// Con una sanción vigente que dejó la cuenta en revisión, el alta nace en revisión
 // con la reputación y los reportes heredados.
-func TestSignUpHeredaLaSancionDelHold(t *testing.T) {
+func TestSignUpHeredaLaSancionDeLaBaja(t *testing.T) {
 	h := newHarness(t)
-	h.repo.inherit = &domain.HoldSanction{
+	h.repo.inherit = &domain.SanctionCarryover{
 		AccountStatus:   domain.AccountStatusUnderReview,
 		ReputationScore: -30,
 		ReportCount:     2,
@@ -90,9 +90,9 @@ func TestSignUpHeredaLaSancionDelHold(t *testing.T) {
 
 // La herencia deja constancia en el log con el estado resultante, sin el
 // Blind Index del DNI ni nada que identifique la sanción previa.
-func TestSignUpLogueaElEstadoSinDatosDelHold(t *testing.T) {
+func TestSignUpLogueaElEstadoSinDatosDeLaSancion(t *testing.T) {
 	h := newHarness(t)
-	h.repo.inherit = &domain.HoldSanction{
+	h.repo.inherit = &domain.SanctionCarryover{
 		DNIHMAC:         "hmac-del-dni-que-no-debe-loguearse",
 		AccountStatus:   domain.AccountStatusUnderReview,
 		ReputationScore: -30,
@@ -119,7 +119,7 @@ func TestSignUpLogueaElEstadoSinDatosDelHold(t *testing.T) {
 func TestSignUpConErrorDelRepositorioNoHeredaNada(t *testing.T) {
 	h := newHarness(t)
 	h.repo.err = domain.ErrDuplicateUser
-	h.repo.inherit = &domain.HoldSanction{AccountStatus: domain.AccountStatusUnderReview}
+	h.repo.inherit = &domain.SanctionCarryover{AccountStatus: domain.AccountStatusUnderReview}
 
 	if _, err := h.svc.SignUp(t.Context(), []byte(ephemeralPublicKey), []byte(ciphertext)); err == nil {
 		t.Fatal("se esperaba un error")

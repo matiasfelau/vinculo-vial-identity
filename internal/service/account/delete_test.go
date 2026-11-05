@@ -18,11 +18,10 @@ import (
 )
 
 const (
-	dniEnClaro   = "30123456"
-	contrasena   = "Contraseña-Segura-1"
-	diasDeHold   = 1095
-	sellado      = "sellado-hpke-en-base64"
-	hashGuardado = "hash:" + contrasena
+	dniEnClaro     = "30123456"
+	contrasena     = "Contraseña-Segura-1"
+	diasDeHerencia = 1095
+	hashGuardado   = "hash:" + contrasena
 )
 
 var ahora = time.Date(2026, 11, 2, 15, 4, 5, 123456789, time.UTC)
@@ -75,55 +74,10 @@ func (f *hasherFake) Verify(pwd []byte, encodedHash string) (bool, error) {
 	return "hash:"+string(pwd) == encodedHash, nil
 }
 
-type cipherFake struct {
-	err error
-
-	calls    int
-	buffers  [][]byte
-	received []string
-}
-
-func (f *cipherFake) Encrypt([]byte) (string, error) { panic("account: Encrypt no se usa en la baja") }
-
-func (f *cipherFake) Decrypt(ciphertext string) ([]byte, error) {
-	f.calls++
-	f.received = append(f.received, ciphertext)
-	if f.err != nil {
-		return nil, f.err
-	}
-	buf := []byte(dniEnClaro)
-	f.buffers = append(f.buffers, buf)
-	return buf, nil
-}
-
-type sealerFake struct {
-	err error
-
-	calls   int
-	users   []uuid.UUID
-	plains  []string
-	nextOut string
-}
-
-func (f *sealerFake) Seal(userID uuid.UUID, dni []byte) (string, error) {
-	f.calls++
-	f.users = append(f.users, userID)
-	f.plains = append(f.plains, string(dni))
-	if f.err != nil {
-		return "", f.err
-	}
-	if f.nextOut != "" {
-		return f.nextOut, nil
-	}
-	return sellado, nil
-}
-
 type harness struct {
 	users     *usersFake
 	deletions *deletionsFake
 	hasher    *hasherFake
-	cipher    *cipherFake
-	sealer    *sealerFake
 	logs      *bytes.Buffer
 	service   *account.DeleteService
 	user      *domain.User
@@ -144,21 +98,17 @@ func newHarness(t *testing.T) *harness {
 		users:     &usersFake{user: user},
 		deletions: &deletionsFake{},
 		hasher:    &hasherFake{},
-		cipher:    &cipherFake{},
-		sealer:    &sealerFake{},
 		logs:      &bytes.Buffer{},
 		user:      user,
 	}
 
 	svc, err := account.NewDeleteService(account.DeleteDeps{
-		Users:         h.users,
-		Deletions:     h.deletions,
-		Hasher:        h.hasher,
-		Cipher:        h.cipher,
-		Sealer:        h.sealer,
-		LegalHoldDays: diasDeHold,
-		Logger:        slog.New(slog.NewTextHandler(h.logs, &slog.HandlerOptions{Level: slog.LevelDebug})),
-		Now:           func() time.Time { return ahora },
+		Users:                 h.users,
+		Deletions:             h.deletions,
+		Hasher:                h.hasher,
+		SanctionCarryoverDays: diasDeHerencia,
+		Logger:                slog.New(slog.NewTextHandler(h.logs, &slog.HandlerOptions{Level: slog.LevelDebug})),
+		Now:                   func() time.Time { return ahora },
 	})
 	if err != nil {
 		t.Fatalf("error inesperado: %v", err)
@@ -185,34 +135,14 @@ func TestBajaCorrecta(t *testing.T) {
 	if got.UserID != h.user.ID {
 		t.Errorf("UserID = %v, se esperaba %v", got.UserID, h.user.ID)
 	}
-	if got.DNISealed != sellado {
-		t.Errorf("DNISealed = %q, se esperaba el que devolvió el sellador", got.DNISealed)
-	}
 	if !got.DeletedAt.Equal(ahora) {
 		t.Errorf("DeletedAt = %v, se esperaba %v", got.DeletedAt, ahora)
 	}
-	if want := ahora.AddDate(0, 0, diasDeHold); !got.DestroyAt.Equal(want) {
-		t.Errorf("DestroyAt = %v, se esperaba deleted_at + %d días = %v", got.DestroyAt, diasDeHold, want)
+	if want := ahora.AddDate(0, 0, diasDeHerencia); !got.CarryoverExpiresAt.Equal(want) {
+		t.Errorf("CarryoverExpiresAt = %v, se esperaba deleted_at + %d días = %v", got.CarryoverExpiresAt, diasDeHerencia, want)
 	}
 	if err := got.Validate(); err != nil {
 		t.Errorf("la baja que arma el servicio no valida: %v", err)
-	}
-}
-
-// El hold sella el DNI que estaba guardado, atado al usuario: lo abre con la
-// clave del at-rest y se lo pasa al sellador con el user_id.
-func TestBajaSellaElDNIGuardadoAtadoAlUsuario(t *testing.T) {
-	h := newHarness(t)
-
-	if err := h.borrar(); err != nil {
-		t.Fatalf("error inesperado: %v", err)
-	}
-
-	if len(h.cipher.received) != 1 || h.cipher.received[0] != h.user.DNIEncrypted {
-		t.Errorf("el cifrador abrió %v, se esperaba el DNI cifrado del usuario", h.cipher.received)
-	}
-	if len(h.sealer.users) != 1 || h.sealer.users[0] != h.user.ID || h.sealer.plains[0] != dniEnClaro {
-		t.Errorf("el sellador recibió usuarios=%v dni=%v", h.sealer.users, h.sealer.plains)
 	}
 }
 
@@ -264,7 +194,7 @@ func TestBajaEncolaLosDosEventos(t *testing.T) {
 	}
 }
 
-// Ningún evento lleva datos personales: ni el DNI, ni el email, ni el sellado.
+// Ningún evento lleva datos personales: ni el DNI, ni el email, ni la contraseña.
 func TestLosEventosDeLaBajaNoLlevanDatosPersonales(t *testing.T) {
 	h := newHarness(t)
 
@@ -273,7 +203,7 @@ func TestLosEventosDeLaBajaNoLlevanDatosPersonales(t *testing.T) {
 	}
 
 	for _, e := range h.deletions.deletions[0].Events {
-		for _, prohibido := range []string{dniEnClaro, h.user.Email, h.user.DNIHashed, h.user.DNIEncrypted, sellado, contrasena} {
+		for _, prohibido := range []string{dniEnClaro, h.user.Email, h.user.DNIHashed, h.user.DNIEncrypted, contrasena} {
 			if strings.Contains(string(e.Payload), prohibido) {
 				t.Errorf("el payload de %s contiene %q: %s", e.Type, prohibido, e.Payload)
 			}
@@ -292,9 +222,6 @@ func TestBajaConContrasenaIncorrecta(t *testing.T) {
 	if h.deletions.calls != 0 {
 		t.Errorf("con contraseña incorrecta no se debe borrar nada")
 	}
-	if h.cipher.calls != 0 || h.sealer.calls != 0 {
-		t.Errorf("con contraseña incorrecta no se debe abrir ni sellar el DNI (cifrador=%d sellador=%d)", h.cipher.calls, h.sealer.calls)
-	}
 	if !strings.Contains(h.logs.String(), "level=WARN") || !strings.Contains(h.logs.String(), h.user.ID.String()) {
 		t.Errorf("el intento rechazado debe quedar en el log en WARN con el user_id: %s", h.logs.String())
 	}
@@ -309,8 +236,8 @@ func TestBajaDeUsuarioInexistenteEsExitosa(t *testing.T) {
 	if err := h.borrar(); err != nil {
 		t.Fatalf("error inesperado: %v", err)
 	}
-	if h.hasher.calls != 0 || h.deletions.calls != 0 || h.cipher.calls != 0 || h.sealer.calls != 0 {
-		t.Errorf("sin usuario no se verifica, abre, sella ni borra nada")
+	if h.hasher.calls != 0 || h.deletions.calls != 0 {
+		t.Errorf("sin usuario no se verifica ni se borra nada")
 	}
 }
 
@@ -373,59 +300,7 @@ func TestBajaFallaCerradaSiNoSePuedeVerificarLaContrasena(t *testing.T) {
 	}
 }
 
-func TestBajaNoAvanzaSiFallaElCifradoOElSellado(t *testing.T) {
-	t.Run("no se abre el DNI guardado", func(t *testing.T) {
-		h := newHarness(t)
-		h.cipher.err = errors.New("aes: autenticación fallida")
-
-		if err := h.borrar(); err == nil {
-			t.Fatal("se esperaba un error")
-		}
-		if h.deletions.calls != 0 {
-			t.Errorf("no se debe borrar nada sin poder sellar el DNI")
-		}
-	})
-
-	t.Run("no se sella el DNI", func(t *testing.T) {
-		h := newHarness(t)
-		h.sealer.err = errors.New("hpke: clave inválida")
-
-		if err := h.borrar(); err == nil {
-			t.Fatal("se esperaba un error")
-		}
-		if h.deletions.calls != 0 {
-			t.Errorf("no se debe borrar nada sin poder sellar el DNI")
-		}
-	})
-}
-
-// El DNI en claro solo existe mientras se sella: el buffer se limpia antes de
-// volver, tanto si la baja sale bien como si falla.
-func TestBajaLimpiaElDNIEnClaro(t *testing.T) {
-	casos := map[string]func(h *harness){
-		"éxito":            func(*harness) {},
-		"falla el sellado": func(h *harness) { h.sealer.err = errors.New("hpke") },
-		"falla la baja":    func(h *harness) { h.deletions.err = errors.New("deadlock") },
-	}
-
-	for nombre, preparar := range casos {
-		t.Run(nombre, func(t *testing.T) {
-			h := newHarness(t)
-			preparar(h)
-
-			_ = h.borrar()
-
-			if len(h.cipher.buffers) != 1 {
-				t.Fatalf("el cifrador entregó %d buffers, se esperaba 1", len(h.cipher.buffers))
-			}
-			if !bytes.Equal(h.cipher.buffers[0], make([]byte, len(dniEnClaro))) {
-				t.Errorf("el buffer del DNI no se limpió: %q", h.cipher.buffers[0])
-			}
-		})
-	}
-}
-
-// Ningún log de la baja contiene la contraseña, el DNI, el sellado ni el hash.
+// Ningún log de la baja contiene la contraseña, el DNI ni el hash.
 func TestBajaNoLogueaDatosSensibles(t *testing.T) {
 	casos := map[string]func(h *harness){
 		"éxito":                 func(*harness) {},
@@ -443,7 +318,7 @@ func TestBajaNoLogueaDatosSensibles(t *testing.T) {
 			_ = h.borrar()
 
 			log := h.logs.String()
-			for _, prohibido := range []string{dniEnClaro, contrasena, sellado, hashGuardado, h.user.DNIHashed, h.user.DNIEncrypted, h.user.Email} {
+			for _, prohibido := range []string{dniEnClaro, contrasena, hashGuardado, h.user.DNIHashed, h.user.DNIEncrypted, h.user.Email} {
 				if strings.Contains(log, prohibido) {
 					t.Errorf("el log contiene %q: %s", prohibido, log)
 				}
@@ -466,12 +341,10 @@ func TestBajaConUsuarioNuloEsUnError(t *testing.T) {
 func TestNewDeleteServiceValidaSusDependencias(t *testing.T) {
 	validas := func() account.DeleteDeps {
 		return account.DeleteDeps{
-			Users:         &usersFake{},
-			Deletions:     &deletionsFake{},
-			Hasher:        &hasherFake{},
-			Cipher:        &cipherFake{},
-			Sealer:        &sealerFake{},
-			LegalHoldDays: diasDeHold,
+			Users:                 &usersFake{},
+			Deletions:             &deletionsFake{},
+			Hasher:                &hasherFake{},
+			SanctionCarryoverDays: diasDeHerencia,
 		}
 	}
 
@@ -479,10 +352,8 @@ func TestNewDeleteServiceValidaSusDependencias(t *testing.T) {
 		"sin repositorio de usuarios": func(d *account.DeleteDeps) { d.Users = nil },
 		"sin repositorio de la baja":  func(d *account.DeleteDeps) { d.Deletions = nil },
 		"sin hasher":                  func(d *account.DeleteDeps) { d.Hasher = nil },
-		"sin cifrador":                func(d *account.DeleteDeps) { d.Cipher = nil },
-		"sin sellador":                func(d *account.DeleteDeps) { d.Sealer = nil },
-		"retención en cero":           func(d *account.DeleteDeps) { d.LegalHoldDays = 0 },
-		"retención negativa":          func(d *account.DeleteDeps) { d.LegalHoldDays = -1 },
+		"herencia en cero":            func(d *account.DeleteDeps) { d.SanctionCarryoverDays = 0 },
+		"herencia negativa":           func(d *account.DeleteDeps) { d.SanctionCarryoverDays = -1 },
 	}
 
 	for nombre, degradar := range casos {

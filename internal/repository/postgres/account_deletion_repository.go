@@ -18,14 +18,15 @@ type AccountDeletionRepository struct {
 
 var _ domain.AccountDeletionRepository = (*AccountDeletionRepository)(nil)
 
-// NewAccountDeletionRepository construye el repositorio y migra legal_hold.
-// Requiere que users, sessions y outbox_events ya existan: los tres repositorios
-// que las migran tienen que haber corrido antes en el arranque.
+// NewAccountDeletionRepository construye el repositorio y migra
+// sanction_carryovers. Requiere que users, sessions y outbox_events ya existan:
+// los tres repositorios que las migran tienen que haber corrido antes en el
+// arranque.
 func NewAccountDeletionRepository(ctx context.Context, db *gorm.DB) (*AccountDeletionRepository, error) {
 	if db == nil {
 		return nil, errors.New("postgres: se requiere una conexión GORM")
 	}
-	if err := ensureLegalHoldSchema(ctx, db); err != nil {
+	if err := ensureSanctionCarryovers(ctx, db); err != nil {
 		return nil, err
 	}
 	return &AccountDeletionRepository{db: db}, nil
@@ -36,9 +37,13 @@ func NewAccountDeletionRepository(ctx context.Context, db *gorm.DB) (*AccountDel
 //
 // La fila del usuario se bloquea (SELECT ... FOR UPDATE) antes de leer la
 // sanción: un reporte o una penalización que llega a la vez espera a que la baja
-// termine, y el hold nunca guarda un estado más viejo que el de la fila que se
+// termine, y la sanción que se deja nunca es más vieja que la de la fila que se
 // borra. Un evento de reputación que llegue después encuentra al usuario
 // inexistente y se confirma sin efecto.
+//
+// La sanción se guarda con un upsert por dni_hmac: una fila vencida que el
+// barrido todavía no borró, de una cuenta anterior con el mismo DNI, se pisa con
+// la sanción nueva.
 //
 // Las sesiones se borran explícitamente y no se confía solo en el ON DELETE
 // CASCADE de la clave foránea: marcarlas revocadas antes de borrarlas no tendría
@@ -63,9 +68,13 @@ func (r *AccountDeletionRepository) DeleteAccount(ctx context.Context, deletion 
 			return fmt.Errorf("no se pudo bloquear al usuario: %w", err)
 		}
 
-		hold := deletion.HoldFor(user.toDomain())
-		if err := tx.Create(toUserHoldModel(hold)).Error; err != nil {
-			return fmt.Errorf("no se pudo crear el hold: %w", err)
+		if carryover := deletion.CarryoverFor(user.toDomain()); carryover != nil {
+			if err := tx.Clauses(clause.OnConflict{
+				Columns:   []clause.Column{{Name: "dni_hmac"}},
+				UpdateAll: true,
+			}).Create(toSanctionCarryoverModel(*carryover)).Error; err != nil {
+				return fmt.Errorf("no se pudo guardar la sanción para heredar: %w", err)
+			}
 		}
 
 		if err := tx.Where("user_id = ?", deletion.UserID).Delete(&sessionModel{}).Error; err != nil {

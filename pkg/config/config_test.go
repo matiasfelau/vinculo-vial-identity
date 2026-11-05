@@ -26,9 +26,10 @@ func entornoMinimo() map[string]string {
 		"HMAC_SECRET":               clave,
 		"JWT_PRIVATE_KEY":           clavePEMDePrueba,
 		"INTERNAL_SERVICE_TOKEN":    strings.Repeat("a", 32),
-		// Clave pública del responsable legal (US-11): config.Load no la interpreta,
-		// solo la exige; internal/crypto/legalhold la valida de verdad.
-		"LEGAL_HOLD_PUBLIC_KEY": clave,
+		// Clave pública de Audit y su id (US-11): config.Load no los interpreta, solo
+		// los exige; internal/crypto/auditseal los valida de verdad.
+		"AUDIT_PUBLIC_KEY": clave,
+		"AUDIT_KEY_ID":     "2026-11",
 	}
 }
 
@@ -59,7 +60,8 @@ func aplicar(t *testing.T, env map[string]string) {
 		"OUTBOX_WORKER_INTERVAL", "OUTBOX_WORKER_BATCH_SIZE",
 		"RABBITMQ_PREFETCH", "MAX_RETRIES", "ALERT_REJECTED_QUEUE", "FRAUD_PENALTY",
 		"ALERT_REPORTED_QUEUE", "REPORT_REVIEW_THRESHOLD",
-		"LEGAL_HOLD_PUBLIC_KEY", "LEGAL_HOLD_DAYS", "LEGAL_HOLD_SWEEP_INTERVAL", "LEGAL_HOLD_SWEEP_BATCH_SIZE",
+		"AUDIT_PUBLIC_KEY", "AUDIT_KEY_ID", "SANCTION_CARRYOVER_DAYS",
+		"SANCTION_CARRYOVER_SWEEP_INTERVAL", "SANCTION_CARRYOVER_SWEEP_BATCH_SIZE",
 	} {
 		t.Setenv(k, "")
 		os.Unsetenv(k)
@@ -532,7 +534,7 @@ func TestLoadExigeLosSecretos(t *testing.T) {
 	obligatorias := []string{
 		"POSTGRES_USER", "POSTGRES_PASSWORD", "POSTGRES_DB",
 		"IDENTITY_HPKE_PRIVATE_KEY", "AES_KEY", "HMAC_SECRET", "JWT_PRIVATE_KEY",
-		"INTERNAL_SERVICE_TOKEN", "LEGAL_HOLD_PUBLIC_KEY",
+		"INTERNAL_SERVICE_TOKEN", "AUDIT_PUBLIC_KEY", "AUDIT_KEY_ID",
 	}
 
 	for _, faltante := range obligatorias {
@@ -562,7 +564,7 @@ func TestLoadAcumulaLosErrores(t *testing.T) {
 		t.Fatal("se esperaba un error")
 	}
 
-	for _, faltante := range []string{"POSTGRES_USER", "IDENTITY_HPKE_PRIVATE_KEY", "AES_KEY", "HMAC_SECRET", "JWT_PRIVATE_KEY", "INTERNAL_SERVICE_TOKEN", "LEGAL_HOLD_PUBLIC_KEY"} {
+	for _, faltante := range []string{"POSTGRES_USER", "IDENTITY_HPKE_PRIVATE_KEY", "AES_KEY", "HMAC_SECRET", "JWT_PRIVATE_KEY", "INTERNAL_SERVICE_TOKEN", "AUDIT_PUBLIC_KEY", "AUDIT_KEY_ID"} {
 		if !strings.Contains(err.Error(), faltante) {
 			t.Errorf("el error debería mencionar %s: %v", faltante, err)
 		}
@@ -918,57 +920,90 @@ func TestLoadDotEnvRechazaLineasMalFormadas(t *testing.T) {
 	}
 }
 
-// Retención legal de la baja de cuenta (US-11): 1095 días por defecto, con el
-// barrido a intervalo y lote operativos.
-func TestLoadUsaLosDefaultsDelHold(t *testing.T) {
+// Sellado hacia Audit (US-11): la clave pública y su id son obligatorios, y el
+// servicio no arranca sin ellos.
+func TestLoadCargaLaConfiguracionDeAudit(t *testing.T) {
 	aplicar(t, entornoMinimo())
 
 	cfg, err := config.Load()
 	if err != nil {
 		t.Fatalf("error inesperado: %v", err)
 	}
-	if cfg.LegalHold.Days != 1095 {
-		t.Errorf("LEGAL_HOLD_DAYS = %d, se esperaban 1095", cfg.LegalHold.Days)
+	if cfg.Audit.PublicKey == "" {
+		t.Errorf("AUDIT_PUBLIC_KEY no se cargó")
 	}
-	if cfg.LegalHold.SweepInterval != time.Hour {
-		t.Errorf("LEGAL_HOLD_SWEEP_INTERVAL = %v, se esperaba 1h", cfg.LegalHold.SweepInterval)
-	}
-	if cfg.LegalHold.SweepBatchSize != 500 {
-		t.Errorf("LEGAL_HOLD_SWEEP_BATCH_SIZE = %d, se esperaban 500", cfg.LegalHold.SweepBatchSize)
-	}
-	if cfg.LegalHold.PublicKey == "" {
-		t.Errorf("LEGAL_HOLD_PUBLIC_KEY no se cargó")
+	if cfg.Audit.KeyID != "2026-11" {
+		t.Errorf("AUDIT_KEY_ID = %q, se esperaba 2026-11", cfg.Audit.KeyID)
 	}
 }
 
-func TestLoadAceptaElHoldPersonalizado(t *testing.T) {
+func TestLoadExigeLaConfiguracionDeAudit(t *testing.T) {
+	for _, variable := range []string{"AUDIT_PUBLIC_KEY", "AUDIT_KEY_ID"} {
+		for nombre, valor := range map[string]string{"ausente": "", "en blanco": "   "} {
+			t.Run(variable+" "+nombre, func(t *testing.T) {
+				env := entornoMinimo()
+				env[variable] = valor
+				aplicar(t, env)
+
+				_, err := config.Load()
+				if err == nil {
+					t.Fatal("se esperaba un error")
+				}
+				if !strings.Contains(err.Error(), variable) {
+					t.Errorf("el error debería nombrar %s: %v", variable, err)
+				}
+			})
+		}
+	}
+}
+
+// Herencia de la sanción de una cuenta dada de baja (US-11): 1095 días por
+// defecto, con el barrido a intervalo y lote operativos.
+func TestLoadUsaLosDefaultsDeLaHerenciaDeSancion(t *testing.T) {
+	aplicar(t, entornoMinimo())
+
+	cfg, err := config.Load()
+	if err != nil {
+		t.Fatalf("error inesperado: %v", err)
+	}
+	if cfg.Sanction.CarryoverDays != 1095 {
+		t.Errorf("SANCTION_CARRYOVER_DAYS = %d, se esperaban 1095", cfg.Sanction.CarryoverDays)
+	}
+	if cfg.Sanction.SweepInterval != time.Hour {
+		t.Errorf("SANCTION_CARRYOVER_SWEEP_INTERVAL = %v, se esperaba 1h", cfg.Sanction.SweepInterval)
+	}
+	if cfg.Sanction.SweepBatchSize != 500 {
+		t.Errorf("SANCTION_CARRYOVER_SWEEP_BATCH_SIZE = %d, se esperaban 500", cfg.Sanction.SweepBatchSize)
+	}
+}
+
+func TestLoadAceptaLaHerenciaDeSancionPersonalizada(t *testing.T) {
 	env := entornoMinimo()
-	env["LEGAL_HOLD_DAYS"] = "1"
-	env["LEGAL_HOLD_SWEEP_INTERVAL"] = "30s"
-	env["LEGAL_HOLD_SWEEP_BATCH_SIZE"] = "10"
+	env["SANCTION_CARRYOVER_DAYS"] = "1"
+	env["SANCTION_CARRYOVER_SWEEP_INTERVAL"] = "30s"
+	env["SANCTION_CARRYOVER_SWEEP_BATCH_SIZE"] = "10"
 	aplicar(t, env)
 
 	cfg, err := config.Load()
 	if err != nil {
 		t.Fatalf("error inesperado: %v", err)
 	}
-	if cfg.LegalHold.Days != 1 || cfg.LegalHold.SweepInterval != 30*time.Second || cfg.LegalHold.SweepBatchSize != 10 {
-		t.Errorf("LegalHold = %+v", cfg.LegalHold)
+	if cfg.Sanction.CarryoverDays != 1 || cfg.Sanction.SweepInterval != 30*time.Second || cfg.Sanction.SweepBatchSize != 10 {
+		t.Errorf("Sanction = %+v", cfg.Sanction)
 	}
 }
 
-func TestLoadRechazaUnHoldMalConfigurado(t *testing.T) {
+func TestLoadRechazaLaHerenciaDeSancionMalConfigurada(t *testing.T) {
 	casos := map[string]struct {
 		env      map[string]string
 		variable string
 	}{
-		"días en cero":       {map[string]string{"LEGAL_HOLD_DAYS": "0"}, "LEGAL_HOLD_DAYS"},
-		"días negativos":     {map[string]string{"LEGAL_HOLD_DAYS": "-5"}, "LEGAL_HOLD_DAYS"},
-		"días no numéricos":  {map[string]string{"LEGAL_HOLD_DAYS": "tres años"}, "LEGAL_HOLD_DAYS"},
-		"intervalo en cero":  {map[string]string{"LEGAL_HOLD_SWEEP_INTERVAL": "0s"}, "LEGAL_HOLD_SWEEP_INTERVAL"},
-		"intervalo negativo": {map[string]string{"LEGAL_HOLD_SWEEP_INTERVAL": "-1m"}, "LEGAL_HOLD_SWEEP_INTERVAL"},
-		"lote en cero":       {map[string]string{"LEGAL_HOLD_SWEEP_BATCH_SIZE": "0"}, "LEGAL_HOLD_SWEEP_BATCH_SIZE"},
-		"clave vacía":        {map[string]string{"LEGAL_HOLD_PUBLIC_KEY": "   "}, "LEGAL_HOLD_PUBLIC_KEY"},
+		"días en cero":       {map[string]string{"SANCTION_CARRYOVER_DAYS": "0"}, "SANCTION_CARRYOVER_DAYS"},
+		"días negativos":     {map[string]string{"SANCTION_CARRYOVER_DAYS": "-5"}, "SANCTION_CARRYOVER_DAYS"},
+		"días no numéricos":  {map[string]string{"SANCTION_CARRYOVER_DAYS": "tres años"}, "SANCTION_CARRYOVER_DAYS"},
+		"intervalo en cero":  {map[string]string{"SANCTION_CARRYOVER_SWEEP_INTERVAL": "0s"}, "SANCTION_CARRYOVER_SWEEP_INTERVAL"},
+		"intervalo negativo": {map[string]string{"SANCTION_CARRYOVER_SWEEP_INTERVAL": "-1m"}, "SANCTION_CARRYOVER_SWEEP_INTERVAL"},
+		"lote en cero":       {map[string]string{"SANCTION_CARRYOVER_SWEEP_BATCH_SIZE": "0"}, "SANCTION_CARRYOVER_SWEEP_BATCH_SIZE"},
 	}
 
 	for nombre, caso := range casos {
@@ -990,10 +1025,11 @@ func TestLoadRechazaUnHoldMalConfigurado(t *testing.T) {
 	}
 }
 
-// El log de arranque informa la retención, pero no vuelca la clave.
-func TestLaConfiguracionLogueaElHoldSinLaClave(t *testing.T) {
+// El log de arranque informa el id de la clave y la herencia, pero no vuelca la
+// clave pública.
+func TestLaConfiguracionLogueaAuditSinLaClave(t *testing.T) {
 	env := entornoMinimo()
-	env["LEGAL_HOLD_PUBLIC_KEY"] = "clave-publica-que-no-debe-aparecer-en-el-log"
+	env["AUDIT_PUBLIC_KEY"] = "clave-publica-que-no-debe-aparecer-en-el-log"
 	aplicar(t, env)
 
 	cfg, err := config.Load()
@@ -1004,8 +1040,10 @@ func TestLaConfiguracionLogueaElHoldSinLaClave(t *testing.T) {
 	var salida strings.Builder
 	slog.New(slog.NewTextHandler(&salida, nil)).Info("config", slog.Any("config", cfg))
 
-	if !strings.Contains(salida.String(), "legal_hold_days=1095") {
-		t.Errorf("el log debería informar legal_hold_days: %s", salida.String())
+	for _, esperado := range []string{"audit_key_id=2026-11", "sanction_carryover_days=1095"} {
+		if !strings.Contains(salida.String(), esperado) {
+			t.Errorf("el log debería informar %s: %s", esperado, salida.String())
+		}
 	}
 	if strings.Contains(salida.String(), "clave-publica-que-no-debe-aparecer") {
 		t.Errorf("el log no debería volcar la clave: %s", salida.String())

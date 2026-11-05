@@ -13,7 +13,6 @@ import (
 
 	"github.com/google/uuid"
 
-	"github.com/matiasfelau/vinculo-vial-identity/internal/crypto/secure"
 	"github.com/matiasfelau/vinculo-vial-identity/internal/domain"
 )
 
@@ -32,13 +31,10 @@ type DeleteDeps struct {
 	Users     UserFinder
 	Deletions domain.AccountDeletionRepository
 	Hasher    domain.PasswordHasher
-	// Cipher abre users.dni_encrypted: el DNI en claro solo existe un instante,
-	// para sellarlo hacia el responsable legal.
-	Cipher domain.SymmetricCipher
-	Sealer domain.LegalHoldSealer
-	// LegalHoldDays son los días que se conserva el hold (LEGAL_HOLD_DAYS).
-	LegalHoldDays int
-	Logger        *slog.Logger
+	// SanctionCarryoverDays son los días que la sanción de una cuenta penalizada
+	// se hereda si el mismo DNI se vuelve a registrar (SANCTION_CARRYOVER_DAYS).
+	SanctionCarryoverDays int
+	Logger                *slog.Logger
 	// Now es el reloj; si es nil usa time.Now.
 	Now func() time.Time
 }
@@ -59,12 +55,8 @@ func NewDeleteService(d DeleteDeps) (*DeleteService, error) {
 		return nil, errors.New("account: falta el repositorio de la baja")
 	case d.Hasher == nil:
 		return nil, errors.New("account: falta el hasher de contraseñas")
-	case d.Cipher == nil:
-		return nil, errors.New("account: falta el cifrador at-rest")
-	case d.Sealer == nil:
-		return nil, errors.New("account: falta el sellador del hold")
-	case d.LegalHoldDays < 1:
-		return nil, errors.New("account: los días de retención del hold deben ser al menos 1")
+	case d.SanctionCarryoverDays < 1:
+		return nil, errors.New("account: los días de herencia de la sanción deben ser al menos 1")
 	}
 	if d.Logger == nil {
 		d.Logger = slog.Default()
@@ -130,26 +122,15 @@ func (s *DeleteService) Delete(ctx context.Context, userID uuid.UUID, password [
 
 	s.deps.Logger.InfoContext(ctx, "cuenta dada de baja",
 		slog.String("user_id", userID.String()),
-		slog.Time("destroy_at", deletion.DestroyAt),
 	)
 	return nil
 }
 
-// buildDeletion arma todo lo que la transacción necesita: el DNI sellado, las
-// fechas del hold y los dos eventos de outbox, con el usuario como actor de
-// ambos al publicarse.
+// buildDeletion arma todo lo que la transacción necesita: las fechas y los dos
+// eventos de outbox, con el usuario como actor de ambos al publicarse. La baja
+// no guarda nada del usuario más que la sanción de una cuenta penalizada, y eso
+// lo decide el repositorio dentro de la transacción.
 func (s *DeleteService) buildDeletion(user *domain.User) (domain.AccountDeletion, error) {
-	dni, err := s.deps.Cipher.Decrypt(user.DNIEncrypted)
-	if err != nil {
-		return domain.AccountDeletion{}, fmt.Errorf("account: no se pudo abrir el DNI guardado: %w", err)
-	}
-	defer secure.Wipe(dni)
-
-	sealed, err := s.deps.Sealer.Seal(user.ID, dni)
-	if err != nil {
-		return domain.AccountDeletion{}, fmt.Errorf("account: no se pudo sellar el DNI: %w", err)
-	}
-
 	now := s.deps.Now().UTC()
 
 	revoked, err := domain.NewOutboxEvent(eventTypeSessionsRevoked, map[string]string{
@@ -171,10 +152,9 @@ func (s *DeleteService) buildDeletion(user *domain.User) (domain.AccountDeletion
 	deleted.CreatedAt = now
 
 	return domain.AccountDeletion{
-		UserID:    user.ID,
-		DNISealed: sealed,
-		DeletedAt: now,
-		DestroyAt: now.AddDate(0, 0, s.deps.LegalHoldDays),
-		Events:    []domain.OutboxEvent{revoked, deleted},
+		UserID:             user.ID,
+		DeletedAt:          now,
+		CarryoverExpiresAt: now.AddDate(0, 0, s.deps.SanctionCarryoverDays),
+		Events:             []domain.OutboxEvent{revoked, deleted},
 	}, nil
 }
