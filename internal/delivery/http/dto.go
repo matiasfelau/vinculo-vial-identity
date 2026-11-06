@@ -87,6 +87,21 @@ type verifyOwnershipResponse struct {
 	Match bool `json:"match"`
 }
 
+// auditDNIRequest es el payload interno de POST /internal/audit/dni que envía
+// vinculo-vial-alert antes de crear una alerta: el usuario cuyo DNI se sella y la
+// alerta a la que queda atado el criptograma.
+type auditDNIRequest struct {
+	UserID  string `json:"user_id"`
+	AlertID string `json:"alert_id"`
+}
+
+// auditDNIResponse es la única forma de respuesta de /internal/audit/dni: el DNI
+// sellado hacia Audit (base64 de enc‖ct) y el id de la clave con que se selló.
+type auditDNIResponse struct {
+	DNIEncAudit string `json:"dni_enc_audit"`
+	AuditKeyID  string `json:"audit_key_id"`
+}
+
 // Códigos de error de la API. Son estables y la app decide el texto a mostrar;
 // el campo `error` es para diagnóstico humano, no para parsear.
 const (
@@ -134,6 +149,15 @@ const (
 	codeUnauthorized = "UNAUTHORIZED"
 	// codeDependencyUnavailable es el 503 de la baja cuando la base no responde.
 	codeDependencyUnavailable = "DEPENDENCY_UNAVAILABLE"
+)
+
+// Códigos de error de POST /internal/audit/dni (US-11, Audit). Los fija el
+// contrato compartido, en mayúsculas. INVALID_BODY y DEPENDENCY_UNAVAILABLE son
+// los mismos de la baja.
+const (
+	// codeUserNotFound es el 404 cuando el usuario del sellado no existe: Alert lo
+	// traduce en 403 ACCOUNT_DELETED.
+	codeUserNotFound = "USER_NOT_FOUND"
 )
 
 // errorResponse es la forma única de todos los errores de la API.

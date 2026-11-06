@@ -184,17 +184,17 @@ func TestBajaConBaseNoDisponibleDevuelve503ConRetryAfter(t *testing.T) {
 // la respuesta.
 func TestBajaConFalloInesperadoDevuelve500SinDetalle(t *testing.T) {
 	ts := newTestServer(t, nil)
-	ts.deleteSvc.err = errors.New("pq: relation \"legal_hold.user_holds\" does not exist")
+	ts.deleteSvc.err = errors.New("pq: relation \"sanction_carryovers\" does not exist")
 
 	rec := ts.baja(t, uuid.NewString(), `{"password":"Contraseña-Segura-1"}`)
 
 	if rec.Code != http.StatusInternalServerError {
 		t.Fatalf("status = %d, se esperaba 500", rec.Code)
 	}
-	if strings.Contains(rec.Body.String(), "legal_hold") {
+	if strings.Contains(rec.Body.String(), "sanction_carryovers") {
 		t.Errorf("la respuesta filtra un detalle interno: %s", rec.Body.String())
 	}
-	if !strings.Contains(ts.logs.String(), "legal_hold") {
+	if !strings.Contains(ts.logs.String(), "sanction_carryovers") {
 		t.Errorf("el detalle del fallo debía quedar en el log")
 	}
 }

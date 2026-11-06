@@ -29,44 +29,18 @@ func NewUserDeleted(eventID, userID uuid.UUID, deletedAt time.Time) UserDeleted 
 	return UserDeleted{EventID: eventID, UserID: userID, DeletedAt: deletedAt.UTC()}
 }
 
-// HoldSanction es lo que el hold guarda de una cuenta penalizada, para que el
-// mismo DNI no pueda borrar su sanción dándose de baja y registrándose de
-// nuevo. DNIHMAC es el mismo Blind Index que users.dni_hashed.
-type HoldSanction struct {
-	DNIHMAC         string
-	AccountStatus   AccountStatus
-	ReputationScore int
-	ReportCount     int
-}
-
-// UserHold es el registro mínimo que se conserva por LEGAL_HOLD_DAYS tras la
-// baja de una cuenta (art. 16 inc. 5 de la Ley 25.326), aislado en el esquema
-// legal_hold y destruido al vencer (art. 4 inc. 7). Ningún endpoint lo lee:
-// solo lo tocan la baja, el signup y el sweeper.
-//
-// DNISealed es el DNI cifrado con HPKE hacia el responsable legal: este
-// servicio no puede volver a abrirlo. Sanction es nulo si la cuenta no estaba
-// penalizada, y también después de que un nuevo registro heredó la sanción.
-type UserHold struct {
-	UserID    uuid.UUID
-	DNISealed string
-	DeletedAt time.Time
-	DestroyAt time.Time
-	Sanction  *HoldSanction
-}
-
 // AccountDeletion es todo lo que el caso de uso de la baja le entrega al
 // repositorio para ejecutarla en una única transacción. Lo que depende del
 // estado de la cuenta (la sanción) lo lee el repositorio dentro de la propia
 // transacción, con la fila bloqueada: así un reporte que llega entre la
 // lectura del usuario y la baja no se pierde.
 type AccountDeletion struct {
-	UserID uuid.UUID
-	// DNISealed es el DNI sellado hacia el responsable legal.
-	DNISealed string
+	UserID    uuid.UUID
 	DeletedAt time.Time
-	// DestroyAt es DeletedAt + LEGAL_HOLD_DAYS.
-	DestroyAt time.Time
+	// CarryoverExpiresAt es DeletedAt + SANCTION_CARRYOVER_DAYS: hasta cuándo la
+	// sanción de una cuenta penalizada se hereda si el mismo DNI se vuelve a
+	// registrar.
+	CarryoverExpiresAt time.Time
 	// Events son los eventos de outbox que la baja publica
 	// (user.sessions.revoked y user.deleted); se persisten en la misma
 	// transacción que el borrado.
@@ -78,34 +52,28 @@ func (d AccountDeletion) Validate() error {
 	switch {
 	case d.UserID == uuid.Nil:
 		return errors.New("domain: la baja no tiene usuario")
-	case d.DNISealed == "":
-		return errors.New("domain: la baja no tiene el DNI sellado")
 	case d.DeletedAt.IsZero():
 		return errors.New("domain: la baja no tiene fecha")
-	case !d.DestroyAt.After(d.DeletedAt):
-		return errors.New("domain: la destrucción del hold no es posterior a la baja")
+	case !d.CarryoverExpiresAt.After(d.DeletedAt):
+		return errors.New("domain: el vencimiento de la herencia de sanción no es posterior a la baja")
 	case len(d.Events) == 0:
 		return errors.New("domain: la baja no tiene eventos que publicar")
 	}
 	return nil
 }
 
-// HoldFor arma el hold de la cuenta u, tal como está en este momento. Guarda
-// la sanción solo si la cuenta estaba penalizada (User.IsPenalized).
-func (d AccountDeletion) HoldFor(u *User) UserHold {
-	hold := UserHold{
-		UserID:    d.UserID,
-		DNISealed: d.DNISealed,
-		DeletedAt: d.DeletedAt.UTC(),
-		DestroyAt: d.DestroyAt.UTC(),
+// CarryoverFor arma la sanción que deja la cuenta u, tal como está en este
+// momento, o nil si la cuenta no estaba penalizada (User.IsPenalized).
+func (d AccountDeletion) CarryoverFor(u *User) *SanctionCarryover {
+	if !u.IsPenalized() {
+		return nil
 	}
-	if u.IsPenalized() {
-		hold.Sanction = &HoldSanction{
-			DNIHMAC:         u.DNIHashed,
-			AccountStatus:   u.AccountStatus,
-			ReputationScore: u.ReputationScore,
-			ReportCount:     u.ReportCount,
-		}
+	return &SanctionCarryover{
+		DNIHMAC:         u.DNIHashed,
+		AccountStatus:   u.AccountStatus,
+		ReputationScore: u.ReputationScore,
+		ReportCount:     u.ReportCount,
+		CreatedAt:       d.DeletedAt.UTC(),
+		ExpiresAt:       d.CarryoverExpiresAt.UTC(),
 	}
-	return hold
 }

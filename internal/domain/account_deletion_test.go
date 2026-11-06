@@ -52,7 +52,7 @@ func TestIsPenalized(t *testing.T) {
 func TestInheritSanction(t *testing.T) {
 	u := usuarioConSancion(t, domain.AccountStatusActive, 0, 0)
 
-	u.InheritSanction(domain.HoldSanction{
+	u.InheritSanction(domain.SanctionCarryover{
 		DNIHMAC:         "no-se-copia-a-la-cuenta",
 		AccountStatus:   domain.AccountStatusUnderReview,
 		ReputationScore: -20,
@@ -76,11 +76,10 @@ func unaBajaValida(t *testing.T) domain.AccountDeletion {
 	}
 	baja := time.Date(2026, 11, 2, 12, 0, 0, 0, time.UTC)
 	return domain.AccountDeletion{
-		UserID:    uuid.New(),
-		DNISealed: "sellado",
-		DeletedAt: baja,
-		DestroyAt: baja.AddDate(0, 0, 1095),
-		Events:    []domain.OutboxEvent{evt},
+		UserID:             uuid.New(),
+		DeletedAt:          baja,
+		CarryoverExpiresAt: baja.AddDate(0, 0, 1095),
+		Events:             []domain.OutboxEvent{evt},
 	}
 }
 
@@ -91,10 +90,10 @@ func TestAccountDeletionValidate(t *testing.T) {
 
 	casos := map[string]func(d *domain.AccountDeletion){
 		"sin usuario":              func(d *domain.AccountDeletion) { d.UserID = uuid.Nil },
-		"sin DNI sellado":          func(d *domain.AccountDeletion) { d.DNISealed = "" },
 		"sin fecha de baja":        func(d *domain.AccountDeletion) { d.DeletedAt = time.Time{} },
-		"destrucción igual a baja": func(d *domain.AccountDeletion) { d.DestroyAt = d.DeletedAt },
-		"destrucción anterior":     func(d *domain.AccountDeletion) { d.DestroyAt = d.DeletedAt.Add(-time.Hour) },
+		"vencimiento igual a baja": func(d *domain.AccountDeletion) { d.CarryoverExpiresAt = d.DeletedAt },
+		"vencimiento anterior":     func(d *domain.AccountDeletion) { d.CarryoverExpiresAt = d.DeletedAt.Add(-time.Hour) },
+		"sin vencimiento":          func(d *domain.AccountDeletion) { d.CarryoverExpiresAt = time.Time{} },
 		"sin eventos":              func(d *domain.AccountDeletion) { d.Events = nil },
 	}
 
@@ -110,56 +109,50 @@ func TestAccountDeletionValidate(t *testing.T) {
 	}
 }
 
-// Una cuenta sin penalizaciones deja un hold sin sanción: ni Blind Index ni
-// estado ni conteos.
-func TestHoldForUnaCuentaLimpiaNoGuardaSancion(t *testing.T) {
+// Una cuenta sin penalizaciones no deja nada: ni Blind Index ni estado ni
+// conteos.
+func TestCarryoverForUnaCuentaLimpiaNoDejaSancion(t *testing.T) {
 	d := unaBajaValida(t)
 	u := usuarioConSancion(t, domain.AccountStatusActive, 0, 0)
 
-	hold := d.HoldFor(u)
-
-	if hold.Sanction != nil {
-		t.Errorf("una cuenta limpia no debe dejar sanción en el hold: %+v", hold.Sanction)
-	}
-	if hold.UserID != d.UserID || hold.DNISealed != d.DNISealed {
-		t.Errorf("hold = %+v", hold)
-	}
-	if !hold.DeletedAt.Equal(d.DeletedAt) || !hold.DestroyAt.Equal(d.DestroyAt) {
-		t.Errorf("fechas del hold = %v y %v", hold.DeletedAt, hold.DestroyAt)
+	if got := d.CarryoverFor(u); got != nil {
+		t.Errorf("una cuenta limpia no debe dejar sanción: %+v", got)
 	}
 }
 
-func TestHoldForUnaCuentaPenalizadaGuardaLaSancion(t *testing.T) {
+func TestCarryoverForUnaCuentaPenalizadaDejaLaSancion(t *testing.T) {
 	d := unaBajaValida(t)
 	u := usuarioConSancion(t, domain.AccountStatusUnderReview, -30, 2)
 
-	hold := d.HoldFor(u)
+	got := d.CarryoverFor(u)
 
-	if hold.Sanction == nil {
-		t.Fatal("una cuenta penalizada debe dejar su sanción en el hold")
+	if got == nil {
+		t.Fatal("una cuenta penalizada debe dejar su sanción")
 	}
-	want := domain.HoldSanction{
+	want := domain.SanctionCarryover{
 		DNIHMAC:         "blind-index",
 		AccountStatus:   domain.AccountStatusUnderReview,
 		ReputationScore: -30,
 		ReportCount:     2,
+		CreatedAt:       d.DeletedAt,
+		ExpiresAt:       d.CarryoverExpiresAt,
 	}
-	if *hold.Sanction != want {
-		t.Errorf("sanción = %+v, se esperaba %+v", *hold.Sanction, want)
+	if *got != want {
+		t.Errorf("sanción = %+v, se esperaba %+v", *got, want)
 	}
 }
 
-// Las fechas del hold se normalizan a UTC.
-func TestHoldForNormalizaLasFechasAUTC(t *testing.T) {
+// El vencimiento es el de la baja más el plazo, y las fechas se normalizan a UTC.
+func TestCarryoverForNormalizaLasFechasAUTC(t *testing.T) {
 	d := unaBajaValida(t)
 	art := time.FixedZone("ART", -3*60*60)
 	d.DeletedAt = d.DeletedAt.In(art)
-	d.DestroyAt = d.DestroyAt.In(art)
+	d.CarryoverExpiresAt = d.CarryoverExpiresAt.In(art)
 
-	hold := d.HoldFor(usuarioConSancion(t, domain.AccountStatusActive, 0, 0))
+	got := d.CarryoverFor(usuarioConSancion(t, domain.AccountStatusUnderReview, 0, 0))
 
-	if hold.DeletedAt.Location() != time.UTC || hold.DestroyAt.Location() != time.UTC {
-		t.Errorf("las fechas del hold no están en UTC: %v y %v", hold.DeletedAt.Location(), hold.DestroyAt.Location())
+	if got.CreatedAt.Location() != time.UTC || got.ExpiresAt.Location() != time.UTC {
+		t.Errorf("las fechas de la sanción no están en UTC: %v y %v", got.CreatedAt.Location(), got.ExpiresAt.Location())
 	}
 }
 

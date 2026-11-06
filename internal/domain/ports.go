@@ -18,12 +18,12 @@ type UserRepository interface {
 	// de dni_hashed; la detección del duplicado se delega a la base para evitar
 	// la condición de carrera de un chequeo previo.
 	//
-	// Herencia de sanción (US-11): si existe un hold vigente con el mismo Blind
-	// Index de DNI y campos de sanción, el usuario se crea con esa sanción (u se
-	// actualiza en el lugar, solo si el alta se confirma), los campos se anulan
-	// en el hold y, si el usuario queda UNDER_REVIEW, inheritedStatus se
-	// persiste en el outbox. Todo en una única transacción: un alta que falla no
-	// consume la sanción del hold, y una sanción nunca se hereda dos veces.
+	// Herencia de sanción (US-11): si existe una SanctionCarryover vigente con el
+	// mismo Blind Index de DNI, el usuario se crea con esa sanción (u se
+	// actualiza en el lugar, solo si el alta se confirma), la fila se borra y,
+	// si el usuario queda UNDER_REVIEW, inheritedStatus se persiste en el
+	// outbox. Todo en una única transacción: un alta que falla no consume la
+	// sanción, y una sanción nunca se hereda dos veces.
 	// inheritedStatus es el user.status.changed ya armado; solo se persiste si
 	// hay herencia y el estado heredado es UNDER_REVIEW.
 	Create(ctx context.Context, u *User, inheritedStatus OutboxEvent) error
@@ -83,9 +83,9 @@ type ReputationRepository interface {
 // AccountDeletionRepository ejecuta la baja de una cuenta (US-11).
 type AccountDeletionRepository interface {
 	// DeleteAccount, en una única transacción: bloquea la fila del usuario,
-	// crea su hold en legal_hold.user_holds (con la sanción solo si la cuenta
-	// estaba penalizada), borra sus sesiones y su fila de users, y encola los
-	// eventos de la baja en el outbox. Si cualquier paso falla no se deshace
+	// deja su sanción en sanction_carryovers (solo si la cuenta estaba
+	// penalizada), borra sus sesiones y su fila de users, y encola los eventos
+	// de la baja en el outbox. Si cualquier paso falla no se deshace
 	// parcialmente: no queda nada hecho.
 	//
 	// Devuelve ErrUserNotFound (envuelto o no) si el usuario ya no existe, y un
@@ -93,21 +93,33 @@ type AccountDeletionRepository interface {
 	DeleteAccount(ctx context.Context, deletion AccountDeletion) error
 }
 
-// LegalHoldRepository administra el ciclo de vida de los holds ya creados.
-type LegalHoldRepository interface {
-	// DestroyExpired borra hasta limit holds con destroy_at <= now y devuelve
-	// cuántos borró. Es idempotente y seguro con varias réplicas corriendo a la
-	// vez: dos barridos concurrentes nunca toman el mismo hold.
-	DestroyExpired(ctx context.Context, now time.Time, limit int) (int64, error)
+// SanctionCarryoverRepository administra el ciclo de vida de las sanciones que
+// dejaron las cuentas dadas de baja.
+type SanctionCarryoverRepository interface {
+	// DeleteExpired borra hasta limit sanciones con expires_at <= now y devuelve
+	// cuántas borró. Es idempotente y seguro con varias réplicas corriendo a la
+	// vez: dos barridos concurrentes nunca toman la misma fila.
+	DeleteExpired(ctx context.Context, now time.Time, limit int) (int64, error)
 }
 
-// LegalHoldSealer sella el DNI de un usuario hacia el responsable legal: solo
-// quien tenga la clave privada, que este servicio nunca carga, puede abrirlo.
-type LegalHoldSealer interface {
-	// Seal devuelve el DNI canónico (solo dígitos) cifrado con HPKE, con el
-	// `info` atado a userID, como base64 de enc‖ct. El llamador es responsable
-	// de limpiar dni.
-	Seal(userID uuid.UUID, dni []byte) (string, error)
+// AuditDNI es el DNI de un usuario sellado hacia el Audit Service para una
+// alerta puntual (US-11, Audit).
+type AuditDNI struct {
+	// Sealed es el DNI canónico cifrado con HPKE hacia la clave pública de Audit,
+	// como base64 de enc‖ct. Solo quien custodia la clave privada, fuera de
+	// línea, puede abrirlo.
+	Sealed string
+	// KeyID identifica el par de claves de Audit con que se selló, para poder
+	// rotarlas.
+	KeyID string
+}
+
+// AuditSealer sella el DNI de un usuario hacia el Audit Service. Este servicio
+// solo conoce la clave pública: no puede reabrir lo que selló.
+type AuditSealer interface {
+	// SealDNI devuelve el DNI canónico (solo dígitos) cifrado con HPKE, con el
+	// `info` atado a alertID. El llamador es responsable de limpiar dni.
+	SealDNI(alertID uuid.UUID, dni []byte) (AuditDNI, error)
 }
 
 // SessionRepository persiste sesiones: el registro de cada Refresh Token

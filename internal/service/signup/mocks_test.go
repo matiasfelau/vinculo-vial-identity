@@ -132,9 +132,9 @@ func (m *renaperMock) ValidateIdentity(_ context.Context, dni, tramite, sexo, se
 
 type repositoryMock struct {
 	err error
-	// inherit, si no es nil, simula un hold vigente del mismo DNI: Create le
+	// inherit, si no es nil, simula una sanción vigente del mismo DNI: Create le
 	// hace heredar la sanción al usuario, como el repositorio real.
-	inherit *domain.HoldSanction
+	inherit *domain.SanctionCarryover
 
 	mu      sync.Mutex
 	calls   int

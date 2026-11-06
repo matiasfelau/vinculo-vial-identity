@@ -40,68 +40,41 @@ func NewUserRepository(ctx context.Context, db *gorm.DB) (*UserRepository, error
 		return nil, fmt.Errorf("postgres: falló la migración del esquema: %w", err)
 	}
 
-	// Create consulta legal_hold.user_holds para la herencia de sanciones
-	// (US-11), así que el esquema tiene que existir antes del primer alta.
-	if err := ensureLegalHoldSchema(ctx, db); err != nil {
+	// Create consulta sanction_carryovers para la herencia de sanciones (US-11),
+	// así que la tabla tiene que existir antes del primer alta.
+	if err := ensureSanctionCarryovers(ctx, db); err != nil {
 		return nil, err
 	}
 
 	return &UserRepository{db: db}, nil
 }
 
-// claimHeldSanction anula, y devuelve, la sanción del hold vigente con ese
-// Blind Index de DNI. El UPDATE devuelve los valores nuevos (todos NULL), así
-// que los viejos se leen en un CTE con FOR UPDATE: dos altas concurrentes con el
-// mismo DNI se serializan en el bloqueo del hold, y la segunda ya no lo
-// encuentra. Al anular también dni_hmac, el hold deja de poder vincularse con
-// una cuenta nueva.
-const claimHeldSanction = `
-WITH held AS (
-	SELECT user_id, account_status, reputation_score, report_count
-	FROM legal_hold.user_holds
-	WHERE dni_hmac = ? AND destroy_at > ?
-	FOR UPDATE
-)
-UPDATE legal_hold.user_holds AS h
-SET dni_hmac = NULL, account_status = NULL, reputation_score = NULL, report_count = NULL
-FROM held
-WHERE h.user_id = held.user_id
-RETURNING held.account_status, held.reputation_score, held.report_count`
-
-// heldSanctionRow es lo que devuelve claimHeldSanction.
-type heldSanctionRow struct {
-	AccountStatus   *string
-	ReputationScore *int
-	ReportCount     *int
-}
+// claimSanctionCarryover borra, y devuelve, la sanción vigente con ese Blind
+// Index de DNI. Un único DELETE ... RETURNING alcanza: dos altas concurrentes con
+// el mismo DNI se serializan en el bloqueo de la fila, y la segunda, cuando la
+// primera confirma, ya no la encuentra. Una fila vencida no se hereda; la borra
+// el barrido.
+const claimSanctionCarryover = `
+DELETE FROM sanction_carryovers
+WHERE dni_hmac = ? AND expires_at > ?
+RETURNING dni_hmac, account_status, reputation_score, report_count, created_at, expires_at`
 
 // claimSanction reclama la sanción vigente de dniHashed, o devuelve nil si no
 // hay ninguna. Tiene que correr dentro de la transacción del alta.
-func claimSanction(tx *gorm.DB, dniHashed string, now time.Time) (*domain.HoldSanction, error) {
-	var rows []heldSanctionRow
-	if err := tx.Raw(claimHeldSanction, dniHashed, now.UTC()).Scan(&rows).Error; err != nil {
-		return nil, fmt.Errorf("no se pudo consultar el hold del DNI: %w", err)
+func claimSanction(tx *gorm.DB, dniHashed string, now time.Time) (*domain.SanctionCarryover, error) {
+	var rows []sanctionCarryoverModel
+	if err := tx.Raw(claimSanctionCarryover, dniHashed, now.UTC()).Scan(&rows).Error; err != nil {
+		return nil, fmt.Errorf("no se pudo consultar la sanción del DNI: %w", err)
 	}
 	if len(rows) == 0 {
 		return nil, nil
 	}
-
-	// Un hold con dni_hmac siempre trae los tres campos (la baja los escribe
-	// juntos); si alguno falta, no hay sanción que heredar.
-	row := rows[0]
-	if row.AccountStatus == nil || row.ReputationScore == nil || row.ReportCount == nil {
-		return nil, nil
-	}
-	return &domain.HoldSanction{
-		DNIHMAC:         dniHashed,
-		AccountStatus:   domain.AccountStatus(*row.AccountStatus),
-		ReputationScore: *row.ReputationScore,
-		ReportCount:     *row.ReportCount,
-	}, nil
+	carryover := rows[0].toDomain()
+	return &carryover, nil
 }
 
 // Create inserta el usuario y, en la misma transacción, le hace heredar la
-// sanción de un hold vigente del mismo DNI (US-11). Ver
+// sanción vigente que dejó una cuenta anterior del mismo DNI (US-11). Ver
 // domain.UserRepository.Create.
 //
 // La detección de duplicados se delega a los índices únicos de la base en lugar
@@ -109,7 +82,7 @@ func claimSanction(tx *gorm.DB, dniHashed string, now time.Time) (*domain.HoldSa
 // que otra petición concurrente puede insertar el mismo email o DNI, y solo la
 // restricción de la base cierra esa carrera. La sanción se reclama antes del
 // INSERT y dentro de la misma transacción: si el INSERT choca con un duplicado,
-// el reclamo se deshace y el hold conserva su sanción.
+// el reclamo se deshace y la sanción sigue disponible.
 //
 // La colisión se colapsa en domain.ErrDuplicateUser sin decir qué índice se violó:
 // distinguir "ese email ya existe" de "ese DNI ya existe" convertiría el endpoint

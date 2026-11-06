@@ -40,7 +40,8 @@ type Config struct {
 	Events     EventsConfig
 	Consumer   ConsumerConfig
 	Reputation ReputationConfig
-	LegalHold  LegalHoldConfig
+	Audit      AuditConfig
+	Sanction   SanctionConfig
 	Token      TokenConfig
 	Renaper    RenaperConfig
 	Outbox     OutboxConfig
@@ -250,38 +251,49 @@ type ReputationConfig struct {
 	ReviewThreshold int
 }
 
-// LegalHoldConfig son los parámetros del registro mínimo que se conserva tras la
-// baja de una cuenta (US-11).
-type LegalHoldConfig struct {
-	// PublicKey es la clave pública X25519 del responsable legal, en base64
-	// (LEGAL_HOLD_PUBLIC_KEY). Con ella se sella el DNI de cada baja; la privada
-	// se genera fuera de línea con cmd/legalhold-keygen y ningún servicio la
-	// carga. Es obligatoria: sin ella no hay forma de sellar el DNI, y el
-	// servicio no arranca. No es un secreto, pero tampoco se vuelca al log.
+// AuditConfig son los parámetros con que Identity sella el DNI del emisor de una
+// alerta hacia el Audit Service (US-11).
+type AuditConfig struct {
+	// PublicKey es la clave pública X25519 de Audit, en base64 (AUDIT_PUBLIC_KEY).
+	// La privada se genera fuera de línea con audit-keygen, la custodia el
+	// responsable legal y ningún servicio la carga, ni siquiera Audit. Es
+	// obligatoria: sin ella no hay forma de sellar el DNI, y el servicio no
+	// arranca. No es un secreto, pero tampoco se vuelca al log. Tiene que
+	// coincidir con la de Vehicle.
 	PublicKey string
-	// Days son los días que se conserva el hold (LEGAL_HOLD_DAYS): 1095, tres
-	// años, por el art. 2561 del CCyC y el art. 62 del CP. Tiene que coincidir
-	// con el valor de Alert.
-	Days int
-	// SweepInterval es cada cuánto corre el barrido que destruye los holds
-	// vencidos.
+	// KeyID es el id corto del par de claves (AUDIT_KEY_ID, por ejemplo "2026-11"):
+	// viaja con cada criptograma para poder rotar las claves. Tiene que coincidir
+	// con el de Vehicle. Su formato lo valida auditseal.New en el arranque.
+	KeyID string
+}
+
+// SanctionConfig son los parámetros de la herencia de la sanción de una cuenta
+// penalizada que se dio de baja (US-11).
+type SanctionConfig struct {
+	// CarryoverDays son los días que la sanción se hereda si el mismo DNI se vuelve
+	// a registrar (SANCTION_CARRYOVER_DAYS): 1095, tres años, por el art. 2561 del
+	// CCyC y el art. 62 del CP.
+	CarryoverDays int
+	// SweepInterval es cada cuánto corre el barrido que borra las sanciones
+	// vencidas (SANCTION_CARRYOVER_SWEEP_INTERVAL).
 	SweepInterval time.Duration
-	// SweepBatchSize acota cuántos holds borra cada sentencia del barrido.
+	// SweepBatchSize acota cuántas sanciones borra cada sentencia del barrido
+	// (SANCTION_CARRYOVER_SWEEP_BATCH_SIZE).
 	SweepBatchSize int
 }
 
 // Valores por defecto pensados para que el entorno local levante sin definir
 // más que los secretos.
 const (
-	// defaultLegalHoldDays es el contrato de US-11: tres años.
-	defaultLegalHoldDays = 1095
-	// defaultLegalHoldSweepInterval y defaultLegalHoldSweepBatchSize son una
-	// decisión operativa: el plazo es de años, así que destruir un hold con una
+	// defaultSanctionCarryoverDays es el contrato de US-11: tres años.
+	defaultSanctionCarryoverDays = 1095
+	// defaultSanctionSweepInterval y defaultSanctionSweepBatchSize son una
+	// decisión operativa: el plazo es de años, así que borrar una sanción con una
 	// hora de demora no cambia nada.
-	defaultLegalHoldSweepInterval  = time.Hour
-	defaultLegalHoldSweepBatchSize = 500
-	defaultHTTPPort                = 8080
-	defaultInternalPort            = 8081
+	defaultSanctionSweepInterval  = time.Hour
+	defaultSanctionSweepBatchSize = 500
+	defaultHTTPPort               = 8080
+	defaultInternalPort           = 8081
 	// minServiceTokenLength es el piso de entropía admitido para
 	// INTERNAL_SERVICE_TOKEN: es un secreto compartido comparado byte a byte
 	// (no una contraseña con Argon2 detrás), así que su propia longitud es
@@ -428,11 +440,15 @@ func Load() (*Config, error) {
 			ReviewThreshold: r.integer("REPORT_REVIEW_THRESHOLD", defaultReviewThreshold),
 		},
 
-		LegalHold: LegalHoldConfig{
-			PublicKey:      r.required("LEGAL_HOLD_PUBLIC_KEY"),
-			Days:           r.integer("LEGAL_HOLD_DAYS", defaultLegalHoldDays),
-			SweepInterval:  r.duration("LEGAL_HOLD_SWEEP_INTERVAL", defaultLegalHoldSweepInterval),
-			SweepBatchSize: r.integer("LEGAL_HOLD_SWEEP_BATCH_SIZE", defaultLegalHoldSweepBatchSize),
+		Audit: AuditConfig{
+			PublicKey: r.required("AUDIT_PUBLIC_KEY"),
+			KeyID:     r.required("AUDIT_KEY_ID"),
+		},
+
+		Sanction: SanctionConfig{
+			CarryoverDays:  r.integer("SANCTION_CARRYOVER_DAYS", defaultSanctionCarryoverDays),
+			SweepInterval:  r.duration("SANCTION_CARRYOVER_SWEEP_INTERVAL", defaultSanctionSweepInterval),
+			SweepBatchSize: r.integer("SANCTION_CARRYOVER_SWEEP_BATCH_SIZE", defaultSanctionSweepBatchSize),
 		},
 
 		Token: TokenConfig{
@@ -578,14 +594,14 @@ func (c *Config) validate() error {
 		r.fail("config: REPORT_REVIEW_THRESHOLD debe ser al menos 1, se recibió %d", c.Reputation.ReviewThreshold)
 	}
 
-	if c.LegalHold.Days < 1 {
-		r.fail("config: LEGAL_HOLD_DAYS debe ser al menos 1, se recibió %d", c.LegalHold.Days)
+	if c.Sanction.CarryoverDays < 1 {
+		r.fail("config: SANCTION_CARRYOVER_DAYS debe ser al menos 1, se recibió %d", c.Sanction.CarryoverDays)
 	}
-	if c.LegalHold.SweepInterval <= 0 {
-		r.fail("config: LEGAL_HOLD_SWEEP_INTERVAL debe ser positivo")
+	if c.Sanction.SweepInterval <= 0 {
+		r.fail("config: SANCTION_CARRYOVER_SWEEP_INTERVAL debe ser positivo")
 	}
-	if c.LegalHold.SweepBatchSize < 1 {
-		r.fail("config: LEGAL_HOLD_SWEEP_BATCH_SIZE debe ser al menos 1, se recibió %d", c.LegalHold.SweepBatchSize)
+	if c.Sanction.SweepBatchSize < 1 {
+		r.fail("config: SANCTION_CARRYOVER_SWEEP_BATCH_SIZE debe ser al menos 1, se recibió %d", c.Sanction.SweepBatchSize)
 	}
 
 	if c.Events.Enabled {
@@ -643,9 +659,10 @@ func (c *Config) LogValue() slog.Value {
 		slog.String("alert_reported_queue", c.Consumer.AlertReportedQueue),
 		slog.Int("fraud_penalty", c.Reputation.FraudPenalty),
 		slog.Int("report_review_threshold", c.Reputation.ReviewThreshold),
-		slog.Int("legal_hold_days", c.LegalHold.Days),
-		slog.Duration("legal_hold_sweep_interval", c.LegalHold.SweepInterval),
-		slog.Int("legal_hold_sweep_batch_size", c.LegalHold.SweepBatchSize),
+		slog.String("audit_key_id", c.Audit.KeyID),
+		slog.Int("sanction_carryover_days", c.Sanction.CarryoverDays),
+		slog.Duration("sanction_carryover_sweep_interval", c.Sanction.SweepInterval),
+		slog.Int("sanction_carryover_sweep_batch_size", c.Sanction.SweepBatchSize),
 		slog.Duration("renaper_timeout", c.Renaper.Timeout),
 		slog.Int("renaper_breaker_failure_threshold", c.Renaper.BreakerFailureThreshold),
 		slog.Duration("renaper_breaker_window", c.Renaper.BreakerWindow),

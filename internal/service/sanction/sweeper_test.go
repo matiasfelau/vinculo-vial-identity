@@ -1,4 +1,4 @@
-package legalhold_test
+package sanction_test
 
 import (
 	"bytes"
@@ -11,10 +11,10 @@ import (
 	"time"
 
 	"github.com/matiasfelau/vinculo-vial-identity/internal/domain"
-	"github.com/matiasfelau/vinculo-vial-identity/internal/service/legalhold"
+	"github.com/matiasfelau/vinculo-vial-identity/internal/service/sanction"
 )
 
-// repoFake simula una tabla de holds vencidos: cada DestroyExpired borra hasta
+// repoFake simula una tabla de sanciones vencidas: cada DeleteExpired borra hasta
 // limit y devuelve cuántos había.
 type repoFake struct {
 	mu        sync.Mutex
@@ -29,7 +29,7 @@ type repoFake struct {
 	llamado chan struct{}
 }
 
-func (r *repoFake) DestroyExpired(_ context.Context, now time.Time, limit int) (int64, error) {
+func (r *repoFake) DeleteExpired(_ context.Context, now time.Time, limit int) (int64, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
@@ -54,33 +54,33 @@ func (r *repoFake) DestroyExpired(_ context.Context, now time.Time, limit int) (
 	return n, nil
 }
 
-var _ domain.LegalHoldRepository = (*repoFake)(nil)
+var _ domain.SanctionCarryoverRepository = (*repoFake)(nil)
 
-func sweeper(t *testing.T, repo *repoFake, batch int, logs *bytes.Buffer) *legalhold.Sweeper {
+func sweeper(t *testing.T, repo *repoFake, batch int, logs *bytes.Buffer) *sanction.Sweeper {
 	t.Helper()
 
 	var logger *slog.Logger
 	if logs != nil {
 		logger = slog.New(slog.NewTextHandler(logs, &slog.HandlerOptions{Level: slog.LevelDebug}))
 	}
-	s, err := legalhold.NewSweeper(repo, 10*time.Millisecond, batch, logger)
+	s, err := sanction.NewSweeper(repo, 10*time.Millisecond, batch, logger)
 	if err != nil {
 		t.Fatalf("error inesperado: %v", err)
 	}
 	return s
 }
 
-// Destruye todos los vencidos, de a lotes, y devuelve el total.
-func TestSweepOnceDestruyeTodosLosVencidosDeALotes(t *testing.T) {
+// Borra todas las vencidas, de a lotes, y devuelve el total.
+func TestSweepOnceBorraTodasLasVencidasDeALotes(t *testing.T) {
 	repo := &repoFake{pending: 25}
 
-	destroyed, err := sweeper(t, repo, 10, nil).SweepOnce(context.Background())
+	deleted, err := sweeper(t, repo, 10, nil).SweepOnce(context.Background())
 	if err != nil {
 		t.Fatalf("error inesperado: %v", err)
 	}
 
-	if destroyed != 25 {
-		t.Errorf("destruidos = %d, se esperaban 25", destroyed)
+	if deleted != 25 {
+		t.Errorf("borradas = %d, se esperaban 25", deleted)
 	}
 	// 10 + 10 + 5: el lote incompleto corta el barrido sin una llamada de más.
 	if repo.calls != 3 {
@@ -96,9 +96,9 @@ func TestSweepOnceDestruyeTodosLosVencidosDeALotes(t *testing.T) {
 func TestSweepOnceSinVencidosNoHaceNada(t *testing.T) {
 	repo := &repoFake{}
 
-	destroyed, err := sweeper(t, repo, 10, nil).SweepOnce(context.Background())
-	if err != nil || destroyed != 0 {
-		t.Fatalf("destruidos=%d err=%v, se esperaba 0 y nil", destroyed, err)
+	deleted, err := sweeper(t, repo, 10, nil).SweepOnce(context.Background())
+	if err != nil || deleted != 0 {
+		t.Fatalf("borradas=%d err=%v, se esperaba 0 y nil", deleted, err)
 	}
 	if repo.calls != 1 {
 		t.Errorf("llamadas = %d, se esperaba 1", repo.calls)
@@ -110,16 +110,16 @@ func TestSweepOnceSinVencidosNoHaceNada(t *testing.T) {
 func TestSweepOnceConUnMultiploExactoDelLote(t *testing.T) {
 	repo := &repoFake{pending: 20}
 
-	destroyed, err := sweeper(t, repo, 10, nil).SweepOnce(context.Background())
-	if err != nil || destroyed != 20 {
-		t.Fatalf("destruidos=%d err=%v, se esperaba 20 y nil", destroyed, err)
+	deleted, err := sweeper(t, repo, 10, nil).SweepOnce(context.Background())
+	if err != nil || deleted != 20 {
+		t.Fatalf("borradas=%d err=%v, se esperaba 20 y nil", deleted, err)
 	}
 	if repo.calls != 3 {
 		t.Errorf("llamadas = %d, se esperaban 3 (10 + 10 + 0)", repo.calls)
 	}
 }
 
-// El corte se hace contra el reloj: solo vence lo que tiene destroy_at <= ahora.
+// El corte se hace contra el reloj: solo vence lo que tiene expires_at <= ahora.
 func TestSweepOnceUsaLaHoraActual(t *testing.T) {
 	repo := &repoFake{pending: 1}
 
@@ -134,17 +134,17 @@ func TestSweepOnceUsaLaHoraActual(t *testing.T) {
 	}
 }
 
-// Ante un error devuelve igual lo destruido hasta ahí, con el error alcanzable.
-func TestSweepOnceConErrorDevuelveLoDestruidoYElError(t *testing.T) {
+// Ante un error devuelve igual lo borrado hasta ahí, con el error alcanzable.
+func TestSweepOnceConErrorDevuelveLoBorradoYElError(t *testing.T) {
 	repo := &repoFake{pending: 100, err: domain.ErrDatabaseUnavailable, errAtCall: 3}
 
-	destroyed, err := sweeper(t, repo, 10, nil).SweepOnce(context.Background())
+	deleted, err := sweeper(t, repo, 10, nil).SweepOnce(context.Background())
 
 	if !errors.Is(err, domain.ErrDatabaseUnavailable) {
 		t.Fatalf("error = %v, se esperaba ErrDatabaseUnavailable", err)
 	}
-	if destroyed != 20 {
-		t.Errorf("destruidos = %d, se esperaban los 20 de los dos lotes previos", destroyed)
+	if deleted != 20 {
+		t.Errorf("borradas = %d, se esperaban los 20 de los dos lotes previos", deleted)
 	}
 }
 
@@ -195,7 +195,7 @@ func TestRunBarreAlArrancarYPeriodicamente(t *testing.T) {
 // goroutine barriendo.
 func TestRunTerminaAlCancelarElContexto(t *testing.T) {
 	repo := &repoFake{}
-	s, err := legalhold.NewSweeper(repo, time.Hour, 10, nil)
+	s, err := sanction.NewSweeper(repo, time.Hour, 10, nil)
 	if err != nil {
 		t.Fatalf("error inesperado: %v", err)
 	}
@@ -244,7 +244,7 @@ func TestRunSobreviveAUnBarridoFallidoYLoLoguea(t *testing.T) {
 	}
 }
 
-func TestSweepLogueaLoDestruidoSinDatosDeNadie(t *testing.T) {
+func TestSweepLogueaLoBorradoSinDatosDeNadie(t *testing.T) {
 	repo := &repoFake{pending: 3, llamado: make(chan struct{}, 16)}
 	var logs bytes.Buffer
 	s := sweeper(t, repo, 10, &logs)
@@ -259,19 +259,19 @@ func TestSweepLogueaLoDestruidoSinDatosDeNadie(t *testing.T) {
 	cancel()
 	<-done
 
-	if !strings.Contains(logs.String(), "destroyed=3") {
-		t.Errorf("se esperaba el conteo de holds destruidos en el log: %s", logs.String())
+	if !strings.Contains(logs.String(), "deleted=3") {
+		t.Errorf("se esperaba el conteo de sanciones borradas en el log: %s", logs.String())
 	}
 }
 
 func TestNewSweeperValidaSusParametros(t *testing.T) {
 	repo := &repoFake{}
 
-	casos := map[string]func() (*legalhold.Sweeper, error){
-		"sin repositorio":    func() (*legalhold.Sweeper, error) { return legalhold.NewSweeper(nil, time.Hour, 10, nil) },
-		"intervalo en cero":  func() (*legalhold.Sweeper, error) { return legalhold.NewSweeper(repo, 0, 10, nil) },
-		"intervalo negativo": func() (*legalhold.Sweeper, error) { return legalhold.NewSweeper(repo, -time.Second, 10, nil) },
-		"lote en cero":       func() (*legalhold.Sweeper, error) { return legalhold.NewSweeper(repo, time.Hour, 0, nil) },
+	casos := map[string]func() (*sanction.Sweeper, error){
+		"sin repositorio":    func() (*sanction.Sweeper, error) { return sanction.NewSweeper(nil, time.Hour, 10, nil) },
+		"intervalo en cero":  func() (*sanction.Sweeper, error) { return sanction.NewSweeper(repo, 0, 10, nil) },
+		"intervalo negativo": func() (*sanction.Sweeper, error) { return sanction.NewSweeper(repo, -time.Second, 10, nil) },
+		"lote en cero":       func() (*sanction.Sweeper, error) { return sanction.NewSweeper(repo, time.Hour, 0, nil) },
 	}
 
 	for nombre, construir := range casos {

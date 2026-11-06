@@ -17,7 +17,8 @@ import (
 const HeaderInternalServiceToken = "X-Internal-Service-Token"
 
 // InternalRouterConfig son los parámetros de armado del router de las rutas
-// /internal/* (por ejemplo, POST /internal/verify-ownership de US-04).
+// /internal/* (POST /internal/verify-ownership de US-04 y POST
+// /internal/audit/dni de US-11).
 //
 // Este router se sirve por separado de NewRouter, en su propio *http.Server y
 // su propio puerto (ver cmd/api): ni Kong ni el docker-compose de este
@@ -32,7 +33,9 @@ type InternalRouterConfig struct {
 	// VerifyOwnership es el caso de uso de POST /internal/verify-ownership
 	// (US-04).
 	VerifyOwnership VerifyOwnershipService
-	Logger          *slog.Logger
+	// AuditDNI es el caso de uso de POST /internal/audit/dni (US-11, Audit).
+	AuditDNI AuditDNIService
+	Logger   *slog.Logger
 	// ServiceToken es el secreto que toda petición a /internal/* debe traer
 	// en HeaderInternalServiceToken. Es obligatorio: sin él, este router
 	// sería exactamente el oráculo de verificación de DNI por fuerza bruta
@@ -59,7 +62,7 @@ func NewInternalRouter(cfg InternalRouterConfig) (*gin.Engine, error) {
 		logger = slog.Default()
 	}
 
-	handler, err := NewInternalHandler(cfg.VerifyOwnership, logger)
+	handler, err := NewInternalHandler(cfg.VerifyOwnership, cfg.AuditDNI, logger)
 	if err != nil {
 		return nil, err
 	}
@@ -92,6 +95,7 @@ func NewInternalRouter(cfg InternalRouterConfig) (*gin.Engine, error) {
 	})
 
 	r.POST("/internal/verify-ownership", handler.VerifyOwnership)
+	r.POST("/internal/audit/dni", handler.AuditDNI)
 
 	r.NoRoute(func(c *gin.Context) {
 		c.JSON(http.StatusNotFound, errorResponse{Code: codeInvalidRequest, Error: "recurso no encontrado", RequestID: requestIDOf(c)})
