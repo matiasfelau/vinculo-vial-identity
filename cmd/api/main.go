@@ -16,6 +16,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/matiasfelau/vinculo-vial-identity/internal/crypto/auditseal"
 	"github.com/matiasfelau/vinculo-vial-identity/internal/crypto/blindindex"
 	"github.com/matiasfelau/vinculo-vial-identity/internal/crypto/hpke"
 	"github.com/matiasfelau/vinculo-vial-identity/internal/crypto/password"
@@ -26,9 +27,12 @@ import (
 	"github.com/matiasfelau/vinculo-vial-identity/internal/domain"
 	"github.com/matiasfelau/vinculo-vial-identity/internal/renaper"
 	"github.com/matiasfelau/vinculo-vial-identity/internal/repository/postgres"
+	"github.com/matiasfelau/vinculo-vial-identity/internal/service/account"
+	"github.com/matiasfelau/vinculo-vial-identity/internal/service/audit"
 	"github.com/matiasfelau/vinculo-vial-identity/internal/service/outbox"
 	"github.com/matiasfelau/vinculo-vial-identity/internal/service/ownership"
 	"github.com/matiasfelau/vinculo-vial-identity/internal/service/reputation"
+	"github.com/matiasfelau/vinculo-vial-identity/internal/service/sanction"
 	"github.com/matiasfelau/vinculo-vial-identity/internal/service/session"
 	"github.com/matiasfelau/vinculo-vial-identity/internal/service/signin"
 	"github.com/matiasfelau/vinculo-vial-identity/internal/service/signup"
@@ -117,7 +121,26 @@ func run() error {
 		return err
 	}
 
+	// Baja de cuenta (US-11). Los dos repositorios migran sanction_carryovers (y,
+	// si la base viene del esquema de retención anterior, lo migran y lo retiran)
+	// y requieren que users, sessions y outbox_events ya estén migradas.
+	accountDeletions, err := postgres.NewAccountDeletionRepository(ctx, db)
+	if err != nil {
+		return err
+	}
+	sanctions, err := postgres.NewSanctionCarryoverRepository(ctx, db)
+	if err != nil {
+		return err
+	}
+
 	tokens, err := buildTokenGenerator(cfg)
+	if err != nil {
+		return err
+	}
+
+	// Falla el arranque si la clave pública de Audit o su id faltan o no son
+	// utilizables: sin ellas ninguna alerta puede sellar el DNI de su emisor.
+	auditSealer, err := auditseal.New(cfg.Audit.PublicKey, cfg.Audit.KeyID)
 	if err != nil {
 		return err
 	}
@@ -149,6 +172,24 @@ func run() error {
 	// Se declara después de cerrar la base, así que corre antes: los consumidores
 	// terminan el mensaje en curso mientras la base todavía responde.
 	defer stopConsumers()
+
+	// Sweeper de sanciones vencidas (US-11): el primer proceso periódico propio del
+	// servicio. Se espera a que termine antes de cerrar la base (los defers
+	// corren al revés: este se declara después del cierre de la base), así un
+	// borrado en curso no pierde la conexión a mitad de una sentencia.
+	sweeper, err := sanction.NewSweeper(sanctions, cfg.Sanction.SweepInterval, cfg.Sanction.SweepBatchSize, logger)
+	if err != nil {
+		return err
+	}
+	sweeperDone := make(chan struct{})
+	go func() {
+		defer close(sweeperDone)
+		sweeper.Run(ctx)
+	}()
+	defer func() {
+		stop()
+		<-sweeperDone
+	}()
 
 	renaperSvc := buildRenaper(cfg, logger)
 
@@ -196,6 +237,26 @@ func run() error {
 		return err
 	}
 
+	deleteAccountService, err := account.NewDeleteService(account.DeleteDeps{
+		Users:                 users,
+		Deletions:             accountDeletions,
+		Hasher:                hasher,
+		SanctionCarryoverDays: cfg.Sanction.CarryoverDays,
+		Logger:                logger,
+	})
+	if err != nil {
+		return err
+	}
+
+	auditDNIService, err := audit.NewDNIService(audit.Deps{
+		Users:  users,
+		Cipher: cipher,
+		Sealer: auditSealer,
+	})
+	if err != nil {
+		return err
+	}
+
 	verifyOwnershipService, err := ownership.New(ownership.Deps{
 		Decryptor: decryptor,
 		Indexer:   indexer,
@@ -207,13 +268,14 @@ func run() error {
 	}
 
 	router, err := delivery.NewRouter(delivery.RouterConfig{
-		SignUp:       signUpService,
-		SignIn:       signInService,
-		Refresh:      refreshService,
-		Logout:       logoutService,
-		Logger:       logger,
-		MaxBodyBytes: cfg.HTTP.MaxBodyBytes,
-		Debug:        cfg.HTTP.Debug,
+		SignUp:        signUpService,
+		SignIn:        signInService,
+		Refresh:       refreshService,
+		Logout:        logoutService,
+		DeleteAccount: deleteAccountService,
+		Logger:        logger,
+		MaxBodyBytes:  cfg.HTTP.MaxBodyBytes,
+		Debug:         cfg.HTTP.Debug,
 		// Readiness apoyada en la base: si no responde, ni un alta ni un login
 		// podrían persistirse y el orquestador no debería mandar tráfico acá.
 		ReadinessCheck: func(ctx context.Context) error { return postgres.Ping(ctx, db) },
@@ -234,6 +296,7 @@ func run() error {
 
 	internalRouter, err := delivery.NewInternalRouter(delivery.InternalRouterConfig{
 		VerifyOwnership: verifyOwnershipService,
+		AuditDNI:        auditDNIService,
 		Logger:          logger,
 		ServiceToken:    cfg.Internal.ServiceToken.Reveal(),
 		MaxBodyBytes:    cfg.HTTP.MaxBodyBytes,
@@ -346,7 +409,7 @@ func startConsumers(ctx context.Context, cfg *config.Config, reputationRepo doma
 	if err != nil {
 		return nil, err
 	}
-	rejectedHandler, err := consumer.NewAlertRejectedHandler(rejections)
+	rejectedHandler, err := consumer.NewAlertRejectedHandler(rejections, logger)
 	if err != nil {
 		return nil, err
 	}
@@ -360,7 +423,7 @@ func startConsumers(ctx context.Context, cfg *config.Config, reputationRepo doma
 	if err != nil {
 		return nil, err
 	}
-	reportedHandler, err := consumer.NewAlertReportedHandler(reports)
+	reportedHandler, err := consumer.NewAlertReportedHandler(reports, logger)
 	if err != nil {
 		return nil, err
 	}

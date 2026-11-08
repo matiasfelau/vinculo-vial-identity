@@ -465,6 +465,12 @@ func (h *Handler) logInvalidInput(c *gin.Context, verrs validation.Errors) {
 }
 
 func (h *Handler) abort(c *gin.Context, status int, code, message string, details validation.Errors) {
+	abortRequest(c, status, code, message, details)
+}
+
+// abortRequest responde con el formato de error uniforme de la API. Lo
+// comparten todos los handlers de este paquete.
+func abortRequest(c *gin.Context, status int, code, message string, details validation.Errors) {
 	c.AbortWithStatusJSON(status, errorResponse{
 		Code: code,
 		// Error y Message llevan el mismo texto a propósito: ver el comentario

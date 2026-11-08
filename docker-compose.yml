@@ -64,6 +64,12 @@ services:
       # Dentro de la red de Compose el tráfico no sale del host. Fuera de acá,
       # la configuración rechaza sslmode=disable con APP_ENV=production.
       POSTGRES_SSLMODE: disable
+      # Registro de auditoría y baja de cuenta (US-11). La clave pública de Audit y
+      # su id son obligatorios: el servicio no arranca sin ellos, y compose
+      # tampoco. Tienen que ser iguales a los de Vehicle.
+      AUDIT_PUBLIC_KEY: "${AUDIT_PUBLIC_KEY:?falta AUDIT_PUBLIC_KEY, generarla con audit-keygen (repo vinculo-vial-audit)}"
+      AUDIT_KEY_ID: "${AUDIT_KEY_ID:?falta AUDIT_KEY_ID, el id de la clave de AUDIT_PUBLIC_KEY (por ejemplo 2026-11)}"
+      SANCTION_CARRYOVER_DAYS: ${SANCTION_CARRYOVER_DAYS:-1095}
     ports:
       - "127.0.0.1:${HTTP_PORT:-8080}:8080"
     # Deliberadamente sin publicar HTTP_INTERNAL_PORT: las rutas /internal/*

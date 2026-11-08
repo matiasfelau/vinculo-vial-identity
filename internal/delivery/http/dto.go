@@ -64,6 +64,14 @@ type logoutRequest struct {
 	RefreshToken string `json:"refresh_token"`
 }
 
+// deleteAccountRequest es el único dato que la baja de cuenta (US-11) acepta:
+// la contraseña actual, en JSON plano, sin el wrapper HPKE. La baja es una
+// reautenticación sobre una sesión ya validada por Kong, y la confidencialidad
+// la aporta HTTPS, igual que con el Refresh Token de /refresh.
+type deleteAccountRequest struct {
+	Password string `json:"password"`
+}
+
 // verifyOwnershipRequest es el payload interno de US-04 que envía
 // vinculo-vial-vehicle: el contrato compartido lo transporta tal cual, sin
 // que Vehicle lo abra. DNIEnc es un único blob HPKE (enc || ciphertext), a
@@ -77,6 +85,21 @@ type verifyOwnershipRequest struct {
 // /internal/verify-ownership: un booleano y nada más.
 type verifyOwnershipResponse struct {
 	Match bool `json:"match"`
+}
+
+// auditDNIRequest es el payload interno de POST /internal/audit/dni que envía
+// vinculo-vial-alert antes de crear una alerta: el usuario cuyo DNI se sella y la
+// alerta a la que queda atado el criptograma.
+type auditDNIRequest struct {
+	UserID  string `json:"user_id"`
+	AlertID string `json:"alert_id"`
+}
+
+// auditDNIResponse es la única forma de respuesta de /internal/audit/dni: el DNI
+// sellado hacia Audit (base64 de enc‖ct) y el id de la clave con que se selló.
+type auditDNIResponse struct {
+	DNIEncAudit string `json:"dni_enc_audit"`
+	AuditKeyID  string `json:"audit_key_id"`
 }
 
 // Códigos de error de la API. Son estables y la app decide el texto a mostrar;
@@ -109,6 +132,32 @@ const (
 	// RENAPER sí respondió, pero con un error de su lado o un cuerpo fuera de
 	// contrato.
 	codeUpstreamError = "upstream_invalido"
+)
+
+// Códigos de error de la baja de cuenta (US-11). A diferencia de los de arriba,
+// los fija el contrato compartido de esa US, en mayúsculas, y no son
+// intercambiables con los de las rutas de autenticación.
+const (
+	// codeInvalidBody es el 400 de la baja: body ausente, ilegible, sin password
+	// o con una contraseña que ninguna cuenta puede tener.
+	codeInvalidBody = "INVALID_BODY"
+	// codeInvalidPassword es el 401 de la baja cuando la contraseña no coincide.
+	codeInvalidPassword = "INVALID_PASSWORD"
+	// codeUnauthorized es el 401 de la baja cuando la petición no trae un
+	// X-User-Id válido: no pasó por Kong. Kong ya rechaza antes un JWT ausente o
+	// inválido, así que acá solo llega una petición que se saltó el gateway.
+	codeUnauthorized = "UNAUTHORIZED"
+	// codeDependencyUnavailable es el 503 de la baja cuando la base no responde.
+	codeDependencyUnavailable = "DEPENDENCY_UNAVAILABLE"
+)
+
+// Códigos de error de POST /internal/audit/dni (US-11, Audit). Los fija el
+// contrato compartido, en mayúsculas. INVALID_BODY y DEPENDENCY_UNAVAILABLE son
+// los mismos de la baja.
+const (
+	// codeUserNotFound es el 404 cuando el usuario del sellado no existe: Alert lo
+	// traduce en 403 ACCOUNT_DELETED.
+	codeUserNotFound = "USER_NOT_FOUND"
 )
 
 // errorResponse es la forma única de todos los errores de la API.

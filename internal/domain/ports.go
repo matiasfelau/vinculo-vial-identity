@@ -17,7 +17,21 @@ type UserRepository interface {
 	// cuando la base rechaza la inserción por violación de unicidad de email o
 	// de dni_hashed; la detección del duplicado se delega a la base para evitar
 	// la condición de carrera de un chequeo previo.
-	Create(ctx context.Context, u *User) error
+	//
+	// Herencia de sanción (US-11): si existe una SanctionCarryover vigente con el
+	// mismo Blind Index de DNI, el usuario se crea con esa sanción (u se
+	// actualiza en el lugar, solo si el alta se confirma), la fila se borra y,
+	// si el usuario queda UNDER_REVIEW, inheritedStatus se persiste en el
+	// outbox. Todo en una única transacción: un alta que falla no consume la
+	// sanción, y una sanción nunca se hereda dos veces.
+	// inheritedStatus es el user.status.changed ya armado; solo se persiste si
+	// hay herencia y el estado heredado es UNDER_REVIEW.
+	Create(ctx context.Context, u *User, inheritedStatus OutboxEvent) error
+
+	// FindByID busca un usuario por su identificador. Debe devolver
+	// ErrUserNotFound (envuelto o no) cuando no existe. Lo usa la baja de
+	// cuenta (US-11), donde el identificador viene del JWT ya validado.
+	FindByID(ctx context.Context, id uuid.UUID) (*User, error)
 
 	// FindByDNIHashed busca un usuario por el Blind Index de su DNI. Es la única
 	// vía de búsqueda del login (US-02): nunca se busca por DNI en claro, que no
@@ -64,6 +78,48 @@ type ReputationRepository interface {
 	// cambia nada y devuelve ReportDuplicate. Que el usuario no exista no es
 	// un error: devuelve ReportUserNotFound.
 	ApplyReport(ctx context.Context, event ProcessedEvent, userID uuid.UUID, threshold int, statusChanged OutboxEvent) (ReportOutcome, error)
+}
+
+// AccountDeletionRepository ejecuta la baja de una cuenta (US-11).
+type AccountDeletionRepository interface {
+	// DeleteAccount, en una única transacción: bloquea la fila del usuario,
+	// deja su sanción en sanction_carryovers (solo si la cuenta estaba
+	// penalizada), borra sus sesiones y su fila de users, y encola los eventos
+	// de la baja en el outbox. Si cualquier paso falla no se deshace
+	// parcialmente: no queda nada hecho.
+	//
+	// Devuelve ErrUserNotFound (envuelto o no) si el usuario ya no existe, y un
+	// error envuelto en ErrDatabaseUnavailable si la base no respondió.
+	DeleteAccount(ctx context.Context, deletion AccountDeletion) error
+}
+
+// SanctionCarryoverRepository administra el ciclo de vida de las sanciones que
+// dejaron las cuentas dadas de baja.
+type SanctionCarryoverRepository interface {
+	// DeleteExpired borra hasta limit sanciones con expires_at <= now y devuelve
+	// cuántas borró. Es idempotente y seguro con varias réplicas corriendo a la
+	// vez: dos barridos concurrentes nunca toman la misma fila.
+	DeleteExpired(ctx context.Context, now time.Time, limit int) (int64, error)
+}
+
+// AuditDNI es el DNI de un usuario sellado hacia el Audit Service para una
+// alerta puntual (US-11, Audit).
+type AuditDNI struct {
+	// Sealed es el DNI canónico cifrado con HPKE hacia la clave pública de Audit,
+	// como base64 de enc‖ct. Solo quien custodia la clave privada, fuera de
+	// línea, puede abrirlo.
+	Sealed string
+	// KeyID identifica el par de claves de Audit con que se selló, para poder
+	// rotarlas.
+	KeyID string
+}
+
+// AuditSealer sella el DNI de un usuario hacia el Audit Service. Este servicio
+// solo conoce la clave pública: no puede reabrir lo que selló.
+type AuditSealer interface {
+	// SealDNI devuelve el DNI canónico (solo dígitos) cifrado con HPKE, con el
+	// `info` atado a alertID. El llamador es responsable de limpiar dni.
+	SealDNI(alertID uuid.UUID, dni []byte) (AuditDNI, error)
 }
 
 // SessionRepository persiste sesiones: el registro de cada Refresh Token
@@ -167,6 +223,10 @@ type EventPublisher interface {
 	// PublishUserStatusChanged emite el evento user.status.changed, con
 	// actor nulo: es un hecho del sistema, no de un usuario.
 	PublishUserStatusChanged(ctx context.Context, evt UserStatusChanged) error
+
+	// PublishUserDeleted emite el evento user.deleted (US-11), con el usuario
+	// dado de baja como actor.
+	PublishUserDeleted(ctx context.Context, evt UserDeleted) error
 }
 
 // HPKEDecryptor descifra el criptograma de transporte que envía la app.

@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 
 	"github.com/google/uuid"
 
@@ -21,16 +22,21 @@ type RejectionApplier interface {
 // fallo permanente y va directo a la DLQ.
 type AlertRejectedHandler struct {
 	applier RejectionApplier
+	logger  *slog.Logger
 }
 
 var _ Handler = (*AlertRejectedHandler)(nil)
 
-// NewAlertRejectedHandler construye el handler.
-func NewAlertRejectedHandler(applier RejectionApplier) (*AlertRejectedHandler, error) {
+// NewAlertRejectedHandler construye el handler. Si logger es nil usa
+// slog.Default.
+func NewAlertRejectedHandler(applier RejectionApplier, logger *slog.Logger) (*AlertRejectedHandler, error) {
 	if applier == nil {
 		return nil, errors.New("consumer: falta el caso de uso de rechazos")
 	}
-	return &AlertRejectedHandler{applier: applier}, nil
+	if logger == nil {
+		logger = slog.Default()
+	}
+	return &AlertRejectedHandler{applier: applier, logger: logger}, nil
 }
 
 // alertRejectedPayload es el payload de alert.rejected. alert_id se valida
@@ -41,13 +47,13 @@ type alertRejectedPayload struct {
 }
 
 // Handle procesa un alert.rejected. El actor del sobre es el emisor de la
-// alerta: sin actor, o con uno que no es un UUID, el mensaje es inválido.
+// alerta. Un actor que no es un UUID hace inválido el mensaje; un actor nulo,
+// en cambio, no: la alerta es de un emisor dado de baja (issuer_id = NULL), no
+// hay a quién penalizar y el mensaje se confirma sin efecto.
+//
+// El payload se valida antes de mirar el actor: un payload inválido es un
+// defecto del productor y va a la DLQ aunque el actor falte.
 func (h *AlertRejectedHandler) Handle(ctx context.Context, envelope Envelope) error {
-	userID, err := actorUserID(envelope)
-	if err != nil {
-		return err
-	}
-
 	var payload alertRejectedPayload
 	if err := decodePayload(envelope.Payload, &payload); err != nil {
 		return err
@@ -64,6 +70,16 @@ func (h *AlertRejectedHandler) Handle(ctx context.Context, envelope Envelope) er
 		}
 	}
 
+	userID, hasActor, err := actorUserID(envelope)
+	if err != nil {
+		return err
+	}
+	if !hasActor {
+		h.logger.InfoContext(ctx, "rechazo sin actor: el emisor fue dado de baja, no hay a quién penalizar",
+			slog.String("event_id", envelope.EventID.String()))
+		return nil
+	}
+
 	// Un error del caso de uso es de infraestructura (la base): transitorio, se
 	// devuelve sin marcar para que el consumidor reintente.
 	return h.applier.Apply(ctx, domain.AlertRejection{
@@ -74,15 +90,18 @@ func (h *AlertRejectedHandler) Handle(ctx context.Context, envelope Envelope) er
 }
 
 // actorUserID lee el actor del sobre como el UUID del usuario afectado.
-func actorUserID(envelope Envelope) (uuid.UUID, error) {
+// hasActor es false, sin error, cuando el sobre no trae actor: lo que eso
+// significa lo decide cada handler. Un actor presente que no es un UUID es un
+// fallo permanente.
+func actorUserID(envelope Envelope) (userID uuid.UUID, hasActor bool, err error) {
 	if envelope.Actor == nil {
-		return uuid.Nil, Permanent(errors.New("sobre sin actor"))
+		return uuid.Nil, false, nil
 	}
-	userID, err := uuid.Parse(*envelope.Actor)
+	userID, err = uuid.Parse(*envelope.Actor)
 	if err != nil || userID == uuid.Nil {
-		return uuid.Nil, Permanent(errors.New("el actor no es un uuid válido"))
+		return uuid.Nil, false, Permanent(errors.New("el actor no es un uuid válido"))
 	}
-	return userID, nil
+	return userID, true, nil
 }
 
 // decodePayload decodifica el payload del sobre en dst. Cualquier fallo es

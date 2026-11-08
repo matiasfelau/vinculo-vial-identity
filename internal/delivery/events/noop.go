@@ -44,6 +44,15 @@ func (p *NoopPublisher) PublishUserStatusChanged(ctx context.Context, evt domain
 	return nil
 }
 
+// PublishUserDeleted registra el evento que se habría publicado.
+func (p *NoopPublisher) PublishUserDeleted(ctx context.Context, evt domain.UserDeleted) error {
+	p.logger.WarnContext(ctx, "publisher inerte: el evento no se publicó",
+		slog.String("event_type", EventTypeUserDeleted),
+		slog.String("user_id", evt.UserID.String()),
+	)
+	return nil
+}
+
 // Status informa que el broker está deshabilitado: es el modo de desarrollo,
 // que la configuración rechaza con APP_ENV=production. Deshabilitado no es una
 // falla, así que /health/deps no lo cuenta como degradación.

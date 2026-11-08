@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"time"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgconn"
@@ -39,20 +40,54 @@ func NewUserRepository(ctx context.Context, db *gorm.DB) (*UserRepository, error
 		return nil, fmt.Errorf("postgres: falló la migración del esquema: %w", err)
 	}
 
+	// Create consulta sanction_carryovers para la herencia de sanciones (US-11),
+	// así que la tabla tiene que existir antes del primer alta.
+	if err := ensureSanctionCarryovers(ctx, db); err != nil {
+		return nil, err
+	}
+
 	return &UserRepository{db: db}, nil
 }
 
-// Create inserta el usuario.
+// claimSanctionCarryover borra, y devuelve, la sanción vigente con ese Blind
+// Index de DNI. Un único DELETE ... RETURNING alcanza: dos altas concurrentes con
+// el mismo DNI se serializan en el bloqueo de la fila, y la segunda, cuando la
+// primera confirma, ya no la encuentra. Una fila vencida no se hereda; la borra
+// el barrido.
+const claimSanctionCarryover = `
+DELETE FROM sanction_carryovers
+WHERE dni_hmac = ? AND expires_at > ?
+RETURNING dni_hmac, account_status, reputation_score, report_count, created_at, expires_at`
+
+// claimSanction reclama la sanción vigente de dniHashed, o devuelve nil si no
+// hay ninguna. Tiene que correr dentro de la transacción del alta.
+func claimSanction(tx *gorm.DB, dniHashed string, now time.Time) (*domain.SanctionCarryover, error) {
+	var rows []sanctionCarryoverModel
+	if err := tx.Raw(claimSanctionCarryover, dniHashed, now.UTC()).Scan(&rows).Error; err != nil {
+		return nil, fmt.Errorf("no se pudo consultar la sanción del DNI: %w", err)
+	}
+	if len(rows) == 0 {
+		return nil, nil
+	}
+	carryover := rows[0].toDomain()
+	return &carryover, nil
+}
+
+// Create inserta el usuario y, en la misma transacción, le hace heredar la
+// sanción vigente que dejó una cuenta anterior del mismo DNI (US-11). Ver
+// domain.UserRepository.Create.
 //
 // La detección de duplicados se delega a los índices únicos de la base en lugar
 // de hacer un SELECT previo: entre la consulta y el INSERT hay una ventana en la
 // que otra petición concurrente puede insertar el mismo email o DNI, y solo la
-// restricción de la base cierra esa carrera.
+// restricción de la base cierra esa carrera. La sanción se reclama antes del
+// INSERT y dentro de la misma transacción: si el INSERT choca con un duplicado,
+// el reclamo se deshace y la sanción sigue disponible.
 //
 // La colisión se colapsa en domain.ErrDuplicateUser sin decir qué índice se violó:
 // distinguir "ese email ya existe" de "ese DNI ya existe" convertiría el endpoint
 // en un oráculo para saber si una persona está registrada.
-func (r *UserRepository) Create(ctx context.Context, u *domain.User) error {
+func (r *UserRepository) Create(ctx context.Context, u *domain.User, inheritedStatus domain.OutboxEvent) error {
 	if u == nil {
 		return errors.New("postgres: se requiere un usuario")
 	}
@@ -60,10 +95,50 @@ func (r *UserRepository) Create(ctx context.Context, u *domain.User) error {
 	ctx, cancel := context.WithTimeout(ctx, queryTimeout)
 	defer cancel()
 
-	if err := r.db.WithContext(ctx).Create(toModel(u)).Error; err != nil {
+	// Se trabaja sobre una copia: u solo cambia si el alta se confirma.
+	candidate := *u
+
+	err := r.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		sanction, err := claimSanction(tx, candidate.DNIHashed, candidate.CreatedAt)
+		if err != nil {
+			return err
+		}
+		if sanction != nil {
+			candidate.InheritSanction(*sanction)
+		}
+
+		if err := tx.Create(toModel(&candidate)).Error; err != nil {
+			return err
+		}
+
+		if sanction != nil && candidate.AccountStatus == domain.AccountStatusUnderReview {
+			if inheritedStatus.Type != domain.EventTypeUserStatusChanged {
+				return errors.New("falta el user.status.changed de la sanción heredada")
+			}
+			if err := tx.Create(toOutboxModel(&inheritedStatus)).Error; err != nil {
+				return fmt.Errorf("no se pudo encolar el evento de outbox: %w", err)
+			}
+		}
+		return nil
+	})
+	if err != nil {
 		return mapCreateError(err)
 	}
+
+	*u = candidate
 	return nil
+}
+
+// FindByID busca un usuario por su identificador.
+func (r *UserRepository) FindByID(ctx context.Context, id uuid.UUID) (*domain.User, error) {
+	ctx, cancel := context.WithTimeout(ctx, queryTimeout)
+	defer cancel()
+
+	var m userModel
+	if err := r.db.WithContext(ctx).Where("id = ?", id).Take(&m).Error; err != nil {
+		return nil, mapFindError(err)
+	}
+	return m.toDomain(), nil
 }
 
 // FindByDNIHashed busca un usuario por el Blind Index de su DNI. Es la única

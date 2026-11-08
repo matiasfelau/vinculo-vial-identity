@@ -227,10 +227,13 @@ curl -X POST http://vinculo-vial-identity:8081/internal/verify-ownership \
   -d '{"owner_id":"<UUID>","dni_enc":"<base64 de enc||ciphertext>"}'
 ```
 
-Hoy expone una sola ruta: `POST /internal/verify-ownership`, que usa
+Hoy expone dos rutas. La primera, `POST /internal/verify-ownership`, la usa
 `vinculo-vial-vehicle` para confirmar si un DNI corresponde al usuario dueño
 de `owner_id`. Identity lo descifra, calcula su Blind Index y compara contra
-`users`, sin persistir ni loguear nunca el DNI en claro.
+`users`, sin persistir ni loguear nunca el DNI en claro. La segunda,
+`POST /internal/audit/dni`, la usa `vinculo-vial-alert` para obtener el DNI del
+emisor sellado hacia el Audit Service: ver
+[Sellado del DNI para Audit](#sellado-del-dni-para-audit-us-11).
 
 `owner_id` viaja en el **body**, no en un header: es el mismo UUID que Kong
 le inyectó a Vehicle como `X-User-Id`, reenviado como campo del JSON.
@@ -259,6 +262,289 @@ además el secreto `INTERNAL_SERVICE_TOKEN` en la cabecera
 con uno incorrecto), el servidor responde `401` — incluso para una ruta que
 no existe, para no delatar por el status qué rutas expone.
 
+## Baja de cuenta (US-11)
+
+El usuario puede eliminar su cuenta desde la app, confirmándola con su
+contraseña. La baja borra todo lo operativo y **Identity no conserva ningún
+registro de retención**: el de las alertas que llegaron a un destinatario lo
+lleva el Audit Service. Lo único que sobrevive en Identity es la sanción de una
+cuenta penalizada, en una tabla operativa (`sanction_carryovers`), para que el
+mismo DNI no pueda borrarla dándose de baja y registrándose de nuevo.
+
+```
+App       Configuración → Eliminar cuenta → pantalla informativa → contraseña
+          DELETE /api/v1/users/me { "password": "…" }
+Kong      jwt → token-offloading (X-User-Id) → rate-limiting (3/min, 10/h)
+Identity  verifica la contraseña (Argon2) → 401 INVALID_PASSWORD si no coincide
+          TX:
+            sanction_carryovers ← dni_hmac, account_status, reputation_score,
+                                  report_count, created_at, expires_at
+                                  (solo si estaba penalizada)
+            borra las sesiones · borra la fila de users
+            outbox ← user.sessions.revoked + user.deleted   (actor = user_id)
+          → 204
+```
+
+### Endpoint
+
+`DELETE /api/v1/users/me`, detrás de Kong con `jwt` y `token-offloading`. Kong
+inyecta `X-User-Id`, que este servicio toma como el usuario autenticado: la baja
+actúa siempre sobre ese usuario, sin ningún identificador en la ruta ni en el
+body, así que no hay forma de pedir la baja de otra cuenta. Como pasa con el
+resto de las rutas públicas, el servicio confía en que solo Kong lo alcanza
+(puerto sin publicar fuera de la red de la plataforma); una petición sin un
+`X-User-Id` válido se rechaza.
+
+Body: `{ "password": "<string>" }`, JSON plano (la reautenticación sobre una
+sesión ya validada no lleva el wrapper HPKE; la confidencialidad la aporta
+HTTPS). Máximo 4 KiB y, como en el alta, hasta 128 caracteres.
+
+| Status | `code` | Caso | Emite |
+|---|---|---|---|
+| 204 | — | Baja realizada. También si el usuario ya no existe: es idempotente y no revela nada | Identity |
+| 400 | `INVALID_BODY` | Body ausente, ilegible o sin `password` | Identity |
+| 401 | — | JWT ausente o inválido | Kong |
+| 401 | `INVALID_PASSWORD` | La contraseña no coincide | Identity |
+| 401 | `UNAUTHORIZED` | Falta `X-User-Id` o no es un UUID: la petición no pasó por Kong | Identity |
+| 429 | — | Rate limit | Kong |
+| 503 | `DEPENDENCY_UNAVAILABLE` | Base caída o en timeout; header `Retry-After` | Identity |
+
+Los errores usan el formato vigente (`{ "error": "…", "code": "…" }`). Un fallo
+inesperado es un `500` genérico: el detalle queda en el log, nunca en la
+respuesta. La baja no hace ninguna llamada síncrona saliente: lo único externo
+es la base, acotada por `POSTGRES_STATEMENT_TIMEOUT`.
+
+`UNAUTHORIZED` no está en la tabla del contrato de US-11: es el caso de una
+petición que se saltó el gateway, que el contrato asigna a Kong. Se agrega para
+que el servicio falle cerrado en vez de actuar sobre un usuario sin autenticar.
+
+### Qué se borra y qué se conserva
+
+| Se borra | Se conserva |
+|---|---|
+| La fila de `users` (email, contraseña, `dni_hashed`, `dni_encrypted`, estado y reputación) | Solo si la cuenta estaba penalizada: su sanción en `sanction_carryovers`, hasta `SANCTION_CARRYOVER_DAYS` |
+| Las `sessions` del usuario | |
+
+Todo el resto lo borran los demás servicios al consumir `user.sessions.revoked`
+(Notification: device tokens) y `user.deleted` (Alert y Vehicle). La baja es una
+única transacción: la sanción, el borrado de sesiones y de usuario, y los dos
+eventos del outbox se confirman juntos o no se confirma ninguno. La fila del
+usuario se lee con `SELECT … FOR UPDATE` dentro de esa transacción, así que un
+reporte o una penalización que llega a la vez espera, y la sanción que se deja
+nunca es más vieja que la fila que se borra.
+
+### Eventos
+
+`user.sessions.revoked` (con `reason: ACCOUNT_DELETED`) y `user.deleted` salen
+por el outbox con el usuario como `actor`. Ver [Eventos publicados](#eventos-publicados).
+
+### `sanction_carryovers`
+
+Tabla operativa de Identity, en el esquema por defecto, creada con `AutoMigrate`
+como el resto. A diferencia del registro de retención que reemplazó, no es un
+dato aislado ni cifrado: no lleva el DNI ni el `user_id`, solo el Blind Index con
+que se reconoce al mismo DNI.
+
+| Columna | Tipo | Nota |
+|---|---|---|
+| `dni_hmac` | varchar(64) PK | El mismo Blind Index que `users.dni_hashed` |
+| `account_status`, `reputation_score`, `report_count` | iguales que en `users` | La sanción que se hereda |
+| `created_at` | timestamptz not null | La fecha de la baja |
+| `expires_at` | timestamptz not null, indexada | `deleted_at + SANCTION_CARRYOVER_DAYS` |
+
+"Penalizada" es `account_status = UNDER_REVIEW`, `report_count > 0` o
+`reputation_score < 0`. La baja de una cuenta penalizada hace un `upsert` por
+`dni_hmac` (una fila vencida que el barrido todavía no borró, de una cuenta
+anterior con el mismo DNI, se pisa); la de una cuenta sin penalizaciones no
+escribe nada.
+
+Reglas:
+
+- **Ningún endpoint lee la tabla.** Solo la tocan la baja, el signup y el sweeper.
+- **Nunca se loguean** el DNI, la contraseña ni `dni_hmac`.
+
+DDL equivalente a lo que crea `AutoMigrate`, para un entorno donde el rol de la
+aplicación no tiene permisos de DDL y el DBA crea la tabla con su propio rol:
+
+```sql
+CREATE TABLE sanction_carryovers (
+    dni_hmac         varchar(64) PRIMARY KEY,
+    account_status   varchar(32) NOT NULL,
+    reputation_score integer     NOT NULL,
+    report_count     integer     NOT NULL,
+    created_at       timestamptz NOT NULL,
+    expires_at       timestamptz NOT NULL
+);
+CREATE INDEX idx_sanction_carryovers_expires_at ON sanction_carryovers (expires_at);
+
+GRANT SELECT, INSERT, UPDATE, DELETE ON sanction_carryovers TO identity_app;  -- rol de conexión del servicio
+```
+
+Con la tabla ya creada, el arranque no ejecuta DDL y alcanza con esos permisos
+(lo comprueba una prueba de integración con un rol sin `CREATE`). El rol del
+servicio usa una única conexión: la baja escribe esta tabla y borra `users` en la
+misma transacción.
+
+### Herencia de la sanción al registrarse otra vez
+
+Si el mismo DNI se vuelve a registrar y hay una fila vigente (`expires_at > now`)
+con su `dni_hmac`, la cuenta nueva **hereda** `account_status`,
+`reputation_score` y `report_count`, y la fila se borra. Todo ocurre en la misma
+transacción que el `INSERT` del usuario (`UserRepository.Create`), con un único
+`DELETE … RETURNING`:
+
+- Un alta que falla (email repetido, base caída, outbox caído) no consume la
+  sanción: el reclamo se deshace con el resto.
+- La sanción no se hereda dos veces: tras el primer alta la fila ya no existe.
+  Dos altas simultáneas con el mismo DNI se serializan en el bloqueo de la fila
+  y en el índice único de `users.dni_hashed`.
+- Si la cuenta queda `UNDER_REVIEW`, se encola `user.status.changed` con
+  `reason: INHERITED_ON_SIGNUP` en la misma transacción. Con una sanción que no
+  llega a revisión (solo reputación o reportes) se hereda sin publicar nada.
+- Una fila vencida pero todavía no barrida no se hereda.
+
+### Sweeper
+
+`internal/service/sanction` borra las filas con `expires_at <= now`: una vez al
+arrancar y después cada `SANCTION_CARRYOVER_SWEEP_INTERVAL`, de a lotes de
+`SANCTION_CARRYOVER_SWEEP_BATCH_SIZE`. Es el primer proceso periódico propio del
+servicio. Es seguro con varias réplicas (`FOR UPDATE SKIP LOCKED` sobre un CTE
+materializado: se reparten el trabajo y nunca borran más que el lote) y se
+apaga ordenadamente: al recibir `SIGTERM` el barrido en curso se corta y el
+proceso espera a que termine antes de cerrar la base. Un fallo se loguea en
+ERROR y el próximo ciclo reintenta. Solo loguea cuántas filas borró.
+
+### Migración desde el registro de retención anterior
+
+Antes del Audit Service, la baja guardaba un registro de retención en un esquema
+aparte (`legal_hold`, tabla `user_holds`), con el DNI sellado hacia el
+responsable legal. Ese registro ya no existe: su función la cumple Audit, y la
+sanción pasó a `sanction_carryovers`. El código y las CLI (`legalhold-keygen`,
+`legalhold-open`) se retiraron.
+
+En el arranque, `ensureSanctionCarryovers` migra una base que todavía tenga ese
+esquema, en una sola transacción bajo un advisory lock (varias réplicas pueden
+arrancar a la vez):
+
+1. Copia a `sanction_carryovers` las filas de `user_holds` con `dni_hmac` no nulo
+   y `destroy_at > now`, con `expires_at = destroy_at` (el plazo que ya corría no
+   cambia) y `created_at = deleted_at`. Si ya hay una fila para ese DNI, no la
+   pisa.
+2. Borra el esquema con `DROP SCHEMA legal_hold CASCADE`.
+
+Si el esquema no existe no hace nada. Si la copia falla, el esquema queda intacto
+y el siguiente arranque reintenta.
+
+`DROP SCHEMA` exige ser el dueño del esquema. Si en el entorno pertenece a otro
+rol (lo que recomendaba la versión anterior), el DBA aplica la migración antes de
+desplegar, con ese rol, y entonces el servicio ya no encuentra el esquema:
+
+```sql
+BEGIN;
+INSERT INTO sanction_carryovers (dni_hmac, account_status, reputation_score, report_count, created_at, expires_at)
+SELECT dni_hmac, account_status, reputation_score, report_count, deleted_at, destroy_at
+FROM legal_hold.user_holds
+WHERE dni_hmac IS NOT NULL AND account_status IS NOT NULL
+  AND reputation_score IS NOT NULL AND report_count IS NOT NULL
+  AND destroy_at > now()
+ON CONFLICT (dni_hmac) DO NOTHING;
+DROP SCHEMA legal_hold CASCADE;
+COMMIT;
+```
+
+Los `dni_sealed` del esquema anterior se pierden con el `DROP`, y es lo previsto:
+el registro de lo que se envió desde ahora lo lleva Audit, que no depende de la
+baja. El rol `legal_hold_owner` y sus `GRANT`, si se crearon, se retiran con
+`DROP ROLE`.
+
+### Variables
+
+| Variable | Valor | Nota |
+|---|---|---|
+| `SANCTION_CARRYOVER_DAYS` | `1095` | 3 años (art. 2561 del CCyC y art. 62 del CP) |
+| `SANCTION_CARRYOVER_SWEEP_INTERVAL` | `1h` | Cada cuánto corre el sweeper |
+| `SANCTION_CARRYOVER_SWEEP_BATCH_SIZE` | `500` | Filas por sentencia de borrado |
+
+Para ver el barrido funcionando en local, bajar `SANCTION_CARRYOVER_SWEEP_INTERVAL`
+y mover `expires_at` al pasado de una fila de prueba.
+
+### Residual aceptado
+
+Un Access Token emitido antes de la baja sigue siendo válido hasta su `exp`
+(`ACCESS_TOKEN_TTL_MINUTES`, 15 minutos): son JWT stateless. Alert lo cubre con
+la restricción `DELETED` (`403 ACCOUNT_DELETED`) durante ese plazo; Identity no
+puede revocarlos.
+
+## Sellado del DNI para Audit (US-11)
+
+Cada alerta que llega a un destinatario queda registrada en el Audit Service
+durante `AUDIT_RETENTION_DAYS`, aislada, inmutable y legible solo ante un
+requerimiento judicial. Identity participa con una sola cosa: cuando Alert va a
+crear una alerta, le entrega el DNI de su emisor **sellado** hacia la clave
+pública de Audit. Alert lo guarda únicamente en su outbox, hasta publicarlo en
+`audit.alert.recorded`; este servicio no guarda ni loguea el criptograma.
+
+```
+Alert     POST /alerts → en paralelo y antes del 202:
+            Identity  POST /internal/audit/dni { user_id, alert_id }
+Identity  abre users.dni_encrypted con AES_KEY (en memoria)
+          → lo sella con HPKE hacia AUDIT_PUBLIC_KEY
+          → borra el DNI en claro
+          → { dni_enc_audit, audit_key_id }
+```
+
+### `POST /internal/audit/dni`
+
+Va en el puerto interno (`HTTP_INTERNAL_PORT`), con `X-Internal-Service-Token`
+como el resto de `/internal/*`, y nunca en Kong.
+
+```bash
+curl -X POST http://vinculo-vial-identity:8081/internal/audit/dni \
+  -H "X-Internal-Service-Token: $INTERNAL_SERVICE_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"user_id":"<UUID>","alert_id":"<UUID>"}'
+```
+
+| Status | `code` | Caso |
+|---|---|---|
+| 200 | — | `{ "dni_enc_audit": "<base64 de enc‖ct>", "audit_key_id": "<string>" }`, y nada más |
+| 400 | `INVALID_BODY` | Cuerpo no interpretable, o `user_id` o `alert_id` ausentes, nulos o que no son UUID |
+| 401 | `servicio_no_autorizado` | Falta `X-Internal-Service-Token` o es incorrecto (igual que `verify-ownership`) |
+| 404 | `USER_NOT_FOUND` | El usuario no existe. Alert lo traduce en `403 ACCOUNT_DELETED` |
+| 500 | `error_interno` | Falla algo interno, por ejemplo un `dni_encrypted` que no abre; sin detalle |
+| 503 | `DEPENDENCY_UNAVAILABLE` | Base caída o en timeout; header `Retry-After` |
+
+Alert es fail-closed: sin esta respuesta no se crea la alerta. La respuesta lleva
+`Cache-Control: no-store`.
+
+### Criptografía
+
+| | |
+|---|---|
+| Suite | HPKE RFC 9180, modo base: DHKEM(X25519, HKDF-SHA256) / HKDF-SHA256 / AES-256-GCM, la misma del resto del servicio |
+| Clave pública | `AUDIT_PUBLIC_KEY`, en el entorno del servicio. Con ella solo se puede sellar |
+| Clave privada | La genera `audit-keygen` (repo del Audit Service), fuera de línea y fuera de cualquier repo. No la carga ningún servicio, ni siquiera Audit; la custodia el responsable legal |
+| `info` HPKE | UTF-8 de `"vv-audit:dni:" + alert_id`: un criptograma movido al registro de otra alerta, o hecho pasar por la patente (`vv-audit:pat:`), no abre |
+| Texto plano | El DNI canónico (solo dígitos), tal como se guardó en el alta |
+| `dni_enc_audit` | base64 estándar de `enc‖ct`, el mismo formato que `pat_enc_ia` |
+| `audit_key_id` | Id corto de la clave (`AUDIT_KEY_ID`, por ejemplo `2026-11`), para rotarla |
+
+Cada sellado usa una clave efímera nueva, así que dos alertas del mismo emisor
+dan criptogramas distintos: el registro no permite saber que son del mismo
+emisor sin abrirlos.
+
+La apertura (`auditctl export` y `audit-open`) y la custodia de la privada son
+del repo de Audit; Identity no participa y no tiene cómo reabrir lo que sella.
+
+### Variables
+
+| Variable | Valor | Nota |
+|---|---|---|
+| `AUDIT_PUBLIC_KEY` | Pública X25519 en base64 | **Obligatoria.** Se valida al arrancar sellando un valor de prueba: una clave que no sirve hace fallar el arranque. Tiene que ser igual a la de Vehicle |
+| `AUDIT_KEY_ID` | Id corto, `[A-Za-z0-9._-]`, hasta 32 caracteres | **Obligatorio**, igual al de Vehicle. Cabe en `audit_key_id` de Audit (`varchar(32)`) y en la línea `audit_key_id=base64` que lee `audit-open`, por eso no admite `=` ni espacios |
+
+El servicio no arranca sin ellas, ni compose.
+
 ## Puesta en marcha
 
 ```bash
@@ -272,6 +558,14 @@ son las dos claves que salen de acá: la primera se embebe en el frontend para
 cifrar el payload del registro, la segunda va al Gateway para verificar los
 Access Token. Cada par (privada + pública) tiene que salir de la misma
 corrida.
+
+`AUDIT_PUBLIC_KEY` y `AUDIT_KEY_ID` son obligatorias (el servicio no arranca sin
+ellas, ni compose) y **no** salen de `genkeys`: el par de Audit lo genera
+`audit-keygen`, en el repo del Audit Service, fuera de línea y con la privada
+fuera de cualquier repo. Ver
+[Sellado del DNI para Audit](#sellado-del-dni-para-audit-us-11). Para desarrollo
+local alcanza con un par de prueba, que se genera con `audit-keygen` o con
+cualquier par X25519 en base64, y un id como `dev`.
 
 Para correr el servicio fuera del contenedor hace falta un Postgres accesible y
 `POSTGRES_HOST` apuntando a él:
@@ -338,11 +632,15 @@ internal/domain/            entidades User y Session, eventos, errores centinela
 internal/service/signup/    orquestación del alta (US-01)
 internal/service/signin/    orquestación del login (US-02)
 internal/service/outbox/    worker en background del patrón Transactional Outbox (US-06)
-internal/repository/postgres/  persistencia GORM (users, sessions, outbox_events)
+internal/service/account/   baja de cuenta (US-11)
+internal/service/audit/     sellado del DNI del emisor hacia Audit (US-11)
+internal/service/sanction/  barrido de las sanciones heredables vencidas (US-11)
+internal/repository/postgres/  persistencia GORM (users, sessions, outbox_events, sanction_carryovers)
 internal/delivery/http/     handlers Gin, DTOs, middlewares
 internal/delivery/events/   publisher RabbitMQ (+ inerte)
 internal/delivery/consumer/ infraestructura de consumo RabbitMQ: ack manual, reintentos, DLQ (US-08)
 internal/crypto/hpke/       descifrado del transporte
+internal/crypto/auditseal/  sellado HPKE del DNI hacia la clave pública de Audit (US-11)
 internal/crypto/symmetric/  cifrado at-rest
 internal/crypto/blindindex/ Blind Index del DNI
 internal/crypto/password/   Argon2id
@@ -411,8 +709,8 @@ interna del patrón Transactional Outbox (US-06), no un dato de negocio.
 | campo | tipo | notas |
 |---|---|---|
 | `id` | uuid | PK; mismo valor que `eventId` al publicarse |
-| `type` | varchar(64) | tipo de evento; hoy solo `user.sessions.revoked` |
-| `payload` | jsonb | `{"user_id": "…", "reason": "REUSE_DETECTED"}` |
+| `type` | varchar(64) | tipo de evento: `user.sessions.revoked`, `user.status.changed` (US-08) o `user.deleted` (US-11) |
+| `payload` | jsonb | por tipo; p. ej. `{"user_id": "…", "reason": "REUSE_DETECTED"}` |
 | `status` | varchar(16) | `pending` / `sent`, indexada junto a `created_at` |
 | `attempts` | int | incrementado en cada intento fallido |
 | `last_error` | text | nullable; diagnóstico del último fallo |
@@ -443,6 +741,14 @@ La clave única `(event_id, consumer)` es lo que hace idempotente al consumidor:
 `INSERT … ON CONFLICT DO NOTHING` sin filas afectadas significa que el evento ya
 se procesó. El mismo evento visto por otra cola no es un duplicado.
 
+Tabla `sanction_carryovers` (US-11), creada con `AutoMigrate` en
+`ensureSanctionCarryovers`, que además migra el registro de retención anterior si
+la base lo tiene. Es la sanción de una cuenta penalizada que se dio de baja, para
+heredarla si el mismo DNI se vuelve a registrar; su estructura, sus reglas y el
+barrido están en [Baja de cuenta](#baja-de-cuenta-us-11). `EPHEMERAL_DB` también
+borra el esquema de retención anterior, si existe: sobrevivir al borrado de
+`public` lo haría migrar, y heredar una sanción de una corrida anterior.
+
 ### Clasificación de errores de la base
 
 `internal/repository/postgres.classifyDBError` traduce cualquier error de
@@ -458,9 +764,9 @@ un equivalente al "5xx del upstream" de una dependencia HTTP.
 
 ## Eventos publicados
 
-El servicio publica dos eventos, `user.sessions.revoked` y
-`user.status.changed` (US-08), con el Event Envelope estándar de la plataforma.
-Los dos salen por el outbox. El payload no lleva PII: quien necesite datos de
+El servicio publica tres eventos, `user.sessions.revoked`,
+`user.status.changed` (US-08) y `user.deleted` (US-11), con el Event Envelope
+estándar de la plataforma. Los tres salen por el outbox. El payload no lleva PII: quien necesite datos de
 la persona los pide a este servicio. El alta no publica nada: Core confirmó que
 `user.created` no tiene consumidor.
 
@@ -558,11 +864,41 @@ publica con el mismo `eventId` entre reintentos.
 }
 ```
 
+`reason` puede ser `REPORTS_THRESHOLD` (el emisor llegó al umbral de reportes) o,
+desde US-11, `INHERITED_ON_SIGNUP`: la cuenta nació en revisión porque el mismo
+DNI había sido dado de baja con una sanción vigente. Alert ignora el `reason`.
+
 **Levantar la revisión** queda fuera de alcance de US-08 (es manual, para un
 caso de uso futuro de administración). Hacerlo a mano en la base **no alcanza**:
 Alert mantiene una proyección alimentada por este evento, así que además de
 poner `account_status = 'ACTIVE'` hay que emitir `user.status.changed` con
 `ACTIVE`. Sin ese evento, Alert sigue bloqueando al emisor.
+
+### `user.deleted`
+
+Anuncia la baja de una cuenta (US-11). Alert lo consume para desvincular al
+usuario de las alertas que emitió y recibió, y Vehicle para borrar sus
+vehículos. `actor` es el usuario dado de baja; el payload solo lleva cuándo, sin
+ningún dato personal.
+
+Se escribe en `outbox_events` en la misma transacción que el borrado, junto con
+`user.sessions.revoked` (con `reason: ACCOUNT_DELETED`, que Notification usa
+para borrar los device tokens), y el worker lo publica con el mismo `eventId`
+entre reintentos. `deleted_at` es el de la baja, no el del intento de
+publicación.
+
+```json
+{
+  "eventId": "…",
+  "eventType": "user.deleted",
+  "timestamp": "2026-11-02T15:04:06Z",
+  "producer": "vinculo-vial-identity",
+  "actor": "6f2a4c1e-9d3b-4f5a-8c7d-1e2f3a4b5c6d",
+  "payload": {
+    "deleted_at": "2026-11-02T15:04:05.123456789Z"
+  }
+}
+```
 
 ## Consumo de eventos (US-08)
 
@@ -596,9 +932,15 @@ sobre es el emisor de la alerta rechazada. En una única transacción se registr
 el evento en `processed_events` y, si algún código de `reason_codes` es de
 fraude (`NO_VEHICLE`, `BURST_MISMATCH`, `PLATE_MISMATCH`), se resta
 `FRAUD_PENALTY` a `users.reputation_score`. `EVIDENCE_UNREADABLE` solo no
-penaliza. Un `actor` nulo o que no es un UUID, o un payload sin `alert_id`
-válido ni `reason_codes`, va directo a la DLQ; un usuario inexistente se loguea
-y se confirma; un error de base reintenta.
+penaliza. Un `actor` que no es un UUID, o un payload sin `alert_id` válido ni
+`reason_codes`, va directo a la DLQ; un error de base reintenta.
+
+Un evento sin `actor` (`null` o ausente) es el de una alerta cuyo emisor fue
+dado de baja (`issuer_id = NULL`, US-11): no hay a quién penalizar, así que se
+confirma sin efecto, con un log INFO y sin pasar por la DLQ ni por el reintento.
+Lo mismo si el usuario ya no existe: se loguea y se confirma. El payload se
+valida antes de mirar el actor, así que un payload inválido va a la DLQ aunque
+el actor falte.
 
 ### `alert.reported` → revisión
 
@@ -609,6 +951,11 @@ si el conteo llega a `REPORT_REVIEW_THRESHOLD` y el usuario estaba `ACTIVE`, se
 lo pasa a `UNDER_REVIEW` y se escribe `user.status.changed` en el outbox. Un
 usuario que ya está en revisión sigue contando pero no vuelve a publicar, y un
 duplicado no incrementa.
+
+Igual que con `alert.rejected`, un evento sin `actor` (alerta de un emisor dado
+de baja, US-11) o cuyo usuario ya no existe se confirma sin efecto: nadie queda
+en revisión, no se encola `user.status.changed` y el mensaje no va a la DLQ. Un
+`actor` que no es un UUID o un payload inválido sí va a la DLQ.
 
 `UNDER_REVIEW` restringe solo la creación de alertas, y esa restricción la
 aplica Alert: en Identity no bloquea el login, el refresh ni nada más (ningún
@@ -662,7 +1009,9 @@ nombre del estado, nunca el detalle de un error.
 - **Contrato desincronizado con Frontend y Gateway.** El payload interno
   reemplazó `biometric_verified` por `tramite`/`sexo`/`selfie`; hasta que los
   otros dos repos repliquen el cambio, no son interoperables entre sí.
-- **Migraciones versionadas**, en lugar de `AutoMigrate`.
+- **Migraciones versionadas**, en lugar de `AutoMigrate`. La migración del
+  registro de retención anterior (US-11) usa SQL explícito e idempotente, pero
+  tampoco está versionada.
 - **Rate limiting** de los endpoints de alta y login. Argon2id reserva 64 MiB
   por derivación concurrente (el login también deriva uno, vía `Verify`, en
   cada intento) y RENAPER agrega una llamada de red externa por alta, así que

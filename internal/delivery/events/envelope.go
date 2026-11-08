@@ -15,6 +15,10 @@ const EventTypeSessionsRevoked = "user.sessions.revoked"
 // publica.
 const EventTypeUserStatusChanged = domain.EventTypeUserStatusChanged
 
+// EventTypeUserDeleted es el tipo de evento con que Identity anuncia la baja de
+// una cuenta (US-11). Es también el routing key con el que se publica.
+const EventTypeUserDeleted = domain.EventTypeUserDeleted
+
 // Envelope es el sobre estándar de eventos de la plataforma. La forma es común
 // a todos los productores; lo específico de cada evento va en Payload.
 type Envelope struct {
@@ -58,6 +62,32 @@ func newSessionsRevokedEnvelope(evt domain.SessionsRevoked, producer string, now
 		Actor:     &actor,
 		Payload: sessionsRevokedPayload{
 			Reason: string(evt.Reason),
+		},
+	}
+}
+
+// userDeletedPayload es el contenido de user.deleted, en snake_case como fija el
+// contrato. No lleva PII: ni email ni DNI, solo cuándo fue la baja. El usuario
+// va como actor del sobre.
+type userDeletedPayload struct {
+	DeletedAt string `json:"deleted_at"`
+}
+
+// newUserDeletedEnvelope arma el sobre de una baja de cuenta.
+//
+// Actor lleva el usuario dado de baja, que es lo que Alert y Vehicle necesitan
+// para saber a quién borrarle los datos. EventID reutiliza evt.EventID, la fila
+// del outbox, por la misma razón que en newSessionsRevokedEnvelope.
+func newUserDeletedEnvelope(evt domain.UserDeleted, producer string, now time.Time) Envelope {
+	actor := evt.UserID.String()
+	return Envelope{
+		EventID:   evt.EventID.String(),
+		EventType: EventTypeUserDeleted,
+		Timestamp: now.UTC().Format(time.RFC3339Nano),
+		Producer:  producer,
+		Actor:     &actor,
+		Payload: userDeletedPayload{
+			DeletedAt: evt.DeletedAt.UTC().Format(time.RFC3339Nano),
 		},
 	}
 }

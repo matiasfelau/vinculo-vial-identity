@@ -132,13 +132,19 @@ func (m *renaperMock) ValidateIdentity(_ context.Context, dni, tramite, sexo, se
 
 type repositoryMock struct {
 	err error
+	// inherit, si no es nil, simula una sanción vigente del mismo DNI: Create le
+	// hace heredar la sanción al usuario, como el repositorio real.
+	inherit *domain.SanctionCarryover
 
 	mu      sync.Mutex
 	calls   int
 	created []domain.User
+	// inheritedStatus es el user.status.changed que el servicio entregó en cada
+	// Create, tal como lo recibe el repositorio.
+	inheritedStatus []domain.OutboxEvent
 }
 
-func (m *repositoryMock) Create(_ context.Context, u *domain.User) error {
+func (m *repositoryMock) Create(_ context.Context, u *domain.User, inheritedStatus domain.OutboxEvent) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
@@ -146,8 +152,19 @@ func (m *repositoryMock) Create(_ context.Context, u *domain.User) error {
 	if m.err != nil {
 		return m.err
 	}
+	if m.inherit != nil {
+		u.InheritSanction(*m.inherit)
+	}
 	m.created = append(m.created, *u)
+	m.inheritedStatus = append(m.inheritedStatus, inheritedStatus)
 	return nil
+}
+
+// FindByID no lo ejercita ningún test de signup: es parte de
+// domain.UserRepository solo porque la baja de cuenta (US-11) lo necesita sobre
+// el mismo repositorio.
+func (m *repositoryMock) FindByID(context.Context, uuid.UUID) (*domain.User, error) {
+	panic("signup: FindByID no se usa en el alta")
 }
 
 // FindByDNIHashed no lo ejercita ningún test de signup: es parte de

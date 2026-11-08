@@ -40,6 +40,8 @@ type Config struct {
 	Events     EventsConfig
 	Consumer   ConsumerConfig
 	Reputation ReputationConfig
+	Audit      AuditConfig
+	Sanction   SanctionConfig
 	Token      TokenConfig
 	Renaper    RenaperConfig
 	Outbox     OutboxConfig
@@ -249,11 +251,49 @@ type ReputationConfig struct {
 	ReviewThreshold int
 }
 
+// AuditConfig son los parámetros con que Identity sella el DNI del emisor de una
+// alerta hacia el Audit Service (US-11).
+type AuditConfig struct {
+	// PublicKey es la clave pública X25519 de Audit, en base64 (AUDIT_PUBLIC_KEY).
+	// La privada se genera fuera de línea con audit-keygen, la custodia el
+	// responsable legal y ningún servicio la carga, ni siquiera Audit. Es
+	// obligatoria: sin ella no hay forma de sellar el DNI, y el servicio no
+	// arranca. No es un secreto, pero tampoco se vuelca al log. Tiene que
+	// coincidir con la de Vehicle.
+	PublicKey string
+	// KeyID es el id corto del par de claves (AUDIT_KEY_ID, por ejemplo "2026-11"):
+	// viaja con cada criptograma para poder rotar las claves. Tiene que coincidir
+	// con el de Vehicle. Su formato lo valida auditseal.New en el arranque.
+	KeyID string
+}
+
+// SanctionConfig son los parámetros de la herencia de la sanción de una cuenta
+// penalizada que se dio de baja (US-11).
+type SanctionConfig struct {
+	// CarryoverDays son los días que la sanción se hereda si el mismo DNI se vuelve
+	// a registrar (SANCTION_CARRYOVER_DAYS): 1095, tres años, por el art. 2561 del
+	// CCyC y el art. 62 del CP.
+	CarryoverDays int
+	// SweepInterval es cada cuánto corre el barrido que borra las sanciones
+	// vencidas (SANCTION_CARRYOVER_SWEEP_INTERVAL).
+	SweepInterval time.Duration
+	// SweepBatchSize acota cuántas sanciones borra cada sentencia del barrido
+	// (SANCTION_CARRYOVER_SWEEP_BATCH_SIZE).
+	SweepBatchSize int
+}
+
 // Valores por defecto pensados para que el entorno local levante sin definir
 // más que los secretos.
 const (
-	defaultHTTPPort     = 8080
-	defaultInternalPort = 8081
+	// defaultSanctionCarryoverDays es el contrato de US-11: tres años.
+	defaultSanctionCarryoverDays = 1095
+	// defaultSanctionSweepInterval y defaultSanctionSweepBatchSize son una
+	// decisión operativa: el plazo es de años, así que borrar una sanción con una
+	// hora de demora no cambia nada.
+	defaultSanctionSweepInterval  = time.Hour
+	defaultSanctionSweepBatchSize = 500
+	defaultHTTPPort               = 8080
+	defaultInternalPort           = 8081
 	// minServiceTokenLength es el piso de entropía admitido para
 	// INTERNAL_SERVICE_TOKEN: es un secreto compartido comparado byte a byte
 	// (no una contraseña con Argon2 detrás), así que su propia longitud es
@@ -400,6 +440,17 @@ func Load() (*Config, error) {
 			ReviewThreshold: r.integer("REPORT_REVIEW_THRESHOLD", defaultReviewThreshold),
 		},
 
+		Audit: AuditConfig{
+			PublicKey: r.required("AUDIT_PUBLIC_KEY"),
+			KeyID:     r.required("AUDIT_KEY_ID"),
+		},
+
+		Sanction: SanctionConfig{
+			CarryoverDays:  r.integer("SANCTION_CARRYOVER_DAYS", defaultSanctionCarryoverDays),
+			SweepInterval:  r.duration("SANCTION_CARRYOVER_SWEEP_INTERVAL", defaultSanctionSweepInterval),
+			SweepBatchSize: r.integer("SANCTION_CARRYOVER_SWEEP_BATCH_SIZE", defaultSanctionSweepBatchSize),
+		},
+
 		Token: TokenConfig{
 			AccessTokenTTL:  time.Duration(r.integer("ACCESS_TOKEN_TTL_MINUTES", defaultAccessTokenTTLMinutes)) * time.Minute,
 			RefreshTokenTTL: time.Duration(r.integer("REFRESH_TOKEN_TTL_DAYS", defaultRefreshTokenTTLDays)) * 24 * time.Hour,
@@ -543,6 +594,16 @@ func (c *Config) validate() error {
 		r.fail("config: REPORT_REVIEW_THRESHOLD debe ser al menos 1, se recibió %d", c.Reputation.ReviewThreshold)
 	}
 
+	if c.Sanction.CarryoverDays < 1 {
+		r.fail("config: SANCTION_CARRYOVER_DAYS debe ser al menos 1, se recibió %d", c.Sanction.CarryoverDays)
+	}
+	if c.Sanction.SweepInterval <= 0 {
+		r.fail("config: SANCTION_CARRYOVER_SWEEP_INTERVAL debe ser positivo")
+	}
+	if c.Sanction.SweepBatchSize < 1 {
+		r.fail("config: SANCTION_CARRYOVER_SWEEP_BATCH_SIZE debe ser al menos 1, se recibió %d", c.Sanction.SweepBatchSize)
+	}
+
 	if c.Events.Enabled {
 		if c.Events.URL.Reveal() == "" {
 			r.fail("config: RABBITMQ_URL es obligatoria con RABBITMQ_ENABLED=true")
@@ -598,6 +659,10 @@ func (c *Config) LogValue() slog.Value {
 		slog.String("alert_reported_queue", c.Consumer.AlertReportedQueue),
 		slog.Int("fraud_penalty", c.Reputation.FraudPenalty),
 		slog.Int("report_review_threshold", c.Reputation.ReviewThreshold),
+		slog.String("audit_key_id", c.Audit.KeyID),
+		slog.Int("sanction_carryover_days", c.Sanction.CarryoverDays),
+		slog.Duration("sanction_carryover_sweep_interval", c.Sanction.SweepInterval),
+		slog.Int("sanction_carryover_sweep_batch_size", c.Sanction.SweepBatchSize),
 		slog.Duration("renaper_timeout", c.Renaper.Timeout),
 		slog.Int("renaper_breaker_failure_threshold", c.Renaper.BreakerFailureThreshold),
 		slog.Duration("renaper_breaker_window", c.Renaper.BreakerWindow),

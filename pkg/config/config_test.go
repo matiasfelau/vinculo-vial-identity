@@ -26,6 +26,10 @@ func entornoMinimo() map[string]string {
 		"HMAC_SECRET":               clave,
 		"JWT_PRIVATE_KEY":           clavePEMDePrueba,
 		"INTERNAL_SERVICE_TOKEN":    strings.Repeat("a", 32),
+		// Clave pública de Audit y su id (US-11): config.Load no los interpreta, solo
+		// los exige; internal/crypto/auditseal los valida de verdad.
+		"AUDIT_PUBLIC_KEY": clave,
+		"AUDIT_KEY_ID":     "2026-11",
 	}
 }
 
@@ -56,6 +60,8 @@ func aplicar(t *testing.T, env map[string]string) {
 		"OUTBOX_WORKER_INTERVAL", "OUTBOX_WORKER_BATCH_SIZE",
 		"RABBITMQ_PREFETCH", "MAX_RETRIES", "ALERT_REJECTED_QUEUE", "FRAUD_PENALTY",
 		"ALERT_REPORTED_QUEUE", "REPORT_REVIEW_THRESHOLD",
+		"AUDIT_PUBLIC_KEY", "AUDIT_KEY_ID", "SANCTION_CARRYOVER_DAYS",
+		"SANCTION_CARRYOVER_SWEEP_INTERVAL", "SANCTION_CARRYOVER_SWEEP_BATCH_SIZE",
 	} {
 		t.Setenv(k, "")
 		os.Unsetenv(k)
@@ -467,9 +473,9 @@ func TestLoadAceptaUnWorkerDeOutboxPersonalizado(t *testing.T) {
 
 func TestLoadRechazaElWorkerDeOutboxMalConfigurado(t *testing.T) {
 	cases := map[string]map[string]string{
-		"intervalo cero":     {"OUTBOX_WORKER_INTERVAL": "0s"},
-		"intervalo negativo": {"OUTBOX_WORKER_INTERVAL": "-1s"},
-		"batch size cero":    {"OUTBOX_WORKER_BATCH_SIZE": "0"},
+		"intervalo cero":      {"OUTBOX_WORKER_INTERVAL": "0s"},
+		"intervalo negativo":  {"OUTBOX_WORKER_INTERVAL": "-1s"},
+		"batch size cero":     {"OUTBOX_WORKER_BATCH_SIZE": "0"},
 		"batch size negativo": {"OUTBOX_WORKER_BATCH_SIZE": "-1"},
 	}
 
@@ -528,7 +534,7 @@ func TestLoadExigeLosSecretos(t *testing.T) {
 	obligatorias := []string{
 		"POSTGRES_USER", "POSTGRES_PASSWORD", "POSTGRES_DB",
 		"IDENTITY_HPKE_PRIVATE_KEY", "AES_KEY", "HMAC_SECRET", "JWT_PRIVATE_KEY",
-		"INTERNAL_SERVICE_TOKEN",
+		"INTERNAL_SERVICE_TOKEN", "AUDIT_PUBLIC_KEY", "AUDIT_KEY_ID",
 	}
 
 	for _, faltante := range obligatorias {
@@ -558,7 +564,7 @@ func TestLoadAcumulaLosErrores(t *testing.T) {
 		t.Fatal("se esperaba un error")
 	}
 
-	for _, faltante := range []string{"POSTGRES_USER", "IDENTITY_HPKE_PRIVATE_KEY", "AES_KEY", "HMAC_SECRET", "JWT_PRIVATE_KEY", "INTERNAL_SERVICE_TOKEN"} {
+	for _, faltante := range []string{"POSTGRES_USER", "IDENTITY_HPKE_PRIVATE_KEY", "AES_KEY", "HMAC_SECRET", "JWT_PRIVATE_KEY", "INTERNAL_SERVICE_TOKEN", "AUDIT_PUBLIC_KEY", "AUDIT_KEY_ID"} {
 		if !strings.Contains(err.Error(), faltante) {
 			t.Errorf("el error debería mencionar %s: %v", faltante, err)
 		}
@@ -911,5 +917,135 @@ func TestLoadDotEnvRechazaLineasMalFormadas(t *testing.T) {
 
 	if err := config.LoadDotEnv(path); err == nil {
 		t.Error("se esperaba un error por una línea sin la forma CLAVE=valor")
+	}
+}
+
+// Sellado hacia Audit (US-11): la clave pública y su id son obligatorios, y el
+// servicio no arranca sin ellos.
+func TestLoadCargaLaConfiguracionDeAudit(t *testing.T) {
+	aplicar(t, entornoMinimo())
+
+	cfg, err := config.Load()
+	if err != nil {
+		t.Fatalf("error inesperado: %v", err)
+	}
+	if cfg.Audit.PublicKey == "" {
+		t.Errorf("AUDIT_PUBLIC_KEY no se cargó")
+	}
+	if cfg.Audit.KeyID != "2026-11" {
+		t.Errorf("AUDIT_KEY_ID = %q, se esperaba 2026-11", cfg.Audit.KeyID)
+	}
+}
+
+func TestLoadExigeLaConfiguracionDeAudit(t *testing.T) {
+	for _, variable := range []string{"AUDIT_PUBLIC_KEY", "AUDIT_KEY_ID"} {
+		for nombre, valor := range map[string]string{"ausente": "", "en blanco": "   "} {
+			t.Run(variable+" "+nombre, func(t *testing.T) {
+				env := entornoMinimo()
+				env[variable] = valor
+				aplicar(t, env)
+
+				_, err := config.Load()
+				if err == nil {
+					t.Fatal("se esperaba un error")
+				}
+				if !strings.Contains(err.Error(), variable) {
+					t.Errorf("el error debería nombrar %s: %v", variable, err)
+				}
+			})
+		}
+	}
+}
+
+// Herencia de la sanción de una cuenta dada de baja (US-11): 1095 días por
+// defecto, con el barrido a intervalo y lote operativos.
+func TestLoadUsaLosDefaultsDeLaHerenciaDeSancion(t *testing.T) {
+	aplicar(t, entornoMinimo())
+
+	cfg, err := config.Load()
+	if err != nil {
+		t.Fatalf("error inesperado: %v", err)
+	}
+	if cfg.Sanction.CarryoverDays != 1095 {
+		t.Errorf("SANCTION_CARRYOVER_DAYS = %d, se esperaban 1095", cfg.Sanction.CarryoverDays)
+	}
+	if cfg.Sanction.SweepInterval != time.Hour {
+		t.Errorf("SANCTION_CARRYOVER_SWEEP_INTERVAL = %v, se esperaba 1h", cfg.Sanction.SweepInterval)
+	}
+	if cfg.Sanction.SweepBatchSize != 500 {
+		t.Errorf("SANCTION_CARRYOVER_SWEEP_BATCH_SIZE = %d, se esperaban 500", cfg.Sanction.SweepBatchSize)
+	}
+}
+
+func TestLoadAceptaLaHerenciaDeSancionPersonalizada(t *testing.T) {
+	env := entornoMinimo()
+	env["SANCTION_CARRYOVER_DAYS"] = "1"
+	env["SANCTION_CARRYOVER_SWEEP_INTERVAL"] = "30s"
+	env["SANCTION_CARRYOVER_SWEEP_BATCH_SIZE"] = "10"
+	aplicar(t, env)
+
+	cfg, err := config.Load()
+	if err != nil {
+		t.Fatalf("error inesperado: %v", err)
+	}
+	if cfg.Sanction.CarryoverDays != 1 || cfg.Sanction.SweepInterval != 30*time.Second || cfg.Sanction.SweepBatchSize != 10 {
+		t.Errorf("Sanction = %+v", cfg.Sanction)
+	}
+}
+
+func TestLoadRechazaLaHerenciaDeSancionMalConfigurada(t *testing.T) {
+	casos := map[string]struct {
+		env      map[string]string
+		variable string
+	}{
+		"días en cero":       {map[string]string{"SANCTION_CARRYOVER_DAYS": "0"}, "SANCTION_CARRYOVER_DAYS"},
+		"días negativos":     {map[string]string{"SANCTION_CARRYOVER_DAYS": "-5"}, "SANCTION_CARRYOVER_DAYS"},
+		"días no numéricos":  {map[string]string{"SANCTION_CARRYOVER_DAYS": "tres años"}, "SANCTION_CARRYOVER_DAYS"},
+		"intervalo en cero":  {map[string]string{"SANCTION_CARRYOVER_SWEEP_INTERVAL": "0s"}, "SANCTION_CARRYOVER_SWEEP_INTERVAL"},
+		"intervalo negativo": {map[string]string{"SANCTION_CARRYOVER_SWEEP_INTERVAL": "-1m"}, "SANCTION_CARRYOVER_SWEEP_INTERVAL"},
+		"lote en cero":       {map[string]string{"SANCTION_CARRYOVER_SWEEP_BATCH_SIZE": "0"}, "SANCTION_CARRYOVER_SWEEP_BATCH_SIZE"},
+	}
+
+	for nombre, caso := range casos {
+		t.Run(nombre, func(t *testing.T) {
+			env := entornoMinimo()
+			for k, v := range caso.env {
+				env[k] = v
+			}
+			aplicar(t, env)
+
+			_, err := config.Load()
+			if err == nil {
+				t.Fatal("se esperaba un error")
+			}
+			if !strings.Contains(err.Error(), caso.variable) {
+				t.Errorf("el error debería nombrar %s: %v", caso.variable, err)
+			}
+		})
+	}
+}
+
+// El log de arranque informa el id de la clave y la herencia, pero no vuelca la
+// clave pública.
+func TestLaConfiguracionLogueaAuditSinLaClave(t *testing.T) {
+	env := entornoMinimo()
+	env["AUDIT_PUBLIC_KEY"] = "clave-publica-que-no-debe-aparecer-en-el-log"
+	aplicar(t, env)
+
+	cfg, err := config.Load()
+	if err != nil {
+		t.Fatalf("error inesperado: %v", err)
+	}
+
+	var salida strings.Builder
+	slog.New(slog.NewTextHandler(&salida, nil)).Info("config", slog.Any("config", cfg))
+
+	for _, esperado := range []string{"audit_key_id=2026-11", "sanction_carryover_days=1095"} {
+		if !strings.Contains(salida.String(), esperado) {
+			t.Errorf("el log debería informar %s: %s", esperado, salida.String())
+		}
+	}
+	if strings.Contains(salida.String(), "clave-publica-que-no-debe-aparecer") {
+		t.Errorf("el log no debería volcar la clave: %s", salida.String())
 	}
 }

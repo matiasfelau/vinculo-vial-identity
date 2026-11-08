@@ -53,6 +53,10 @@ const (
 	// Activa de US-03: se detectó el reúso de un Refresh Token ya rotado y se
 	// revocaron todas las sesiones del usuario.
 	SessionsRevokedReasonReuseDetected SessionsRevokedReason = "REUSE_DETECTED"
+	// SessionsRevokedReasonAccountDeleted es el motivo de la baja de cuenta
+	// (US-11): el usuario pidió eliminar su cuenta y se borraron todas sus
+	// sesiones. Notification lo trata como informativo.
+	SessionsRevokedReasonAccountDeleted SessionsRevokedReason = "ACCOUNT_DELETED"
 )
 
 // SessionsRevoked es el evento de dominio que dispara la revocación masiva de

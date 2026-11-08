@@ -125,8 +125,12 @@ type usersMock struct {
 	dniHasheados []string
 }
 
-func (m *usersMock) Create(context.Context, *domain.User) error {
+func (m *usersMock) Create(context.Context, *domain.User, domain.OutboxEvent) error {
 	panic("signin: Create no se usa en el login")
+}
+
+func (m *usersMock) FindByID(context.Context, uuid.UUID) (*domain.User, error) {
+	panic("signin: FindByID no se usa en el login")
 }
 
 func (m *usersMock) FindByDNIHashed(_ context.Context, dniHashed string) (*domain.User, error) {

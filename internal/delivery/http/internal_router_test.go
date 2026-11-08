@@ -38,23 +38,46 @@ func (m *verifyOwnershipServiceMock) VerifyOwnership(_ context.Context, ownerID 
 	return m.match, nil
 }
 
+// auditDNIServiceMock implementa delivery.AuditDNIService.
+type auditDNIServiceMock struct {
+	result domain.AuditDNI
+	err    error
+
+	calls   int
+	userID  uuid.UUID
+	alertID uuid.UUID
+}
+
+func (m *auditDNIServiceMock) SealDNI(_ context.Context, userID, alertID uuid.UUID) (domain.AuditDNI, error) {
+	m.calls++
+	m.userID = userID
+	m.alertID = alertID
+	if m.err != nil {
+		return domain.AuditDNI{}, m.err
+	}
+	return m.result, nil
+}
+
 type internalTestServer struct {
 	handler         http.Handler
 	verifyOwnership *verifyOwnershipServiceMock
+	auditDNI        *auditDNIServiceMock
 }
 
 func newInternalTestServer(t *testing.T) *internalTestServer {
 	t.Helper()
 
 	svc := &verifyOwnershipServiceMock{match: true}
+	audit := &auditDNIServiceMock{result: domain.AuditDNI{Sealed: "c2VsbGFkbw==", KeyID: "2026-11"}}
 	router, err := delivery.NewInternalRouter(delivery.InternalRouterConfig{
 		VerifyOwnership: svc,
+		AuditDNI:        audit,
 		ServiceToken:    secretoDePrueba,
 	})
 	if err != nil {
 		t.Fatalf("no se pudo armar el router interno: %v", err)
 	}
-	return &internalTestServer{handler: router, verifyOwnership: svc}
+	return &internalTestServer{handler: router, verifyOwnership: svc, auditDNI: audit}
 }
 
 func (ts *internalTestServer) post(t *testing.T, path, body string) *httptest.ResponseRecorder {
@@ -76,14 +99,22 @@ func verifyOwnershipBody(ownerID, dniEnc string) string {
 
 func TestNewInternalRouterExigeElSecretoConfigurado(t *testing.T) {
 	svc := &verifyOwnershipServiceMock{}
-	if _, err := delivery.NewInternalRouter(delivery.InternalRouterConfig{VerifyOwnership: svc, ServiceToken: ""}); err == nil {
+	if _, err := delivery.NewInternalRouter(delivery.InternalRouterConfig{VerifyOwnership: svc, AuditDNI: &auditDNIServiceMock{}, ServiceToken: ""}); err == nil {
 		t.Fatal("se esperaba un error al faltar ServiceToken")
 	}
 }
 
 func TestNewInternalRouterExigeElServicioDeVerificacion(t *testing.T) {
-	if _, err := delivery.NewInternalRouter(delivery.InternalRouterConfig{ServiceToken: secretoDePrueba}); err == nil {
+	cfg := delivery.InternalRouterConfig{AuditDNI: &auditDNIServiceMock{}, ServiceToken: secretoDePrueba}
+	if _, err := delivery.NewInternalRouter(cfg); err == nil {
 		t.Fatal("se esperaba un error al faltar VerifyOwnership")
+	}
+}
+
+func TestNewInternalRouterExigeElServicioDeAuditoria(t *testing.T) {
+	cfg := delivery.InternalRouterConfig{VerifyOwnership: &verifyOwnershipServiceMock{}, ServiceToken: secretoDePrueba}
+	if _, err := delivery.NewInternalRouter(cfg); err == nil {
+		t.Fatal("se esperaba un error al faltar AuditDNI")
 	}
 }
 
