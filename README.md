@@ -617,7 +617,86 @@ docker compose up --build                     # entorno local completo
 ```
 
 Los tests son unitarios y no necesitan Postgres ni RabbitMQ: todo lo externo
-está detrás de interfaces de `domain` y se ejercita con dobles.
+está detrás de interfaces de `domain` y se ejercita con dobles. Las pruebas de
+integración del repositorio (`-tags=integration`) sí necesitan Postgres; ver
+la sección CI.
+
+## CI
+
+`.github/workflows/ci.yml` corre en todo pull request hacia `dev` o `main` y
+tiene dos jobs. Para la regla de protección de `dev` hay que exigir los dos
+checks: `build-and-test` y `security`.
+
+**`build-and-test`**: compila, `go vet -tags=integration`, pruebas unitarias,
+pruebas de integración contra Postgres (se exige que corran todas las
+`TestIntegracion*`) y cobertura.
+
+- **Un solo reporte.** Las unitarias y las de integración se miden con
+  `-covermode=atomic -coverpkg=./...`, se unen con `gocovmerge` y se convierten
+  a Cobertura XML con `gocover-cobertura`.
+- **Gate sobre el código nuevo.** `diff-cover` exige 85 % de cobertura sobre
+  las líneas que el PR agrega o cambia respecto de su rama base. Si el PR no
+  toca código medible, pasa.
+- **Cobertura total.** Se publica en el resumen del job (`$GITHUB_STEP_SUMMARY`)
+  y en el artefacto `cobertura`, sin cortar el job. En v0.14, cuando todos los
+  repos estén en 85 % o más, el gate pasa a ser sobre el total.
+- **Exclusiones.** Ninguna: hoy no hay código generado en el repo, y no se
+  excluye código escrito a mano para subir el número. Si aparece código
+  generado, se lista acá con su motivo.
+
+**`security`**:
+
+- **Trivy** (`fs`, `vuln,secret,misconfig`, `HIGH,CRITICAL`, `--ignore-unfixed`):
+  falla ante hallazgos con corrección disponible. Las excepciones van solo en
+  `.trivyignore`, cada una con un comentario con el motivo y hasta cuándo.
+- **govulncheck** (`./...`): falla ante vulnerabilidades alcanzables desde el
+  código.
+- **Semgrep** (`p/default`): solo informativo. Los hallazgos salen en el
+  resumen del job y no cortan nada; pasa a gate en v0.14.
+
+Las acciones de terceros están fijadas por SHA de commit (la versión va en un
+comentario) y el workflow tiene `permissions: contents: read`. Dependabot
+propone semanalmente actualizaciones de `gomod`, `github-actions` y `docker`
+contra `dev`.
+
+### Correrlo en local
+
+Con Go y Python instalados (las versiones de las herramientas están en el
+bloque `env` de `ci.yml`):
+
+```bash
+go install github.com/wadey/gocovmerge@b5bfa59ec0adc420475f97f89b58045c721d761c
+go install github.com/boumenot/gocover-cobertura@v1.5.0
+go install golang.org/x/vuln/cmd/govulncheck@v1.9.0
+python -m pip install diff-cover==11.0.1
+
+# Cobertura: unitarias + integración (Postgres en 127.0.0.1:55432)
+mkdir -p coverage
+go test -count=1 -covermode=atomic -coverpkg=./... -coverprofile=coverage/unit.out ./...
+docker run -d --name vv-identity-it -e POSTGRES_USER=identity \
+  -e POSTGRES_PASSWORD=identity -e POSTGRES_DB=identity \
+  -p 127.0.0.1:55432:5432 postgres:17-alpine
+TEST_DATABASE_URL='postgres://identity:identity@127.0.0.1:55432/identity?sslmode=disable' \
+  go test -tags=integration -count=1 -run Integracion -covermode=atomic \
+  -coverpkg=./... -coverprofile=coverage/integration.out ./internal/repository/postgres/
+gocovmerge coverage/unit.out coverage/integration.out > coverage/total.out
+gocover-cobertura < coverage/total.out > coverage/cobertura.xml
+go tool cover -func=coverage/total.out | tail -1          # cobertura total
+
+# Gate sobre el código nuevo (contra la rama base; hace falta `git fetch origin`)
+diff-cover coverage/cobertura.xml --compare-branch=origin/dev --fail-under=85
+
+# Escaneos
+govulncheck ./...
+docker run --rm -v "$PWD:/src:ro" aquasec/trivy:latest fs \
+  --scanners vuln,secret,misconfig --severity HIGH,CRITICAL --ignore-unfixed \
+  --exit-code 1 --skip-files /src/.env /src
+docker run --rm -v "$PWD:/src" -w /src semgrep/semgrep:1.184.0 \
+  semgrep scan --config p/default --metrics=off .
+```
+
+`diff-cover` compara contra el árbol de trabajo, así que los archivos nuevos
+tienen que estar al menos con `git add -N` para que cuenten.
 
 ## Arquitectura
 
