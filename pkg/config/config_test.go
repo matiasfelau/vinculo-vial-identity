@@ -52,7 +52,7 @@ func aplicar(t *testing.T, env map[string]string) {
 		"POSTGRES_DB", "POSTGRES_SSLMODE", "POSTGRES_LOG_SQL", "EPHEMERAL_DB",
 		"POSTGRES_MAX_OPEN_CONNS", "POSTGRES_MAX_IDLE_CONNS", "POSTGRES_STATEMENT_TIMEOUT",
 		"IDENTITY_HPKE_PRIVATE_KEY", "IDENTITY_HPKE_INFO", "AES_KEY", "HMAC_SECRET",
-		"JWT_PRIVATE_KEY", "JWT_ISSUER", "ACCESS_TOKEN_TTL_MINUTES", "REFRESH_TOKEN_TTL_DAYS",
+		"JWT_PRIVATE_KEY", "JWT_ISSUER", "ACCESS_TOKEN_TTL_MINUTES", "REFRESH_TOKEN_TTL_DAYS", "SESSION_MAX_DAYS",
 		"ARGON2_MEMORY_KIB", "ARGON2_ITERATIONS", "ARGON2_PARALLELISM",
 		"RABBITMQ_ENABLED", "RABBITMQ_URL", "RABBITMQ_EXCHANGE",
 		"RABBITMQ_DIAL_TIMEOUT", "RABBITMQ_HEARTBEAT", "RENAPER_TIMEOUT",
@@ -107,6 +107,9 @@ func TestLoadConElEntornoMinimo(t *testing.T) {
 	if cfg.Token.RefreshTokenTTL != 30*24*time.Hour {
 		t.Errorf("refresh token ttl = %v, se esperaban 30 días", cfg.Token.RefreshTokenTTL)
 	}
+	if cfg.Token.SessionMaxLifetime != 90*24*time.Hour {
+		t.Errorf("vida máxima de la sesión = %v, se esperaban 90 días", cfg.Token.SessionMaxLifetime)
+	}
 	if cfg.Renaper.Timeout != 1500*time.Millisecond {
 		t.Errorf("renaper timeout = %v, se esperaban 1500ms", cfg.Renaper.Timeout)
 	}
@@ -140,6 +143,9 @@ func TestLoadRechazaTTLNoPositivos(t *testing.T) {
 		"access token ttl negativo":  {"ACCESS_TOKEN_TTL_MINUTES": "-1"},
 		"refresh token ttl cero":     {"REFRESH_TOKEN_TTL_DAYS": "0"},
 		"refresh token ttl negativo": {"REFRESH_TOKEN_TTL_DAYS": "-1"},
+		"vida máxima cero":           {"SESSION_MAX_DAYS": "0"},
+		"vida máxima negativa":       {"SESSION_MAX_DAYS": "-1"},
+		"vida máxima no numérica":    {"SESSION_MAX_DAYS": "mucho"},
 	}
 
 	for name, override := range cases {
@@ -189,6 +195,7 @@ func TestLoadAceptaTTLPersonalizados(t *testing.T) {
 	env := entornoMinimo()
 	env["ACCESS_TOKEN_TTL_MINUTES"] = "5"
 	env["REFRESH_TOKEN_TTL_DAYS"] = "7"
+	env["SESSION_MAX_DAYS"] = "14"
 	aplicar(t, env)
 
 	cfg, err := config.Load()
@@ -200,6 +207,9 @@ func TestLoadAceptaTTLPersonalizados(t *testing.T) {
 	}
 	if cfg.Token.RefreshTokenTTL != 7*24*time.Hour {
 		t.Errorf("refresh token ttl = %v, se esperaban 7 días", cfg.Token.RefreshTokenTTL)
+	}
+	if cfg.Token.SessionMaxLifetime != 14*24*time.Hour {
+		t.Errorf("vida máxima de la sesión = %v, se esperaban 14 días", cfg.Token.SessionMaxLifetime)
 	}
 }
 

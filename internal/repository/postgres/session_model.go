@@ -18,6 +18,7 @@ type sessionModel struct {
 	RefreshTokenHash string    `gorm:"column:refresh_token_hash;type:varchar(64);not null;uniqueIndex:uix_sessions_refresh_token_hash"`
 	IsRevoked        bool      `gorm:"column:is_revoked;type:boolean;not null;default:false"`
 	ExpiresAt        time.Time `gorm:"column:expires_at;type:timestamptz;not null"`
+	StartedAt        time.Time `gorm:"column:started_at;type:timestamptz;not null"`
 	CreatedAt        time.Time `gorm:"column:created_at;type:timestamptz;not null"`
 }
 
@@ -32,6 +33,7 @@ func toSessionModel(s *domain.Session) *sessionModel {
 		RefreshTokenHash: s.RefreshTokenHash,
 		IsRevoked:        s.IsRevoked,
 		ExpiresAt:        s.ExpiresAt,
+		StartedAt:        s.StartedAt,
 		CreatedAt:        s.CreatedAt,
 	}
 }
@@ -43,6 +45,7 @@ func (m *sessionModel) toDomain() *domain.Session {
 		RefreshTokenHash: m.RefreshTokenHash,
 		IsRevoked:        m.IsRevoked,
 		ExpiresAt:        m.ExpiresAt,
+		StartedAt:        m.StartedAt,
 		CreatedAt:        m.CreatedAt,
 	}
 }

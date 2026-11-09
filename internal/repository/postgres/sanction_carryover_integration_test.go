@@ -84,7 +84,7 @@ func conSesiones(t *testing.T, db *gorm.DB, userID uuid.UUID, cantidad int) {
 	t.Helper()
 
 	for i := 0; i < cantidad; i++ {
-		s, err := domain.NewSession(userID, uuid.NewString(), time.Now().Add(time.Hour), time.Now())
+		s, err := domain.NewSession(userID, uuid.NewString(), time.Now().Add(time.Hour), time.Now(), time.Now())
 		if err != nil {
 			t.Fatalf("no se pudo armar la sesión: %v", err)
 		}

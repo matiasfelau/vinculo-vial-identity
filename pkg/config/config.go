@@ -168,6 +168,11 @@ type TokenConfig struct {
 	// RefreshTokenTTL es la vida del Refresh Token opaco. El contrato compartido
 	// fija la variable en días (REFRESH_TOKEN_TTL_DAYS).
 	RefreshTokenTTL time.Duration
+	// SessionMaxLifetime es la vida máxima de una sesión desde el inicio de
+	// sesión con credenciales (US-12): por mucho que el Refresh Token rote, al
+	// pasarla se exige volver a ingresar. REFRESH_TOKEN_TTL_DAYS sigue siendo
+	// la inactividad máxima. Variable: SESSION_MAX_DAYS, en días.
+	SessionMaxLifetime time.Duration
 	// Issuer es el claim `iss` que lleva el Access Token. Kong lo exige para
 	// mapear el token al Consumer correcto antes de validar la firma RS256.
 	Issuer string
@@ -365,6 +370,9 @@ const (
 	// asume estos mismos TTL del lado de la verificación.
 	defaultAccessTokenTTLMinutes = 15
 	defaultRefreshTokenTTLDays   = 30
+	// defaultSessionMaxDays es la vida máxima de la sesión que fija el
+	// contrato de US-12.
+	defaultSessionMaxDays = 90
 	// defaultJWTIssuer es el nombre de este servicio en el claim `iss`, el que
 	// Kong espera cuando no se sobrescribe con JWT_ISSUER.
 	defaultJWTIssuer = "vinculo-vial-identity"
@@ -452,9 +460,10 @@ func Load() (*Config, error) {
 		},
 
 		Token: TokenConfig{
-			AccessTokenTTL:  time.Duration(r.integer("ACCESS_TOKEN_TTL_MINUTES", defaultAccessTokenTTLMinutes)) * time.Minute,
-			RefreshTokenTTL: time.Duration(r.integer("REFRESH_TOKEN_TTL_DAYS", defaultRefreshTokenTTLDays)) * 24 * time.Hour,
-			Issuer:          r.str("JWT_ISSUER", defaultJWTIssuer),
+			AccessTokenTTL:     time.Duration(r.integer("ACCESS_TOKEN_TTL_MINUTES", defaultAccessTokenTTLMinutes)) * time.Minute,
+			RefreshTokenTTL:    time.Duration(r.integer("REFRESH_TOKEN_TTL_DAYS", defaultRefreshTokenTTLDays)) * 24 * time.Hour,
+			SessionMaxLifetime: time.Duration(r.integer("SESSION_MAX_DAYS", defaultSessionMaxDays)) * 24 * time.Hour,
+			Issuer:             r.str("JWT_ISSUER", defaultJWTIssuer),
 		},
 
 		Renaper: RenaperConfig{
@@ -557,6 +566,9 @@ func (c *Config) validate() error {
 	}
 	if c.Token.RefreshTokenTTL <= 0 {
 		r.fail("config: REFRESH_TOKEN_TTL_DAYS debe ser positivo")
+	}
+	if c.Token.SessionMaxLifetime <= 0 {
+		r.fail("config: SESSION_MAX_DAYS debe ser positivo")
 	}
 
 	if c.Renaper.Timeout <= 0 {
@@ -672,6 +684,7 @@ func (c *Config) LogValue() slog.Value {
 		slog.Int("argon2_memory_kib", c.Crypto.Argon2MemoryKiB),
 		slog.Duration("access_token_ttl", c.Token.AccessTokenTTL),
 		slog.Duration("refresh_token_ttl", c.Token.RefreshTokenTTL),
+		slog.Duration("session_max_lifetime", c.Token.SessionMaxLifetime),
 		slog.String("jwt_issuer", c.Token.Issuer),
 	)
 }

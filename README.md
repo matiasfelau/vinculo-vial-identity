@@ -174,6 +174,25 @@ TTL 15 minutos, claim `sub` = UUID interno del usuario y ningún otro
 dato —ni DNI, ni email, ni el Blind Index—. Refresh Token opaco
 (`crypto/rand`), TTL 30 días, persistido en `sessions` solo como su SHA-256.
 
+### Vida máxima de la sesión (US-12)
+
+El Refresh Token rota en cada `/auth/refresh`, así que una sesión podría
+renovarse para siempre. Para que no sea así, cada sesión lleva `started_at`,
+el instante del login con contraseña: el signin lo fija en el momento actual y
+la rotación lo copia sin cambios a la sesión nueva.
+
+- `/auth/refresh` responde el mismo `401 sesion_invalida` que una sesión
+  vencida cuando `now > started_at + SESSION_MAX_DAYS`. El cuerpo y el status
+  no distinguen el motivo; el log interno sí (`vida máxima de la sesión
+  superada`, con el `user_id`).
+- No dispara la Defensa Activa: el cliente no reusó nada, solo superó el
+  plazo. Si la sesión además estaba revocada, gana la vida máxima y tampoco
+  se revoca el resto de las sesiones.
+- `REFRESH_TOKEN_TTL_DAYS` (30) sigue siendo la inactividad máxima: se mide
+  desde la última rotación y se controla antes que la vida máxima.
+- `SESSION_MAX_DAYS` (default 90) tiene que ser positivo; si no, el servicio
+  no arranca.
+
 **Fuera de alcance de este CU**: bloqueo de cuenta por intentos fallidos
 (`failed_login_attempts` / `lock_until` no existen; la defensa contra fuerza
 bruta masiva es del gateway), recuperación de contraseña, y la rotación del
@@ -693,8 +712,22 @@ foránea hacia ella.
 | `user_id` | uuid | FK → `users.id`, `ON DELETE CASCADE` |
 | `refresh_token_hash` | varchar(64) | UNIQUE — SHA-256 del Refresh Token opaco |
 | `is_revoked` | boolean | `false` al crearse; US-03 la revoca |
-| `expires_at` | timestamptz | +30 días desde la emisión |
+| `expires_at` | timestamptz | +30 días desde la emisión (`REFRESH_TOKEN_TTL_DAYS`) |
+| `started_at` | timestamptz | NOT NULL — instante del login; la rotación lo copia. Ancla de la vida máxima (`SESSION_MAX_DAYS`, US-12) |
 | `created_at` | timestamptz | |
+
+Una base anterior a US-12 no tiene `started_at`: el arranque agrega la columna,
+rellena las filas existentes con `started_at = created_at` y la deja `NOT NULL`,
+todo en una transacción bajo advisory lock (varias réplicas arrancando a la vez
+no chocan) y de forma idempotente. Es DDL, así que el rol que arranca el
+servicio necesita poder alterar `sessions`; un DBA que prefiera aplicarlo a
+mano puede correr, antes del despliegue:
+
+```sql
+ALTER TABLE sessions ADD COLUMN IF NOT EXISTS started_at timestamptz;
+UPDATE sessions SET started_at = created_at WHERE started_at IS NULL;
+ALTER TABLE sessions ALTER COLUMN started_at SET NOT NULL;
+```
 
 El Refresh Token en claro nunca se persiste: solo existe en la respuesta HTTP
 que recibe el cliente. La clave foránea con `ON DELETE CASCADE` se agrega con

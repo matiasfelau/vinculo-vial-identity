@@ -23,6 +23,7 @@ func TestMapeoSesionEsSimetrico(t *testing.T) {
 		RefreshTokenHash: "5f4dcc3b5aa765d61d8327deb882cf99" + "5f4dcc3b5aa765d61d8327deb882cf99",
 		IsRevoked:        false,
 		ExpiresAt:        time.Date(2026, 9, 11, 12, 0, 0, 0, time.UTC),
+		StartedAt:        time.Date(2026, 8, 1, 12, 0, 0, 0, time.UTC),
 		CreatedAt:        time.Date(2026, 8, 12, 12, 0, 0, 0, time.UTC),
 	}
 
