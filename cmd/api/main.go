@@ -220,9 +220,10 @@ func run() error {
 	}
 
 	refreshService, err := session.NewRefreshService(session.RefreshDeps{
-		Sessions: sessions,
-		Tokens:   tokens,
-		Logger:   logger,
+		Sessions:    sessions,
+		Tokens:      tokens,
+		Logger:      logger,
+		MaxLifetime: cfg.Token.SessionMaxLifetime,
 	})
 	if err != nil {
 		return err
