@@ -176,6 +176,72 @@ func ValidateSignIn(in SignInInput) error {
 	return errs.OrNil()
 }
 
+// ValidateEmail valida solo el formato de un email ya normalizado, con las
+// mismas reglas del alta. Lo usa el pedido de verificación de email (US-13).
+func ValidateEmail(email string) error {
+	var errs Errors
+	validateEmail(&errs, email)
+	return errs.OrNil()
+}
+
+// ValidateDNI valida solo el formato de un DNI ya normalizado, con las mismas
+// reglas del alta. Lo usa el pedido de recuperación de contraseña (US-13).
+func ValidateDNI(dni []byte) error {
+	var errs Errors
+	validateDNI(&errs, dni)
+	return errs.OrNil()
+}
+
+// IsEmailCode informa si code tiene la forma de un código de email: exactamente
+// codeDigits dígitos ASCII. Es un descarte barato antes de tocar la base; no
+// dice nada sobre si el código es el correcto.
+func IsEmailCode(code string, codeDigits int) bool {
+	if len(code) != codeDigits {
+		return false
+	}
+	for i := 0; i < len(code); i++ {
+		if code[i] < '0' || code[i] > '9' {
+			return false
+		}
+	}
+	return true
+}
+
+// PasswordResetInput son los datos que la recuperación de contraseña (US-13)
+// revalida con las reglas del alta.
+//
+// Email es el de la cuenta, no uno que mande el cliente: sirve solo para la
+// similitud con la contraseña nueva. DNI y Sexo deben llegar ya normalizados con
+// NormalizeDNI y NormalizeSexo.
+type PasswordResetInput struct {
+	Email        string
+	NewPassword  []byte
+	DNI          []byte
+	Tramite      []byte
+	Sexo         []byte
+	SelfieBase64 string
+}
+
+// ValidatePasswordReset valida el payload de la recuperación con las mismas
+// reglas que ValidateSignUp —fortaleza de la contraseña, similitud con el email
+// y el DNI, trámite, sexo y selfie— y acumula todos los rechazos. Los errores
+// nombran el campo `password`, igual que en el alta.
+//
+// Devuelve la selfie decodificada aun cuando otro campo es inválido, para que el
+// llamador siempre tenga algo que limpiar.
+func ValidatePasswordReset(in PasswordResetInput) ([]byte, error) {
+	var errs Errors
+
+	validateDNI(&errs, in.DNI)
+	validatePassword(&errs, in.NewPassword)
+	validatePasswordSimilarity(&errs, in.NewPassword, in.Email, in.DNI)
+	validateTramite(&errs, in.Tramite)
+	validateSexo(&errs, in.Sexo)
+	selfie := validateSelfie(&errs, in.SelfieBase64)
+
+	return selfie, errs.OrNil()
+}
+
 func validateEmail(errs *Errors, email string) {
 	const field = "email"
 

@@ -288,12 +288,18 @@ func (h *Handler) Logout(c *gin.Context) {
 // El nombre del campo se nombra en el mensaje pero nunca su valor: es material
 // criptográfico y no tiene por qué aparecer en una respuesta ni en un log.
 func (h *Handler) decodeField(c *gin.Context, name, value string) ([]byte, bool) {
+	return decodeField(c, h.logger, name, value)
+}
+
+// decodeField es el cuerpo de Handler.decodeField, para los handlers que
+// reciben el mismo sobre HPKE sin ser el Handler de /auth.
+func decodeField(c *gin.Context, logger *slog.Logger, name, value string) ([]byte, bool) {
 	if value == "" {
-		h.logger.WarnContext(c.Request.Context(), "campo del sobre HPKE vacío",
+		logger.WarnContext(c.Request.Context(), "campo del sobre HPKE vacío",
 			slog.String("request_id", requestIDOf(c)),
 			slog.String("field", name),
 		)
-		h.abort(c, http.StatusBadRequest, codeInvalidRequest, "el campo "+name+" es obligatorio", nil)
+		abortRequest(c, http.StatusBadRequest, codeInvalidRequest, "el campo "+name+" es obligatorio", nil)
 		return nil, false
 	}
 
@@ -303,12 +309,12 @@ func (h *Handler) decodeField(c *gin.Context, name, value string) ([]byte, bool)
 		// material criptográfico (la clave efímera o el ciphertext), y ni
 		// siquiera decodificó, así que tampoco hay un payload interno que
 		// proteger acá — solo no hay motivo para loguear un blob opaco entero.
-		h.logger.WarnContext(c.Request.Context(), "campo del sobre HPKE no es base64 válido",
+		logger.WarnContext(c.Request.Context(), "campo del sobre HPKE no es base64 válido",
 			slog.String("request_id", requestIDOf(c)),
 			slog.String("field", name),
 			slog.Int("longitud_recibida", len(value)),
 		)
-		h.abort(c, http.StatusBadRequest, codeInvalidRequest, "el campo "+name+" debe ser base64", nil)
+		abortRequest(c, http.StatusBadRequest, codeInvalidRequest, "el campo "+name+" debe ser base64", nil)
 		return nil, false
 	}
 
@@ -375,6 +381,12 @@ func (h *Handler) abortWithDomainError(c *gin.Context, err error) {
 		// DNIs están registrados; el motivo real ya quedó en el log del
 		// servicio, identificado por dni_hashed.
 		h.abort(c, http.StatusUnauthorized, codeInvalidCredentials, "credenciales inválidas", nil)
+
+	case errors.Is(err, domain.ErrEmailNotVerified):
+		// US-13: el alta sin un token de verificación de email utilizable. Un solo
+		// código para ausente, vencido, usado o de otro email: decir cuál de los
+		// cuatro permitiría tantear tokens ajenos.
+		h.abort(c, http.StatusBadRequest, codeEmailNotVerified, "el email no está verificado", nil)
 
 	case errors.Is(err, domain.ErrIdentityNotVerified):
 		// 400 y no 409: no hay ningún otro registro con el que haya colisionado,

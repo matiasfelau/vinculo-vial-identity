@@ -13,8 +13,10 @@ import (
 
 	"github.com/google/uuid"
 
+	"github.com/matiasfelau/vinculo-vial-identity/internal/crypto/emailcode"
 	"github.com/matiasfelau/vinculo-vial-identity/internal/domain"
 	"github.com/matiasfelau/vinculo-vial-identity/internal/service/signup"
+	"github.com/matiasfelau/vinculo-vial-identity/internal/testsupport/emailchallenges"
 	"github.com/matiasfelau/vinculo-vial-identity/internal/validation"
 )
 
@@ -45,38 +47,52 @@ const (
 var fijo = time.Date(2026, 8, 12, 15, 30, 0, 0, time.UTC)
 
 type harness struct {
-	svc       *signup.Service
-	decryptor *decryptorMock
-	indexer   *indexerMock
-	cipher    *cipherMock
-	hasher    *hasherMock
-	renaper   *renaperMock
-	repo      *repositoryMock
-	logs      *strings.Builder
+	svc        *signup.Service
+	decryptor  *decryptorMock
+	indexer    *indexerMock
+	cipher     *cipherMock
+	hasher     *hasherMock
+	renaper    *renaperMock
+	repo       *repositoryMock
+	challenges *emailchallenges.Memory
+	codec      *emailcode.Codec
+	logs       *strings.Builder
 }
 
 func newHarness(t *testing.T, tune ...func(*signup.Deps)) *harness {
 	t.Helper()
 
+	codec, err := emailcode.New(make([]byte, emailcode.KeyLength))
+	if err != nil {
+		t.Fatalf("no se pudo construir el codec: %v", err)
+	}
+
 	h := &harness{
-		decryptor: &decryptorMock{plaintext: []byte(validPayload)},
-		indexer:   &indexerMock{},
-		cipher:    &cipherMock{},
-		hasher:    &hasherMock{},
-		renaper:   &renaperMock{verified: true},
-		repo:      &repositoryMock{},
-		logs:      &strings.Builder{},
+		decryptor:  &decryptorMock{plaintext: []byte(validPayload)},
+		indexer:    &indexerMock{},
+		cipher:     &cipherMock{},
+		hasher:     &hasherMock{},
+		renaper:    &renaperMock{verified: true},
+		repo:       &repositoryMock{},
+		challenges: emailchallenges.New(),
+		codec:      codec,
+		logs:       &strings.Builder{},
 	}
 
 	deps := signup.Deps{
-		Decryptor: h.decryptor,
-		Indexer:   h.indexer,
-		Cipher:    h.cipher,
-		Hasher:    h.hasher,
-		Renaper:   h.renaper,
-		Users:     h.repo,
-		Logger:    slog.New(slog.NewTextHandler(h.logs, &slog.HandlerOptions{Level: slog.LevelDebug})),
-		Now:       func() time.Time { return fijo },
+		Decryptor:  h.decryptor,
+		Indexer:    h.indexer,
+		Cipher:     h.cipher,
+		Hasher:     h.hasher,
+		Renaper:    h.renaper,
+		Users:      h.repo,
+		Challenges: h.challenges,
+		Codec:      h.codec,
+		// Los tests de US-01 no mandan token: la verificación de email se prueba
+		// aparte, con RequireEmailVerification en true.
+		RequireEmailVerification: false,
+		Logger:                   slog.New(slog.NewTextHandler(h.logs, &slog.HandlerOptions{Level: slog.LevelDebug})),
+		Now:                      func() time.Time { return fijo },
 	}
 	for _, f := range tune {
 		f(&deps)
@@ -426,13 +442,19 @@ func TestNewExigeTodasLasDependencias(t *testing.T) {
 }
 
 func TestNewAplicaValoresPorDefecto(t *testing.T) {
+	codec, err := emailcode.New(make([]byte, emailcode.KeyLength))
+	if err != nil {
+		t.Fatalf("no se pudo construir el codec: %v", err)
+	}
 	svc, err := signup.New(signup.Deps{
-		Decryptor: &decryptorMock{plaintext: []byte(validPayload)},
-		Indexer:   &indexerMock{},
-		Cipher:    &cipherMock{},
-		Hasher:    &hasherMock{},
-		Renaper:   &renaperMock{verified: true},
-		Users:     &repositoryMock{},
+		Decryptor:  &decryptorMock{plaintext: []byte(validPayload)},
+		Indexer:    &indexerMock{},
+		Cipher:     &cipherMock{},
+		Hasher:     &hasherMock{},
+		Renaper:    &renaperMock{verified: true},
+		Users:      &repositoryMock{},
+		Challenges: emailchallenges.New(),
+		Codec:      codec,
 	})
 	if err != nil {
 		t.Fatalf("error inesperado: %v", err)

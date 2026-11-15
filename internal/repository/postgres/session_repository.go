@@ -173,23 +173,32 @@ func (r *SessionRepository) RevokeAllByUserID(ctx context.Context, userID uuid.U
 	defer cancel()
 
 	err := r.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
-		if err := tx.Model(&sessionModel{}).
-			Where("user_id = ?", userID).
-			Update("is_revoked", true).Error; err != nil {
-			return fmt.Errorf("no se pudo revocar las sesiones del usuario: %w", err)
-		}
-
-		if outboxEvent != nil {
-			if err := tx.Create(toOutboxModel(outboxEvent)).Error; err != nil {
-				return fmt.Errorf("no se pudo encolar el evento de outbox: %w", err)
-			}
-		}
-
-		return nil
+		return revokeAllSessions(tx, userID, outboxEvent)
 	})
 	if err != nil {
 		return fmt.Errorf("postgres: no se pudo ejecutar la defensa activa: %w", classifyDBError(err))
 	}
+	return nil
+}
+
+// revokeAllSessions revoca todas las sesiones del usuario y, si outboxEvent no
+// es nil, encola el evento, sobre la transacción tx que le pasa el llamador. Es
+// el cuerpo de RevokeAllByUserID, separado para que la recuperación de
+// contraseña (US-13) lo ejecute dentro de la misma transacción que cambia la
+// contraseña, en lugar de abrir una propia.
+func revokeAllSessions(tx *gorm.DB, userID uuid.UUID, outboxEvent *domain.OutboxEvent) error {
+	if err := tx.Model(&sessionModel{}).
+		Where("user_id = ?", userID).
+		Update("is_revoked", true).Error; err != nil {
+		return fmt.Errorf("no se pudo revocar las sesiones del usuario: %w", err)
+	}
+
+	if outboxEvent != nil {
+		if err := tx.Create(toOutboxModel(outboxEvent)).Error; err != nil {
+			return fmt.Errorf("no se pudo encolar el evento de outbox: %w", err)
+		}
+	}
+
 	return nil
 }
 

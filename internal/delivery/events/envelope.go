@@ -19,6 +19,11 @@ const EventTypeUserStatusChanged = domain.EventTypeUserStatusChanged
 // una cuenta (US-11). Es también el routing key con el que se publica.
 const EventTypeUserDeleted = domain.EventTypeUserDeleted
 
+// EventTypeEmailRequested es el tipo de evento con que Identity le pide a
+// Notification enviar un email (US-13). Es también el routing key con el que se
+// publica.
+const EventTypeEmailRequested = domain.EventTypeEmailRequested
+
 // Envelope es el sobre estándar de eventos de la plataforma. La forma es común
 // a todos los productores; lo específico de cada evento va en Payload.
 type Envelope struct {
@@ -89,6 +94,50 @@ func newUserDeletedEnvelope(evt domain.UserDeleted, producer string, now time.Ti
 		Payload: userDeletedPayload{
 			DeletedAt: evt.DeletedAt.UTC().Format(time.RFC3339Nano),
 		},
+	}
+}
+
+// emailRequestedPayload es el contenido de email.requested, en snake_case como
+// fija el contrato. Code y ExpiresAt van como null cuando la plantilla no los
+// lleva. Es el único payload con datos personales —el destinatario y el código—,
+// que el contrato exige para que Notification pueda enviar el email.
+type emailRequestedPayload struct {
+	Template  string  `json:"template"`
+	To        string  `json:"to"`
+	Code      *string `json:"code"`
+	ExpiresAt *string `json:"expires_at"`
+}
+
+// newEmailRequestedEnvelope arma el sobre de un pedido de email.
+//
+// Actor lleva el usuario del hecho en PASSWORD_RESET y PASSWORD_CHANGED, y es
+// nulo en EMAIL_VERIFICATION y ACCOUNT_EXISTS: ahí todavía no hay cuenta, o el
+// pedido no es de su dueño. EventID reutiliza evt.EventID, la fila del outbox,
+// por la misma razón que en newSessionsRevokedEnvelope.
+func newEmailRequestedEnvelope(evt domain.EmailRequested, producer string, now time.Time) Envelope {
+	payload := emailRequestedPayload{Template: string(evt.Template), To: evt.To}
+	if evt.Code != "" {
+		code := evt.Code
+		payload.Code = &code
+	}
+	if evt.ExpiresAt != nil {
+		expires := evt.ExpiresAt.UTC().Format(time.RFC3339)
+		payload.ExpiresAt = &expires
+	}
+
+	var actor *string
+	if evt.Actor != nil {
+		id := evt.Actor.String()
+		actor = &id
+	}
+
+	return Envelope{
+		EventID:   evt.EventID.String(),
+		EventType: EventTypeEmailRequested,
+		Timestamp: now.UTC().Format(time.RFC3339Nano),
+		Producer:  producer,
+		Actor:     actor,
+		Payload:   payload,
 	}
 }
 

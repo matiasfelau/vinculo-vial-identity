@@ -159,7 +159,7 @@ func TestIntegracionMigracionDeUsersConFilasPreexistentes(t *testing.T) {
 	if err != nil {
 		t.Fatalf("no se pudo armar el usuario: %v", err)
 	}
-	if err := repo.Create(t.Context(), nuevo, domain.OutboxEvent{}); err != nil {
+	if err := repo.Create(t.Context(), nuevo, domain.OutboxEvent{}, nil); err != nil {
 		t.Fatalf("el alta posterior a la migración falló: %v", err)
 	}
 	if f := leerReputacion(t, db, nuevo.ID); f.ReputationScore != 0 || f.ReportCount != 0 {

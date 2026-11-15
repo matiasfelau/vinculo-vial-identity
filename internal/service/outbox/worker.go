@@ -196,6 +196,15 @@ func (w *Worker) publish(ctx context.Context, event domain.OutboxEvent) error {
 		evt := domain.NewUserDeleted(event.ID, userID, deletedAt)
 		return w.publisher.PublishUserDeleted(ctx, evt)
 
+	case domain.EventTypeEmailRequested:
+		// El payload lleva el email y el código: ParseEmailRequested nunca los
+		// incluye en su error, que acaba en last_error y en el log.
+		evt, err := domain.ParseEmailRequested(event)
+		if err != nil {
+			return fmt.Errorf("outbox worker: %s inválido: %w", event.Type, err)
+		}
+		return w.publisher.PublishEmailRequested(ctx, evt)
+
 	default:
 		return fmt.Errorf("outbox worker: tipo de evento desconocido: %s", event.Type)
 	}

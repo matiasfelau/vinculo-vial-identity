@@ -24,10 +24,14 @@ type userModel struct {
 	// ReputationScore y ReportCount (US-08) se agregaron a una tabla con
 	// usuarios: el default explícito es lo que hace que AutoMigrate pueda
 	// declararlas NOT NULL y que las filas existentes queden en 0, sin backfill.
-	ReputationScore int       `gorm:"column:reputation_score;type:integer;not null;default:0"`
-	ReportCount     int       `gorm:"column:report_count;type:integer;not null;default:0"`
-	CreatedAt       time.Time `gorm:"column:created_at;type:timestamptz;not null"`
-	UpdatedAt       time.Time `gorm:"column:updated_at;type:timestamptz;not null"`
+	ReputationScore int `gorm:"column:reputation_score;type:integer;not null;default:0"`
+	ReportCount     int `gorm:"column:report_count;type:integer;not null;default:0"`
+	// EmailVerifiedAt (US-13) es nulable: las cuentas anteriores a la
+	// verificación de email quedan en NULL, sin backfill, y no pueden recuperar su
+	// contraseña.
+	EmailVerifiedAt *time.Time `gorm:"column:email_verified_at;type:timestamptz"`
+	CreatedAt       time.Time  `gorm:"column:created_at;type:timestamptz;not null"`
+	UpdatedAt       time.Time  `gorm:"column:updated_at;type:timestamptz;not null"`
 }
 
 // TableName fija el nombre de la tabla en lugar de depender de la pluralización
@@ -44,6 +48,7 @@ func toModel(u *domain.User) *userModel {
 		AccountStatus:   string(u.AccountStatus),
 		ReputationScore: u.ReputationScore,
 		ReportCount:     u.ReportCount,
+		EmailVerifiedAt: utcPtr(u.EmailVerifiedAt),
 		CreatedAt:       u.CreatedAt,
 		UpdatedAt:       u.UpdatedAt,
 	}
@@ -59,6 +64,7 @@ func (m *userModel) toDomain() *domain.User {
 		AccountStatus:   domain.AccountStatus(m.AccountStatus),
 		ReputationScore: m.ReputationScore,
 		ReportCount:     m.ReportCount,
+		EmailVerifiedAt: m.EmailVerifiedAt,
 		CreatedAt:       m.CreatedAt,
 		UpdatedAt:       m.UpdatedAt,
 	}
