@@ -26,4 +26,6 @@ coverage.*
 
 # Notas locales de trabajo — no versionar
 CLAUDE.md
+CONTRATO-*.md
 .clauderules
+clauderules

@@ -66,6 +66,10 @@ func NewSession(userID uuid.UUID, refreshTokenHash string, expiresAt, startedAt,
 	}, nil
 }
 
+// EventTypeUserSessionsRevoked es el tipo del evento user.sessions.revoked, y
+// también su routing key.
+const EventTypeUserSessionsRevoked = "user.sessions.revoked"
+
 // SessionsRevokedReason acota los motivos admitidos del evento
 // user.sessions.revoked, pensado para auditoría.
 type SessionsRevokedReason string
@@ -79,6 +83,10 @@ const (
 	// (US-11): el usuario pidió eliminar su cuenta y se borraron todas sus
 	// sesiones. Notification lo trata como informativo.
 	SessionsRevokedReasonAccountDeleted SessionsRevokedReason = "ACCOUNT_DELETED"
+	// SessionsRevokedReasonPasswordReset es el motivo de la recuperación de
+	// contraseña (US-13): al cambiarla se revocaron todas las sesiones del
+	// usuario. Notification lo trata como los demás motivos.
+	SessionsRevokedReasonPasswordReset SessionsRevokedReason = "PASSWORD_RESET"
 )
 
 // SessionsRevoked es el evento de dominio que dispara la revocación masiva de
@@ -105,4 +113,3 @@ type SessionsRevoked struct {
 func NewSessionsRevoked(eventID, userID uuid.UUID, reason SessionsRevokedReason) SessionsRevoked {
 	return SessionsRevoked{EventID: eventID, UserID: userID, Reason: reason}
 }
-

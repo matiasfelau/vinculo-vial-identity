@@ -142,9 +142,12 @@ type repositoryMock struct {
 	// inheritedStatus es el user.status.changed que el servicio entregó en cada
 	// Create, tal como lo recibe el repositorio.
 	inheritedStatus []domain.OutboxEvent
+	// grants es el grant de verificación que el servicio entregó en cada Create
+	// (nil cuando el alta no lleva token).
+	grants []*domain.GrantConsumption
 }
 
-func (m *repositoryMock) Create(_ context.Context, u *domain.User, inheritedStatus domain.OutboxEvent) error {
+func (m *repositoryMock) Create(_ context.Context, u *domain.User, inheritedStatus domain.OutboxEvent, grant *domain.GrantConsumption) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
@@ -157,7 +160,15 @@ func (m *repositoryMock) Create(_ context.Context, u *domain.User, inheritedStat
 	}
 	m.created = append(m.created, *u)
 	m.inheritedStatus = append(m.inheritedStatus, inheritedStatus)
+	m.grants = append(m.grants, grant)
 	return nil
+}
+
+// ExistsByEmail no lo ejercita ningún test de signup: es parte de
+// domain.UserRepository solo porque la verificación de email (US-13) lo
+// necesita sobre el mismo repositorio.
+func (m *repositoryMock) ExistsByEmail(context.Context, string) (bool, error) {
+	panic("signup: ExistsByEmail no se usa en el alta")
 }
 
 // FindByID no lo ejercita ningún test de signup: es parte de

@@ -145,9 +145,24 @@ func (r *OutboxRepository) FetchPending(ctx context.Context, limit int) ([]domai
 
 // MarkSent registra que el evento se publicó y el broker lo confirmó
 // (publisher confirms).
+//
+// Las filas de email.requested se borran en lugar de marcarse: llevan el email y
+// el código en claro, y una vez entregadas al broker no hay motivo para
+// conservarlos (US-13, Ley 25.326). El DELETE solo alcanza a ese tipo; si no
+// afecta ninguna fila, el evento es de otro tipo y se marca como enviado.
 func (r *OutboxRepository) MarkSent(ctx context.Context, id uuid.UUID) error {
 	ctx, cancel := context.WithTimeout(ctx, queryTimeout)
 	defer cancel()
+
+	deleted := r.db.WithContext(ctx).
+		Where("id = ? AND type = ?", id, domain.EventTypeEmailRequested).
+		Delete(&outboxEventModel{})
+	if deleted.Error != nil {
+		return classifyDBError(deleted.Error)
+	}
+	if deleted.RowsAffected > 0 {
+		return nil
+	}
 
 	now := time.Now().UTC()
 	err := r.db.WithContext(ctx).Model(&outboxEventModel{}).

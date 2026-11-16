@@ -95,6 +95,27 @@ var (
 	// sesión. → 403 Forbidden (Defensa Activa).
 	ErrSessionReused = errors.New("domain: refresh token reusado")
 
+	// ErrInvalidCode indica que el código de email recibido no sirve: es
+	// incorrecto, venció, ya se usó, nunca se emitió o agotó sus intentos. Los
+	// cinco casos son deliberadamente indistinguibles, en el error y en la
+	// respuesta, para no habilitar enumeración. → 400 INVALID_CODE.
+	ErrInvalidCode = errors.New("domain: código inválido")
+
+	// ErrEmailNotVerified indica que el alta no trae un token de verificación de
+	// email utilizable: ausente, vencido, usado o de otro email. → 400
+	// EMAIL_NOT_VERIFIED.
+	ErrEmailNotVerified = errors.New("domain: email no verificado")
+
+	// ErrInvalidResetToken indica que el reset_token de la recuperación no sirve:
+	// ausente, vencido, usado o sin intentos. → 400 INVALID_RESET_TOKEN.
+	ErrInvalidResetToken = errors.New("domain: reset token inválido")
+
+	// ErrChallengeNotFound indica que no existe el desafío por email buscado. Es
+	// un detalle entre el repositorio y los casos de uso, que lo traducen a
+	// ErrInvalidCode, ErrEmailNotVerified o ErrInvalidResetToken antes de que
+	// salga de esa capa.
+	ErrChallengeNotFound = errors.New("domain: desafío de email no encontrado")
+
 	// ErrUpstreamUnavailable indica que una dependencia síncrona propia —hoy
 	// solo RenaperService— no respondió: timeout, conexión rechazada o
 	// circuito abierto. No es un veredicto sobre la solicitud, es un fallo de

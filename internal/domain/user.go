@@ -49,8 +49,12 @@ type User struct {
 	// ReportCount es la cantidad de reportes recibidos de los destinatarios de
 	// sus alertas. Solo el conteo: no se guarda quién reportó.
 	ReportCount int
-	CreatedAt   time.Time
-	UpdatedAt   time.Time
+	// EmailVerifiedAt es cuándo se verificó el email con un código (US-13). Nil en
+	// las cuentas que nunca lo verificaron: solo una cuenta con este campo no
+	// nulo puede recuperar su contraseña.
+	EmailVerifiedAt *time.Time
+	CreatedAt       time.Time
+	UpdatedAt       time.Time
 }
 
 // IsPenalized informa si la cuenta tiene alguna sanción (US-11): está en

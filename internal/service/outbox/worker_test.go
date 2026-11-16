@@ -77,6 +77,19 @@ type publisherMock struct {
 	statusPublished []domain.UserStatusChanged
 	// deletedPublished son los user.deleted publicados (US-11).
 	deletedPublished []domain.UserDeleted
+	// emailPublished son los email.requested publicados (US-13).
+	emailPublished []domain.EmailRequested
+}
+
+func (m *publisherMock) PublishEmailRequested(_ context.Context, evt domain.EmailRequested) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	if m.err != nil {
+		return m.err
+	}
+	m.emailPublished = append(m.emailPublished, evt)
+	return nil
 }
 
 func (m *publisherMock) PublishUserDeleted(_ context.Context, evt domain.UserDeleted) error {

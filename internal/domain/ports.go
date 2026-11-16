@@ -26,7 +26,18 @@ type UserRepository interface {
 	// sanción, y una sanción nunca se hereda dos veces.
 	// inheritedStatus es el user.status.changed ya armado; solo se persiste si
 	// hay herencia y el estado heredado es UNDER_REVIEW.
-	Create(ctx context.Context, u *User, inheritedStatus OutboxEvent) error
+	//
+	// Verificación de email (US-13): si grant no es nil, la misma transacción
+	// consume el grant de verificación —que tiene que seguir vigente y ser de
+	// ese email— antes de insertar. Si ya no sirve devuelve ErrEmailNotVerified
+	// y no crea nada, igual que ante un duplicado: el grant solo se gasta si el
+	// alta se confirma.
+	Create(ctx context.Context, u *User, inheritedStatus OutboxEvent, grant *GrantConsumption) error
+
+	// ExistsByEmail informa si hay una cuenta con ese email, ya normalizado. Lo
+	// usa el pedido de verificación del alta (US-13) para elegir entre enviar el
+	// código y avisar que la cuenta ya existe, sin que la respuesta lo revele.
+	ExistsByEmail(ctx context.Context, email string) (bool, error)
 
 	// FindByID busca un usuario por su identificador. Debe devolver
 	// ErrUserNotFound (envuelto o no) cuando no existe. Lo usa la baja de
@@ -184,6 +195,8 @@ type OutboxRepository interface {
 
 	// MarkSent registra que el evento se publicó y el broker lo confirmó
 	// (publisher confirms). Antes de este punto, el evento sigue pendiente.
+	// Las filas de email.requested se borran en lugar de marcarse, porque llevan
+	// el email y el código en claro (US-13).
 	MarkSent(ctx context.Context, id uuid.UUID) error
 
 	// MarkFailed registra un intento fallido sin cambiar el estado pendiente:
@@ -227,6 +240,12 @@ type EventPublisher interface {
 	// PublishUserDeleted emite el evento user.deleted (US-11), con el usuario
 	// dado de baja como actor.
 	PublishUserDeleted(ctx context.Context, evt UserDeleted) error
+
+	// PublishEmailRequested emite el evento email.requested (US-13), que pide a
+	// Notification enviar un email. Lleva el destinatario y, según la plantilla,
+	// un código: ninguna implementación puede registrarlos en un log ni
+	// devolverlos en un error.
+	PublishEmailRequested(ctx context.Context, evt EmailRequested) error
 }
 
 // HPKEDecryptor descifra el criptograma de transporte que envía la app.

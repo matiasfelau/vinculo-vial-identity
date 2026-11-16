@@ -146,6 +146,13 @@ func (p *Publisher) PublishUserDeleted(ctx context.Context, evt domain.UserDelet
 	return p.publishEnvelope(ctx, newUserDeletedEnvelope(evt, p.cfg.Producer, p.now()))
 }
 
+// PublishEmailRequested emite email.requested con confirmación del broker, igual
+// que PublishSessionsRevoked. El sobre lleva el email y el código: los errores y
+// logs de este camino nunca incluyen el cuerpo del mensaje.
+func (p *Publisher) PublishEmailRequested(ctx context.Context, evt domain.EmailRequested) error {
+	return p.publishEnvelope(ctx, newEmailRequestedEnvelope(evt, p.cfg.Producer, p.now()))
+}
+
 // publishEnvelope serializa el sobre y lo entrega con confirmación del
 // broker. Es el cuerpo común a todo Publish*: el routing key de cada evento
 // es su propio EventType, tal como documenta cada constante EventType*.

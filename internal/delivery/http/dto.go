@@ -160,6 +160,45 @@ const (
 	codeUserNotFound = "USER_NOT_FOUND"
 )
 
+// Códigos de error de la verificación de email y la recuperación de contraseña
+// (US-13). Los fija el contrato compartido, en mayúsculas, como los de US-11.
+const (
+	// codeInvalidCode es el 400 de las confirmaciones: el código es incorrecto,
+	// venció, ya se usó, nunca se emitió o agotó sus intentos. Los cinco casos
+	// son indistinguibles a propósito.
+	codeInvalidCode = "INVALID_CODE"
+	// codeEmailNotVerified es el 400 del alta sin un token de verificación de
+	// email utilizable.
+	codeEmailNotVerified = "EMAIL_NOT_VERIFIED"
+	// codeInvalidResetToken es el 400 de la revalidación con un reset_token
+	// ausente, vencido, usado o sin intentos.
+	codeInvalidResetToken = "INVALID_RESET_TOKEN"
+)
+
+// hpkeRequest es el único dato que aceptan los endpoints de US-13: el mismo
+// sobre HPKE del alta y el login, en las dos piezas que fija el contrato
+// compartido. Nada personal viaja en el cuerpo: ni el email, ni el DNI, ni el
+// código, ni la contraseña.
+type hpkeRequest struct {
+	EphemeralPublicKey string `json:"ephemeral_public_key"`
+	Ciphertext         string `json:"ciphertext"`
+}
+
+// emailVerificationConfirmResponse acompaña al 200 de la confirmación del email.
+type emailVerificationConfirmResponse struct {
+	VerificationToken string `json:"verification_token"`
+	// ExpiresIn son los segundos de vida del token.
+	ExpiresIn int64 `json:"expires_in"`
+}
+
+// passwordResetConfirmResponse acompaña al 200 de la confirmación de la
+// recuperación.
+type passwordResetConfirmResponse struct {
+	ResetToken string `json:"reset_token"`
+	// ExpiresIn son los segundos de vida del token.
+	ExpiresIn int64 `json:"expires_in"`
+}
+
 // errorResponse es la forma única de todos los errores de la API.
 type errorResponse struct {
 	Code  string `json:"code"`

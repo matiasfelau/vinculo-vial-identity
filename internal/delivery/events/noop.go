@@ -53,6 +53,17 @@ func (p *NoopPublisher) PublishUserDeleted(ctx context.Context, evt domain.UserD
 	return nil
 }
 
+// PublishEmailRequested registra que el email no se pidió. A diferencia de los
+// demás, no registra nada del evento más allá de su tipo y la plantilla: el
+// destinatario y el código no pueden llegar a un log.
+func (p *NoopPublisher) PublishEmailRequested(ctx context.Context, evt domain.EmailRequested) error {
+	p.logger.WarnContext(ctx, "publisher inerte: el evento no se publicó",
+		slog.String("event_type", EventTypeEmailRequested),
+		slog.String("template", string(evt.Template)),
+	)
+	return nil
+}
+
 // Status informa que el broker está deshabilitado: es el modo de desarrollo,
 // que la configuración rechaza con APP_ENV=production. Deshabilitado no es una
 // falla, así que /health/deps no lo cuenta como degradación.
