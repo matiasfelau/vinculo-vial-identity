@@ -36,6 +36,7 @@ type Config struct {
 
 	HTTP       HTTPConfig
 	Internal   InternalConfig
+	Admin      AdminConfig
 	Postgres   PostgresConfig
 	Crypto     CryptoConfig
 	Events     EventsConfig
@@ -101,6 +102,26 @@ type InternalConfig struct {
 
 // Addr es la dirección de escucha del router interno.
 func (c InternalConfig) Addr() string { return fmt.Sprintf(":%d", c.Port) }
+
+// AdminConfig son los parámetros del router de administración (rutas /admin/*,
+// US-17: consultar los casos de usuarios reportados y desbloquearlos). Se sirve en
+// su propio *http.Server y su propio puerto; Kong no lo expone y el compose de
+// desarrollo lo publica solo en 127.0.0.1.
+//
+// APIKey es la autenticación de toda ruta. Es opcional: vacía, el router no
+// arranca y el servicio lo avisa en el log, así un entorno que no administra casos
+// no queda con una superficie abierta por no haber definido un secreto.
+type AdminConfig struct {
+	Port   int
+	APIKey Secret
+}
+
+// Addr es la dirección de escucha del router de administración.
+func (c AdminConfig) Addr() string { return fmt.Sprintf(":%d", c.Port) }
+
+// Enabled informa si hay clave y por lo tanto el router de administración
+// arranca.
+func (c AdminConfig) Enabled() bool { return c.APIKey.Reveal() != "" }
 
 // PostgresConfig son los parámetros de la base.
 type PostgresConfig struct {
@@ -378,6 +399,10 @@ const (
 	defaultSanctionSweepBatchSize = 500
 	defaultHTTPPort               = 8080
 	defaultInternalPort           = 8081
+	defaultAdminPort              = 8082
+	// minAdminAPIKeyLength es el piso de ADMIN_API_KEY, por el mismo motivo que
+	// minServiceTokenLength: es un secreto comparado byte a byte.
+	minAdminAPIKeyLength = 32
 	// minServiceTokenLength es el piso de entropía admitido para
 	// INTERNAL_SERVICE_TOKEN: es un secreto compartido comparado byte a byte
 	// (no una contraseña con Argon2 detrás), así que su propia longitud es
@@ -476,6 +501,11 @@ func Load() (*Config, error) {
 		Internal: InternalConfig{
 			Port:         r.integer("HTTP_INTERNAL_PORT", defaultInternalPort),
 			ServiceToken: Secret(r.required("INTERNAL_SERVICE_TOKEN")),
+		},
+
+		Admin: AdminConfig{
+			Port:   r.integer("HTTP_ADMIN_PORT", defaultAdminPort),
+			APIKey: Secret(r.str("ADMIN_API_KEY", "")),
 		},
 
 		Postgres: PostgresConfig{
@@ -608,6 +638,7 @@ func (c *Config) validate() error {
 	if len(c.Internal.ServiceToken.Reveal()) < minServiceTokenLength {
 		r.fail("config: INTERNAL_SERVICE_TOKEN debe tener al menos %d caracteres", minServiceTokenLength)
 	}
+	c.validateAdmin(r)
 	if c.HTTP.MaxBodyBytes <= 0 {
 		r.fail("config: HTTP_MAX_BODY_BYTES debe ser positivo")
 	} else if c.HTTP.MaxBodyBytes < minViableMaxBodyBytes {
@@ -733,6 +764,32 @@ func (c *Config) validate() error {
 	return r.err()
 }
 
+// validateAdmin valida el router de administración (US-17). La clave vacía es
+// válida: el router no arranca. Con una clave, en producción tiene que medir al
+// menos 32 caracteres y la configuración lo exige acá; en los demás entornos lo
+// rechaza el armado del router (http.NewAdminRouter), así que una clave más corta
+// tampoco arranca. Una clave por mecanismo: no puede ser el secreto del router
+// interno en ningún entorno.
+func (c *Config) validateAdmin(r *reader) {
+	if c.Admin.Port < 1 || c.Admin.Port > 65535 {
+		r.fail("config: HTTP_ADMIN_PORT fuera de rango: %d", c.Admin.Port)
+	}
+	if c.Admin.Port == c.HTTP.Port || c.Admin.Port == c.Internal.Port {
+		r.fail("config: HTTP_ADMIN_PORT no puede coincidir con HTTP_PORT ni con HTTP_INTERNAL_PORT (%d): el router de administración perdería su puerto propio", c.Admin.Port)
+	}
+
+	key := c.Admin.APIKey.Reveal()
+	if key == "" {
+		return
+	}
+	if c.IsProduction() && len(key) < minAdminAPIKeyLength {
+		r.fail("config: ADMIN_API_KEY debe tener al menos %d caracteres con APP_ENV=production", minAdminAPIKeyLength)
+	}
+	if key == c.Internal.ServiceToken.Reveal() {
+		r.fail("config: ADMIN_API_KEY no puede ser igual a INTERNAL_SERVICE_TOKEN: una clave por mecanismo")
+	}
+}
+
 // validateEmail valida los parámetros de US-13. La clave de los desafíos es la
 // única que tiene una regla de independencia: una clave por mecanismo, nunca
 // reutilizada, así que no puede ser igual a AES_KEY ni a HMAC_SECRET.
@@ -833,6 +890,8 @@ func (c *Config) LogValue() slog.Value {
 		slog.Int("http_port", c.HTTP.Port),
 		slog.Bool("http_debug", c.HTTP.Debug),
 		slog.Int("internal_port", c.Internal.Port),
+		slog.Int("admin_port", c.Admin.Port),
+		slog.Bool("admin_enabled", c.Admin.Enabled()),
 		slog.String("postgres_host", c.Postgres.Host),
 		slog.Int("postgres_port", c.Postgres.Port),
 		slog.String("postgres_db", c.Postgres.Database),

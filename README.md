@@ -510,6 +510,84 @@ además el secreto `INTERNAL_SERVICE_TOKEN` en la cabecera
 con uno incorrecto), el servidor responde `401` — incluso para una ruta que
 no existe, para no delatar por el status qué rutas expone.
 
+## Router de administración (US-17)
+
+Un tercer `*http.Server`, en `HTTP_ADMIN_PORT` (default **`8082`**), con las
+rutas `/admin/*` para que un operador consulte los usuarios reportados y los
+desbloquee. Es una interfaz de administración privada: Kong no la expone, no hay
+rol de administrador ni sesión de usuario, y la interfaz gráfica queda como
+trabajo futuro. En el `docker-compose.yml` de desarrollo el puerto se publica
+solo en `127.0.0.1:8082`, para poder usar `curl`. En AWS, estos puertos se
+alcanzan solo desde la VPC (security group de administración y port forwarding de
+SSM): eso es de la etapa de AWS y no está resuelto en este repo.
+
+**Autenticación.** Toda ruta exige `X-Admin-Api-Key` igual a `ADMIN_API_KEY`
+(mínimo 32 caracteres), comparada a tiempo constante (sobre el SHA-256 de ambos
+valores, así tampoco se filtra el largo). Sin clave válida responde `401` en
+cualquier ruta, exista o no, y no llega a ningún caso de uso. La clave es propia
+de este mecanismo: tiene que ser distinta de `INTERNAL_SERVICE_TOKEN` (la
+configuración lo rechaza) y distinta de la de Alert.
+
+**Configuración.**
+
+| Variable | Default | Notas |
+|---|---|---|
+| `HTTP_ADMIN_PORT` | `8082` | Distinto de `HTTP_PORT` y `HTTP_INTERNAL_PORT` |
+| `ADMIN_API_KEY` | vacía | Vacía: el router de administración **no arranca** y el servicio lo avisa en el log (WARN). Con `APP_ENV=production`, una clave de menos de 32 caracteres impide arrancar |
+
+Para generar la clave: `openssl rand -base64 48`. `genkeys` no la genera: es un
+secreto de acceso, no una clave criptográfica del servicio.
+
+**Errores.** `{ "error", "code", "request_id" }` (el `request_id` correlaciona con
+el log). Los códigos son en mayúsculas: `UNAUTHORIZED`, `INVALID_BODY`,
+`INVALID_QUERY`, `USER_NOT_FOUND`, `NOT_UNDER_REVIEW`, `DEPENDENCY_UNAVAILABLE`
+(con `Retry-After`), `NOT_FOUND` y `METHOD_NOT_ALLOWED` (estos dos, solo con una
+clave válida).
+
+| Método y ruta | Respuesta |
+|---|---|
+| `GET /admin/v1/review-cases?status=UNDER_REVIEW&limit=50&cursor=` | `200 { "items": [ { "user_id", "account_status", "report_count", "reputation_score", "under_review_since", "last_reported_at" } ], "next_cursor" }` |
+| `POST /admin/v1/review-cases/{user_id}/unblock` | body `{ "reason", "operator" }` → `204`; `404 USER_NOT_FOUND`; `409 NOT_UNDER_REVIEW`; `400 INVALID_BODY` |
+| `GET /admin/v1/review-cases/{user_id}/decisions` | `200 { "items": [ { "decision", "reason", "operator", "decided_at" } ] }` |
+
+**Listado.** Del caso más viejo al más nuevo (`under_review_since`; si es nulo, la
+fecha de alta de la cuenta), con paginación por cursor opaco: `next_cursor` es
+`null` en la última página. `status` solo admite `UNDER_REVIEW`, `limit` va de 1 a
+100 y un cursor que no devolvió el servicio da `400 INVALID_QUERY`. Las fechas
+van en UTC (RFC 3339). Las respuestas **nunca** incluyen email ni DNI.
+
+**Desbloqueo.** `reason` de 10 a 500 caracteres y `operator` de 1 a 100 (contados
+en caracteres y sin los espacios de los extremos); el cuerpo no admite campos
+desconocidos. En **una transacción**: `account_status = ACTIVE`,
+`report_count = 0` y `under_review_since = NULL`; una fila en `review_decisions`;
+y `user.status.changed` con `account_status: "ACTIVE"` y `reason:
+"MANUAL_UNBLOCK"` en el outbox (ver [`user.status.changed`](#userstatuschanged)).
+`report_count` vuelve a 0 para que el próximo reporte abra un caso nuevo y no
+vuelva a bloquear a la cuenta por los reportes viejos; `reputation_score` no
+cambia. Si falla cualquier paso no queda nada hecho. Dos desbloqueos concurrentes
+de la misma cuenta: uno gana (`204`) y el otro recibe `409 NOT_UNDER_REVIEW`. Un
+`user_id` que no es un UUID responde `404 USER_NOT_FOUND`.
+
+**Historial.** Las decisiones de la cuenta, de la más nueva a la más vieja; vacío
+si no hay (o si el id no existe).
+
+**Lo que se loguea.** El id de la decisión y el del usuario; nunca el `reason` ni
+el `operator`.
+
+### Tabla `review_decisions`
+
+Creada con `AutoMigrate` en el arranque, con la clave foránea a `users` agregada
+con SQL idempotente (como `sessions`). La baja de la cuenta se lleva su historial.
+
+| Columna | Tipo | Nota |
+|---|---|---|
+| `id` | uuid | PK |
+| `user_id` | uuid NOT NULL | FK a `users(id)` ON DELETE CASCADE; con índice |
+| `decision` | varchar(16) NOT NULL | `UNBLOCK` |
+| `reason` | varchar(500) NOT NULL | Texto del operador |
+| `operator` | varchar(100) NOT NULL | Quién decidió |
+| `decided_at` | timestamptz NOT NULL | |
+
 ### `email.requested`
 
 Le pide a Notification que envíe un email (US-13). Sale por el outbox, con el
@@ -863,6 +941,10 @@ fuera de cualquier repo. Ver
 local alcanza con un par de prueba, que se genera con `audit-keygen` o con
 cualquier par X25519 en base64, y un id como `dev`.
 
+`ADMIN_API_KEY` es opcional: sin ella el router de administración (US-17) no
+arranca. Para usarlo en local, generarla (`openssl rand -base64 48`) y pegarla en
+el `.env`; ver [Router de administración](#router-de-administración-us-17).
+
 Para correr el servicio fuera del contenedor hace falta un Postgres accesible y
 `POSTGRES_HOST` apuntando a él:
 
@@ -1013,7 +1095,8 @@ internal/service/outbox/    worker en background del patrón Transactional Outbo
 internal/service/account/   baja de cuenta (US-11)
 internal/service/audit/     sellado del DNI del emisor hacia Audit (US-11)
 internal/service/sanction/  barrido de las sanciones heredables vencidas (US-11)
-internal/repository/postgres/  persistencia GORM (users, sessions, outbox_events, sanction_carryovers, email_challenges)
+internal/service/review/    casos de usuarios reportados: listado, desbloqueo e historial (US-17)
+internal/repository/postgres/  persistencia GORM (users, sessions, outbox_events, sanction_carryovers, email_challenges, review_decisions)
 internal/delivery/http/     handlers Gin, DTOs, middlewares
 internal/delivery/events/   publisher RabbitMQ (+ inerte)
 internal/delivery/consumer/ infraestructura de consumo RabbitMQ: ack manual, reintentos, DLQ (US-08)
@@ -1049,6 +1132,8 @@ Tabla `users`, creada con `AutoMigrate` en la inicialización del repositorio.
 | `email_verified_at` | timestamptz | NULL (US-13); cuándo se verificó el email con un código. Solo una cuenta con este campo no nulo puede recuperar su contraseña. Las cuentas anteriores quedan en NULL, sin backfill |
 | `terms_version` | varchar(16) | NULL (US-19); versión de los términos que el usuario aceptó en el alta. Las cuentas anteriores quedan en NULL, sin backfill |
 | `terms_accepted_at` | timestamptz | NULL (US-19); cuándo los aceptó, en la misma transacción del alta |
+| `under_review_since` | timestamptz | NULL (US-17); cuándo pasó a `UNDER_REVIEW` el caso vigente. Lo escribe el consumo de `alert.reported` al escalar y lo borra el desbloqueo. Las cuentas que ya estaban en revisión antes de US-17, y las que nacen en revisión por herencia de sanción (US-11), quedan en NULL, sin backfill: el listado de casos las ordena por `created_at` |
+| `last_reported_at` | timestamptz | NULL (US-17); cuándo se contó el último reporte (`alert.reported`). Sin backfill |
 | `created_at` / `updated_at` | timestamptz | |
 
 `AutoMigrate` es una decisión de MVP: solo agrega columnas e índices. Va contra
@@ -1244,9 +1329,10 @@ no depende en absoluto de la disponibilidad de RabbitMQ.
 
 ### `user.status.changed`
 
-Anuncia un cambio de `account_status` (US-08). Hoy solo lo emite el consumo de
+Anuncia un cambio de `account_status` (US-08). Lo emite el consumo de
 `alert.reported`, cuando un emisor ACTIVE llega a `REPORT_REVIEW_THRESHOLD`
-reportes y pasa a `UNDER_REVIEW`. Alert lo consume para bloquear nuevas alertas
+reportes y pasa a `UNDER_REVIEW`; el alta con una sanción heredada (US-11), y el
+desbloqueo de un operador (US-17), que lo devuelve a `ACTIVE`. Alert lo consume para bloquear nuevas alertas
 de ese emisor. `actor` es `null`: es un hecho del sistema, y el usuario va en el
 payload.
 
@@ -1269,15 +1355,19 @@ publica con el mismo `eventId` entre reintentos.
 }
 ```
 
-`reason` puede ser `REPORTS_THRESHOLD` (el emisor llegó al umbral de reportes) o,
-desde US-11, `INHERITED_ON_SIGNUP`: la cuenta nació en revisión porque el mismo
-DNI había sido dado de baja con una sanción vigente. Alert ignora el `reason`.
+`reason` puede ser `REPORTS_THRESHOLD` (el emisor llegó al umbral de reportes),
+desde US-11 `INHERITED_ON_SIGNUP` (la cuenta nació en revisión porque el mismo
+DNI había sido dado de baja con una sanción vigente) y, desde US-17,
+`MANUAL_UNBLOCK` (un operador levantó la revisión). Alert ignora el `reason`.
 
-**Levantar la revisión** queda fuera de alcance de US-08 (es manual, para un
-caso de uso futuro de administración). Hacerlo a mano en la base **no alcanza**:
-Alert mantiene una proyección alimentada por este evento, así que además de
-poner `account_status = 'ACTIVE'` hay que emitir `user.status.changed` con
-`ACTIVE`. Sin ese evento, Alert sigue bloqueando al emisor.
+**Levantar la revisión** se hace desde el
+[router de administración](#router-de-administración-us-17) (US-17): el
+desbloqueo escribe, en la misma transacción que el cambio, este evento con
+`"account_status": "ACTIVE"` y `"reason": "MANUAL_UNBLOCK"`, y con `actor`
+`null` como los demás. Hacerlo a mano en la base **no alcanza**: Alert mantiene
+una proyección alimentada por este evento, así que además de poner
+`account_status = 'ACTIVE'` hay que emitirlo. Sin ese evento, Alert sigue
+bloqueando al emisor.
 
 ### `user.deleted`
 
@@ -1355,7 +1445,9 @@ sobre es el emisor reportado. En una única transacción se registra el evento e
 si el conteo llega a `REPORT_REVIEW_THRESHOLD` y el usuario estaba `ACTIVE`, se
 lo pasa a `UNDER_REVIEW` y se escribe `user.status.changed` en el outbox. Un
 usuario que ya está en revisión sigue contando pero no vuelve a publicar, y un
-duplicado no incrementa.
+duplicado no incrementa. Desde US-17 cada reporte contado también anota
+`users.last_reported_at`, y el paso a `UNDER_REVIEW` anota `users.under_review_since`
+(un reporte posterior no la mueve).
 
 Igual que con `alert.rejected`, un evento sin `actor` (alerta de un emisor dado
 de baja, US-11) o cuyo usuario ya no existe se confirma sin efecto: nadie queda

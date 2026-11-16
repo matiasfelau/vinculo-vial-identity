@@ -70,8 +70,16 @@ services:
       AUDIT_PUBLIC_KEY: "${AUDIT_PUBLIC_KEY:?falta AUDIT_PUBLIC_KEY, generarla con audit-keygen (repo vinculo-vial-audit)}"
       AUDIT_KEY_ID: "${AUDIT_KEY_ID:?falta AUDIT_KEY_ID, el id de la clave de AUDIT_PUBLIC_KEY (por ejemplo 2026-11)}"
       SANCTION_CARRYOVER_DAYS: ${SANCTION_CARRYOVER_DAYS:-1095}
+      # El puerto de administración dentro del contenedor es fijo, el que mapea
+      # `ports:`; HTTP_ADMIN_PORT del .env solo cambia el puerto del host.
+      HTTP_ADMIN_PORT: 8082
     ports:
       - "127.0.0.1:${HTTP_PORT:-8080}:8080"
+      # Router de administración (US-17), solo en loopback para poder usar curl en
+      # desarrollo. Nunca en 0.0.0.0, y Kong no tiene ruta hacia él. Toda petición
+      # exige ADMIN_API_KEY; si está vacía, el router no arranca y este puerto
+      # queda sin nadie escuchando.
+      - "127.0.0.1:${HTTP_ADMIN_PORT:-8082}:8082"
     # Deliberadamente sin publicar HTTP_INTERNAL_PORT: las rutas /internal/*
     # no se exponen fuera de la red interna. Alert las alcanza igual
     # dentro de la red `vinculo-vial`, sin necesidad de un `ports:` acá. El
