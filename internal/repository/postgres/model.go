@@ -30,6 +30,10 @@ type userModel struct {
 	// verificación de email quedan en NULL, sin backfill, y no pueden recuperar su
 	// contraseña.
 	EmailVerifiedAt *time.Time `gorm:"column:email_verified_at;type:timestamptz"`
+	// TermsVersion y TermsAcceptedAt (US-19) son nulables: las cuentas anteriores
+	// quedan en NULL, sin backfill, porque no hay consentimiento que registrar.
+	TermsVersion    *string    `gorm:"column:terms_version;type:varchar(16)"`
+	TermsAcceptedAt *time.Time `gorm:"column:terms_accepted_at;type:timestamptz"`
 	CreatedAt       time.Time  `gorm:"column:created_at;type:timestamptz;not null"`
 	UpdatedAt       time.Time  `gorm:"column:updated_at;type:timestamptz;not null"`
 }
@@ -39,7 +43,13 @@ type userModel struct {
 func (userModel) TableName() string { return "users" }
 
 func toModel(u *domain.User) *userModel {
+	var termsVersion *string
+	if u.TermsVersion != "" {
+		termsVersion = &u.TermsVersion
+	}
 	return &userModel{
+		TermsVersion:    termsVersion,
+		TermsAcceptedAt: utcPtr(u.TermsAcceptedAt),
 		ID:              u.ID,
 		Email:           u.Email,
 		Password:        u.PasswordHash,
@@ -55,7 +65,13 @@ func toModel(u *domain.User) *userModel {
 }
 
 func (m *userModel) toDomain() *domain.User {
+	termsVersion := ""
+	if m.TermsVersion != nil {
+		termsVersion = *m.TermsVersion
+	}
 	return &domain.User{
+		TermsVersion:    termsVersion,
+		TermsAcceptedAt: m.TermsAcceptedAt,
 		ID:              m.ID,
 		Email:           m.Email,
 		PasswordHash:    m.Password,

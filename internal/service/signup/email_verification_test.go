@@ -258,7 +258,8 @@ func TestNewExigeLosColaboradoresDeLaVerificacionDeEmail(t *testing.T) {
 			deps := signup.Deps{
 				Decryptor: h.decryptor, Indexer: h.indexer, Cipher: h.cipher, Hasher: h.hasher,
 				Renaper: h.renaper, Users: h.repo, Challenges: h.challenges, Codec: h.codec,
-				Logger: slog.Default(),
+				TermsCurrentVersion: versionVigente,
+				Logger:              slog.Default(),
 			}
 			tune(&deps)
 			if _, err := signup.New(deps); err == nil {

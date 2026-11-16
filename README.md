@@ -34,16 +34,24 @@ POST /api/v1/auth/signup
       ├─ 3. Validar formato y fortaleza        → 400 si algo no pasa
       │      (incluye la selfie: base64 +
       │       magic bytes JPEG/PNG + tamaño)
-      ├─ 4. Validar el token de verificación   → 400 EMAIL_NOT_VERIFIED (US-13)
+      ├─ 4. Comprobar la versión de los        → 400 TERMS_NOT_ACCEPTED (US-19)
+      │      términos (antes de RENAPER)
+      ├─ 5. Validar el token de verificación   → 400 EMAIL_NOT_VERIFIED (US-13)
       │      de email (antes de RENAPER)
-      ├─ 5. Verificar identidad contra RENAPER → 400 si no se confirma
+      ├─ 6. Verificar identidad contra RENAPER → 400 si no se confirma
       │      (dni + tramite + sexo + selfie)      500 si RENAPER no responde
-      ├─ 6. Blind Index del DNI (HMAC-SHA256)
-      ├─ 7. Cifrar el DNI at-rest (AES-256-GCM, clave distinta)
-      ├─ 8. Derivar la contraseña (Argon2id)
-      └─ 9. Persistir, consumiendo el token    → 409 si email o DNI ya existen
-             en la misma transacción            → 201
+      ├─ 7. Blind Index del DNI (HMAC-SHA256)
+      ├─ 8. Cifrar el DNI at-rest (AES-256-GCM, clave distinta)
+      ├─ 9. Derivar la contraseña (Argon2id)
+      └─ 10. Persistir, consumiendo el token   → 409 si email o DNI ya existen
+              y guardando versión y fecha de
+              los términos, en la misma
+              transacción                        → 201
 ```
+
+Desde US-19 el payload lleva además `terms_version`, la versión de los Términos y
+Condiciones y Política de Privacidad que el usuario aceptó en el formulario (ver
+[Aceptación de los términos](#aceptación-de-los-términos-us-19)).
 
 Desde US-13 el payload lleva además `email_verification_token`, el token que
 emite la confirmación del código enviado al email (ver
@@ -69,6 +77,7 @@ una identidad que no se confirmó.
 |---|---|
 | `201` | Alta exitosa. Devuelve el id opaco del usuario, sin tokens: la sesión es US-02. |
 | `400` | El cuerpo no es interpretable, el mensaje cifrado no tiene forma de mensaje HPKE, los datos descifrados no validan, o RENAPER no pudo confirmar la identidad. Detalla los campos rechazados de la validación local, nunca los valores; el rechazo de RENAPER es siempre genérico. |
+| `400` `TERMS_NOT_ACCEPTED` | `terms_version` falta (si se exige) o no es la versión vigente (`TERMS_CURRENT_VERSION`). No se consultó RENAPER ni se gastó el token de email (US-19). |
 | `400` `EMAIL_NOT_VERIFIED` | El token de verificación de email falta (si se exige), venció, ya se usó o es de otro email. Los cuatro casos son indistinguibles (US-13). |
 | `409` | El email o el DNI ya existen. Mensaje genérico deliberado: distinguirlos permitiría enumerar usuarios. |
 | `500` | Un mensaje bien formado que no descifra, RENAPER no pudo consultarse (caído, timeout — no es un veredicto sobre la identidad), o un fallo interno. Sin detalle criptográfico en el cuerpo. |
@@ -88,6 +97,47 @@ contrato dice "base64" sin precisar cuál y cada plataforma elige distinto.
 
 El `403` que enumera el contrato compartido lo produce el gateway cuando la App
 Attestation no convence; nunca lo emite este servicio.
+
+## Aceptación de los términos (US-19)
+
+El Frontend muestra un documento único —Términos y Condiciones y Política de
+Privacidad, versionado— y exige aceptarlo en el alta. Identity guarda qué
+versión aceptó cada usuario y cuándo, para que el consentimiento sea expreso,
+informado y demostrable (art. 5 de la Ley 25.326).
+
+- **Qué viaja:** `terms_version` dentro del payload HPKE del alta, junto al resto
+  de los datos. No hay un endpoint aparte.
+- **Qué se comprueba:** que sea exactamente `TERMS_CURRENT_VERSION` (por defecto
+  `"1.0"`). Si falta (con `SIGNUP_REQUIRE_TERMS=true`) o es otra, el alta responde
+  `400 TERMS_NOT_ACCEPTED`. La comprobación corre después de la validación de
+  formato y antes del token de email y de RENAPER: un rechazo no consume ni
+  gasta nada.
+- **Qué se guarda:** `users.terms_version` y `users.terms_accepted_at` (el
+  instante del alta), en la misma transacción que crea el usuario. Las cuentas
+  anteriores a US-19 quedan en `NULL`, sin backfill: no hay consentimiento que
+  registrar.
+- **`SIGNUP_REQUIRE_TERMS=false`:** el campo puede faltar y la cuenta queda sin
+  versión ni fecha. Si el campo llega, se valida igual: una versión equivocada
+  sigue siendo `400 TERMS_NOT_ACCEPTED`. Existe solo para no romper el alta entre
+  el merge de Identity y el del Frontend; la configuración lo rechaza con
+  `APP_ENV=production`.
+- **Anti-enumeración:** la respuesta no depende de que exista una cuenta, un DNI o
+  un email, y la versión no se loguea.
+
+El acceso, la rectificación y la supresión de los datos (arts. 14 y 16) no tienen
+autoservicio: se piden por email al contacto que figura en el documento. La
+supresión total ya existe como baja de cuenta.
+
+**Fuera de alcance:** volver a pedir la aceptación cuando cambie la versión. Una
+cuenta conserva la versión con la que se registró; si se publica una nueva, solo
+cambia lo que exige el alta de ahí en adelante, y la app informa los cambios.
+
+### Variables
+
+| Variable | Default | Descripción |
+|---|---|---|
+| `TERMS_CURRENT_VERSION` | `1.0` | Versión vigente. Hasta 16 caracteres (largo de `users.terms_version`). Tiene que coincidir con `TERMS_VERSION` del Frontend |
+| `SIGNUP_REQUIRE_TERMS` | `true` | En `false`, el alta no exige `terms_version` (si llega, se valida igual). **La configuración lo rechaza con `APP_ENV=production`** |
 
 ## Verificación de identidad (RENAPER)
 
@@ -801,7 +851,9 @@ de `genkeys`: es la clave propia de los códigos de email de US-13, y no puede
 coincidir con `AES_KEY` ni con `HMAC_SECRET`. Mientras el Frontend no envíe el
 token de verificación de email, el alta desde la app necesita
 `SIGNUP_REQUIRE_EMAIL_VERIFICATION=false` en el `.env` local; con
-`APP_ENV=production` esa opción se rechaza.
+`APP_ENV=production` esa opción se rechaza. Lo mismo vale para
+`SIGNUP_REQUIRE_TERMS` (US-19): hasta que el Frontend envíe `terms_version`, el
+alta desde la app necesita `SIGNUP_REQUIRE_TERMS=false` en el `.env` local.
 
 `AUDIT_PUBLIC_KEY` y `AUDIT_KEY_ID` son obligatorias (el servicio no arranca sin
 ellas, ni compose) y **no** salen de `genkeys`: el par de Audit lo genera
@@ -995,6 +1047,8 @@ Tabla `users`, creada con `AutoMigrate` en la inicialización del repositorio.
 | `reputation_score` | integer | NOT NULL, default 0 (US-08); baja `FRAUD_PENALTY` por cada alerta rechazada por fraude y puede quedar negativa |
 | `report_count` | integer | NOT NULL, default 0 (US-08); solo el conteo, nunca quién reportó |
 | `email_verified_at` | timestamptz | NULL (US-13); cuándo se verificó el email con un código. Solo una cuenta con este campo no nulo puede recuperar su contraseña. Las cuentas anteriores quedan en NULL, sin backfill |
+| `terms_version` | varchar(16) | NULL (US-19); versión de los términos que el usuario aceptó en el alta. Las cuentas anteriores quedan en NULL, sin backfill |
+| `terms_accepted_at` | timestamptz | NULL (US-19); cuándo los aceptó, en la misma transacción del alta |
 | `created_at` / `updated_at` | timestamptz | |
 
 `AutoMigrate` es una decisión de MVP: solo agrega columnas e índices. Va contra

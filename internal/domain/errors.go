@@ -106,6 +106,11 @@ var (
 	// EMAIL_NOT_VERIFIED.
 	ErrEmailNotVerified = errors.New("domain: email no verificado")
 
+	// ErrTermsNotAccepted indica que el alta no trae la versión vigente de los
+	// Términos y Condiciones (US-19): falta el campo (si se exige) o es otra
+	// versión. → 400 TERMS_NOT_ACCEPTED.
+	ErrTermsNotAccepted = errors.New("domain: términos no aceptados")
+
 	// ErrInvalidResetToken indica que el reset_token de la recuperación no sirve:
 	// ausente, vencido, usado o sin intentos. → 400 INVALID_RESET_TOKEN.
 	ErrInvalidResetToken = errors.New("domain: reset token inválido")
