@@ -18,6 +18,7 @@ import (
 
 	"github.com/matiasfelau/vinculo-vial-identity/internal/crypto/auditseal"
 	"github.com/matiasfelau/vinculo-vial-identity/internal/crypto/blindindex"
+	"github.com/matiasfelau/vinculo-vial-identity/internal/crypto/emailcode"
 	"github.com/matiasfelau/vinculo-vial-identity/internal/crypto/hpke"
 	"github.com/matiasfelau/vinculo-vial-identity/internal/crypto/password"
 	"github.com/matiasfelau/vinculo-vial-identity/internal/crypto/symmetric"
@@ -29,8 +30,10 @@ import (
 	"github.com/matiasfelau/vinculo-vial-identity/internal/repository/postgres"
 	"github.com/matiasfelau/vinculo-vial-identity/internal/service/account"
 	"github.com/matiasfelau/vinculo-vial-identity/internal/service/audit"
+	"github.com/matiasfelau/vinculo-vial-identity/internal/service/emailchallenge"
+	"github.com/matiasfelau/vinculo-vial-identity/internal/service/emailverification"
 	"github.com/matiasfelau/vinculo-vial-identity/internal/service/outbox"
-	"github.com/matiasfelau/vinculo-vial-identity/internal/service/ownership"
+	"github.com/matiasfelau/vinculo-vial-identity/internal/service/passwordreset"
 	"github.com/matiasfelau/vinculo-vial-identity/internal/service/reputation"
 	"github.com/matiasfelau/vinculo-vial-identity/internal/service/sanction"
 	"github.com/matiasfelau/vinculo-vial-identity/internal/service/session"
@@ -102,6 +105,14 @@ func run() error {
 	// Requiere que la tabla users ya exista: sessions declara la clave foránea
 	// hacia ella.
 	sessions, err := postgres.NewSessionRepository(ctx, db)
+	if err != nil {
+		return err
+	}
+
+	// email_challenges (US-13): los desafíos de la verificación de email y la
+	// recuperación de contraseña. Requiere que users ya esté migrada: declara una
+	// clave foránea hacia ella.
+	emailChallenges, err := postgres.NewEmailChallengeRepository(ctx, db)
 	if err != nil {
 		return err
 	}
@@ -186,21 +197,90 @@ func run() error {
 		defer close(sweeperDone)
 		sweeper.Run(ctx)
 	}()
+
+	// Sweeper de desafíos de email vencidos (US-13), con el mismo esquema y el
+	// mismo apagado ordenado que el de sanciones.
+	emailSweeper, err := emailchallenge.NewSweeper(emailChallenges, cfg.Email.SweepInterval, cfg.Email.SweepBatchSize, logger)
+	if err != nil {
+		return err
+	}
+	emailSweeperDone := make(chan struct{})
+	go func() {
+		defer close(emailSweeperDone)
+		emailSweeper.Run(ctx)
+	}()
 	defer func() {
 		stop()
 		<-sweeperDone
+		<-emailSweeperDone
 	}()
 
 	renaperSvc := buildRenaper(cfg, logger)
 
-	signUpService, err := signup.New(signup.Deps{
+	// Falla el arranque si la clave de los desafíos no es utilizable: sin ella no
+	// se puede emitir ni confirmar ningún código.
+	emailCodec, err := emailcode.NewFromBase64(cfg.Email.CodeHMACKey.Reveal())
+	if err != nil {
+		return err
+	}
+	challengeEngine, err := emailchallenge.New(emailchallenge.Deps{
+		Challenges: emailChallenges,
+		Codec:      emailCodec,
+		Settings: emailchallenge.Settings{
+			CodeTTL:         cfg.Email.CodeTTL,
+			MaxCodeAttempts: cfg.Email.CodeMaxAttempts,
+			ResendInterval:  cfg.Email.CodeResendInterval,
+			MaxSendsPerDay:  cfg.Email.CodeMaxSendsPerDay,
+		},
+		Logger: logger,
+	})
+	if err != nil {
+		return err
+	}
+
+	emailVerificationService, err := emailverification.New(emailverification.Deps{
 		Decryptor: decryptor,
-		Indexer:   indexer,
-		Cipher:    cipher,
-		Hasher:    hasher,
-		Renaper:   renaperSvc,
 		Users:     users,
+		Engine:    challengeEngine,
+		GrantTTL:  cfg.Email.VerificationGrantTTL,
 		Logger:    logger,
+	})
+	if err != nil {
+		return err
+	}
+
+	passwordResetService, err := passwordreset.New(passwordreset.Deps{
+		Decryptor:           decryptor,
+		Indexer:             indexer,
+		Hasher:              hasher,
+		Renaper:             renaperSvc,
+		Users:               users,
+		Challenges:          emailChallenges,
+		Codec:               emailCodec,
+		Engine:              challengeEngine,
+		GrantTTL:            cfg.Email.ResetGrantTTL,
+		MaxIdentityAttempts: cfg.Email.ResetMaxIdentityAttempts,
+		Logger:              logger,
+	})
+	if err != nil {
+		return err
+	}
+
+	if !cfg.Email.RequireVerificationOnSignup {
+		logger.Warn("SIGNUP_REQUIRE_EMAIL_VERIFICATION=false: el alta no exige verificar el email; las cuentas nuevas sin token no podrán recuperar su contraseña. Solo para desarrollo")
+	}
+
+	signUpService, err := signup.New(signup.Deps{
+		Decryptor:                decryptor,
+		Indexer:                  indexer,
+		Cipher:                   cipher,
+		Hasher:                   hasher,
+		Renaper:                  renaperSvc,
+		Users:                    users,
+		Challenges:               emailChallenges,
+		Codec:                    emailCodec,
+		RequireEmailVerification: cfg.Email.RequireVerificationOnSignup,
+		Logger:                   logger,
 	})
 	if err != nil {
 		return err
@@ -220,9 +300,10 @@ func run() error {
 	}
 
 	refreshService, err := session.NewRefreshService(session.RefreshDeps{
-		Sessions: sessions,
-		Tokens:   tokens,
-		Logger:   logger,
+		Sessions:    sessions,
+		Tokens:      tokens,
+		Logger:      logger,
+		MaxLifetime: cfg.Token.SessionMaxLifetime,
 	})
 	if err != nil {
 		return err
@@ -257,25 +338,18 @@ func run() error {
 		return err
 	}
 
-	verifyOwnershipService, err := ownership.New(ownership.Deps{
-		Decryptor: decryptor,
-		Indexer:   indexer,
-		Users:     users,
-		Logger:    logger,
-	})
-	if err != nil {
-		return err
-	}
-
 	router, err := delivery.NewRouter(delivery.RouterConfig{
 		SignUp:        signUpService,
 		SignIn:        signInService,
 		Refresh:       refreshService,
 		Logout:        logoutService,
 		DeleteAccount: deleteAccountService,
-		Logger:        logger,
-		MaxBodyBytes:  cfg.HTTP.MaxBodyBytes,
-		Debug:         cfg.HTTP.Debug,
+		// US-13: verificación de email del alta y recuperación de contraseña.
+		EmailVerification: emailVerificationService,
+		PasswordReset:     passwordResetService,
+		Logger:            logger,
+		MaxBodyBytes:      cfg.HTTP.MaxBodyBytes,
+		Debug:             cfg.HTTP.Debug,
 		// Readiness apoyada en la base: si no responde, ni un alta ni un login
 		// podrían persistirse y el orquestador no debería mandar tráfico acá.
 		ReadinessCheck: func(ctx context.Context) error { return postgres.Ping(ctx, db) },
@@ -295,12 +369,11 @@ func run() error {
 	}
 
 	internalRouter, err := delivery.NewInternalRouter(delivery.InternalRouterConfig{
-		VerifyOwnership: verifyOwnershipService,
-		AuditDNI:        auditDNIService,
-		Logger:          logger,
-		ServiceToken:    cfg.Internal.ServiceToken.Reveal(),
-		MaxBodyBytes:    cfg.HTTP.MaxBodyBytes,
-		Debug:           cfg.HTTP.Debug,
+		AuditDNI:     auditDNIService,
+		Logger:       logger,
+		ServiceToken: cfg.Internal.ServiceToken.Reveal(),
+		MaxBodyBytes: cfg.HTTP.MaxBodyBytes,
+		Debug:        cfg.HTTP.Debug,
 	})
 	if err != nil {
 		return err
@@ -475,7 +548,7 @@ func buildRenaper(cfg *config.Config, logger *slog.Logger) *renaper.CircuitBreak
 	}, logger)
 }
 
-// serve levanta el servidor público y el interno (US-04) a la vez, cada uno
+// serve levanta el servidor público y el interno a la vez, cada uno
 // en su propio puerto, y los apaga juntos: son dos superficies del mismo
 // proceso y ninguna tiene sentido sin la otra en pie.
 func serve(ctx context.Context, cfg *config.Config, publicHandler, internalHandler http.Handler, logger *slog.Logger) error {

@@ -26,6 +26,9 @@ type RefreshDeps struct {
 	Sessions domain.SessionRepository
 	Tokens   domain.TokenGenerator
 	Logger   *slog.Logger
+	// MaxLifetime es la vida máxima de una sesión desde su inicio de sesión
+	// (SESSION_MAX_DAYS, US-12). Es obligatoria y positiva.
+	MaxLifetime time.Duration
 	// Now permite fijar el reloj en los tests. Si es nil se usa time.Now.
 	Now func() time.Time
 }
@@ -44,6 +47,8 @@ func NewRefreshService(d RefreshDeps) (*RefreshService, error) {
 		return nil, errors.New("session: falta el repositorio de sesiones")
 	case d.Tokens == nil:
 		return nil, errors.New("session: falta el generador de tokens")
+	case d.MaxLifetime <= 0:
+		return nil, errors.New("session: la vida máxima de la sesión debe ser positiva")
 	}
 
 	if d.Logger == nil {
@@ -60,7 +65,8 @@ func NewRefreshService(d RefreshDeps) (*RefreshService, error) {
 //
 // Devuelve, ante fallos, uno de los centinelas de domain: ErrSessionNotFound
 // si ningún hash coincide, ErrSessionExpired si la sesión encontrada ya
-// venció, o ErrSessionReused si el Refresh Token ya había sido rotado
+// venció —por inactividad (expires_at) o por superar su vida máxima desde el
+// inicio de sesión (started_at + MaxLifetime)—, o ErrSessionReused si el Refresh Token ya había sido rotado
 // (is_revoked = true). Este último caso es Defensa Activa: un cliente
 // legítimo nunca reutiliza un Refresh Token después de rotarlo, así que su
 // reaparición es la señal de un posible robo de sesión, y la respuesta es
@@ -82,8 +88,18 @@ func (s *RefreshService) Refresh(ctx context.Context, refreshToken string) (acce
 		return "", "", fmt.Errorf("session: no se pudo buscar la sesión: %w", err)
 	}
 
-	if s.deps.Now().After(found.ExpiresAt) {
+	now := s.deps.Now()
+
+	if now.After(found.ExpiresAt) {
 		s.logFailedAttempt(ctx, "sesión expirada", slog.String("user_id", found.UserID.String()))
+		return "", "", domain.ErrSessionExpired
+	}
+
+	// La vida máxima responde igual que una sesión vencida y no dispara la
+	// Defensa Activa: el cliente no hizo nada sospechoso, solo superó el plazo
+	// desde su login. El motivo solo se distingue en el log interno.
+	if found.MaxLifetimeExceeded(s.deps.MaxLifetime, now) {
+		s.logFailedAttempt(ctx, "vida máxima de la sesión superada", slog.String("user_id", found.UserID.String()))
 		return "", "", domain.ErrSessionExpired
 	}
 
@@ -126,7 +142,7 @@ func (s *RefreshService) Refresh(ctx context.Context, refreshToken string) (acce
 		return "", "", fmt.Errorf("session: no se pudo emitir el refresh token: %w", err)
 	}
 
-	rotated, err := domain.NewSession(found.UserID, newHash, newExpiresAt, s.deps.Now())
+	rotated, err := domain.NewSession(found.UserID, newHash, newExpiresAt, found.StartedAt, now)
 	if err != nil {
 		return "", "", err
 	}

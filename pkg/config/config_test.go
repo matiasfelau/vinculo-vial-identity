@@ -1,6 +1,7 @@
 package config_test
 
 import (
+	"bytes"
 	"encoding/base64"
 	"fmt"
 	"log/slog"
@@ -30,6 +31,9 @@ func entornoMinimo() map[string]string {
 		// los exige; internal/crypto/auditseal los valida de verdad.
 		"AUDIT_PUBLIC_KEY": clave,
 		"AUDIT_KEY_ID":     "2026-11",
+		// Clave de los desafíos por email (US-13): distinta de AES_KEY y HMAC_SECRET,
+		// porque config.Load rechaza reutilizarlas.
+		"EMAIL_CODE_HMAC_KEY": base64.StdEncoding.EncodeToString(bytes.Repeat([]byte{1}, 32)),
 	}
 }
 
@@ -52,7 +56,7 @@ func aplicar(t *testing.T, env map[string]string) {
 		"POSTGRES_DB", "POSTGRES_SSLMODE", "POSTGRES_LOG_SQL", "EPHEMERAL_DB",
 		"POSTGRES_MAX_OPEN_CONNS", "POSTGRES_MAX_IDLE_CONNS", "POSTGRES_STATEMENT_TIMEOUT",
 		"IDENTITY_HPKE_PRIVATE_KEY", "IDENTITY_HPKE_INFO", "AES_KEY", "HMAC_SECRET",
-		"JWT_PRIVATE_KEY", "JWT_ISSUER", "ACCESS_TOKEN_TTL_MINUTES", "REFRESH_TOKEN_TTL_DAYS",
+		"JWT_PRIVATE_KEY", "JWT_ISSUER", "ACCESS_TOKEN_TTL_MINUTES", "REFRESH_TOKEN_TTL_DAYS", "SESSION_MAX_DAYS",
 		"ARGON2_MEMORY_KIB", "ARGON2_ITERATIONS", "ARGON2_PARALLELISM",
 		"RABBITMQ_ENABLED", "RABBITMQ_URL", "RABBITMQ_EXCHANGE",
 		"RABBITMQ_DIAL_TIMEOUT", "RABBITMQ_HEARTBEAT", "RENAPER_TIMEOUT",
@@ -62,6 +66,11 @@ func aplicar(t *testing.T, env map[string]string) {
 		"ALERT_REPORTED_QUEUE", "REPORT_REVIEW_THRESHOLD",
 		"AUDIT_PUBLIC_KEY", "AUDIT_KEY_ID", "SANCTION_CARRYOVER_DAYS",
 		"SANCTION_CARRYOVER_SWEEP_INTERVAL", "SANCTION_CARRYOVER_SWEEP_BATCH_SIZE",
+		"EMAIL_CODE_HMAC_KEY", "EMAIL_CODE_TTL_MINUTES", "EMAIL_CODE_MAX_ATTEMPTS",
+		"EMAIL_CODE_RESEND_SECONDS", "EMAIL_CODE_MAX_SENDS_PER_DAY",
+		"EMAIL_VERIFICATION_GRANT_TTL_MINUTES", "PASSWORD_RESET_GRANT_TTL_MINUTES",
+		"PASSWORD_RESET_MAX_IDENTITY_ATTEMPTS", "SIGNUP_REQUIRE_EMAIL_VERIFICATION",
+		"EMAIL_CHALLENGE_SWEEP_INTERVAL", "EMAIL_CHALLENGE_SWEEP_BATCH_SIZE",
 	} {
 		t.Setenv(k, "")
 		os.Unsetenv(k)
@@ -107,6 +116,9 @@ func TestLoadConElEntornoMinimo(t *testing.T) {
 	if cfg.Token.RefreshTokenTTL != 30*24*time.Hour {
 		t.Errorf("refresh token ttl = %v, se esperaban 30 días", cfg.Token.RefreshTokenTTL)
 	}
+	if cfg.Token.SessionMaxLifetime != 90*24*time.Hour {
+		t.Errorf("vida máxima de la sesión = %v, se esperaban 90 días", cfg.Token.SessionMaxLifetime)
+	}
 	if cfg.Renaper.Timeout != 1500*time.Millisecond {
 		t.Errorf("renaper timeout = %v, se esperaban 1500ms", cfg.Renaper.Timeout)
 	}
@@ -140,6 +152,9 @@ func TestLoadRechazaTTLNoPositivos(t *testing.T) {
 		"access token ttl negativo":  {"ACCESS_TOKEN_TTL_MINUTES": "-1"},
 		"refresh token ttl cero":     {"REFRESH_TOKEN_TTL_DAYS": "0"},
 		"refresh token ttl negativo": {"REFRESH_TOKEN_TTL_DAYS": "-1"},
+		"vida máxima cero":           {"SESSION_MAX_DAYS": "0"},
+		"vida máxima negativa":       {"SESSION_MAX_DAYS": "-1"},
+		"vida máxima no numérica":    {"SESSION_MAX_DAYS": "mucho"},
 	}
 
 	for name, override := range cases {
@@ -189,6 +204,7 @@ func TestLoadAceptaTTLPersonalizados(t *testing.T) {
 	env := entornoMinimo()
 	env["ACCESS_TOKEN_TTL_MINUTES"] = "5"
 	env["REFRESH_TOKEN_TTL_DAYS"] = "7"
+	env["SESSION_MAX_DAYS"] = "14"
 	aplicar(t, env)
 
 	cfg, err := config.Load()
@@ -200,6 +216,9 @@ func TestLoadAceptaTTLPersonalizados(t *testing.T) {
 	}
 	if cfg.Token.RefreshTokenTTL != 7*24*time.Hour {
 		t.Errorf("refresh token ttl = %v, se esperaban 7 días", cfg.Token.RefreshTokenTTL)
+	}
+	if cfg.Token.SessionMaxLifetime != 14*24*time.Hour {
+		t.Errorf("vida máxima de la sesión = %v, se esperaban 14 días", cfg.Token.SessionMaxLifetime)
 	}
 }
 
@@ -534,7 +553,7 @@ func TestLoadExigeLosSecretos(t *testing.T) {
 	obligatorias := []string{
 		"POSTGRES_USER", "POSTGRES_PASSWORD", "POSTGRES_DB",
 		"IDENTITY_HPKE_PRIVATE_KEY", "AES_KEY", "HMAC_SECRET", "JWT_PRIVATE_KEY",
-		"INTERNAL_SERVICE_TOKEN", "AUDIT_PUBLIC_KEY", "AUDIT_KEY_ID",
+		"INTERNAL_SERVICE_TOKEN", "AUDIT_PUBLIC_KEY", "AUDIT_KEY_ID", "EMAIL_CODE_HMAC_KEY",
 	}
 
 	for _, faltante := range obligatorias {
@@ -564,7 +583,7 @@ func TestLoadAcumulaLosErrores(t *testing.T) {
 		t.Fatal("se esperaba un error")
 	}
 
-	for _, faltante := range []string{"POSTGRES_USER", "IDENTITY_HPKE_PRIVATE_KEY", "AES_KEY", "HMAC_SECRET", "JWT_PRIVATE_KEY", "INTERNAL_SERVICE_TOKEN", "AUDIT_PUBLIC_KEY", "AUDIT_KEY_ID"} {
+	for _, faltante := range []string{"POSTGRES_USER", "IDENTITY_HPKE_PRIVATE_KEY", "AES_KEY", "HMAC_SECRET", "JWT_PRIVATE_KEY", "INTERNAL_SERVICE_TOKEN", "AUDIT_PUBLIC_KEY", "AUDIT_KEY_ID", "EMAIL_CODE_HMAC_KEY"} {
 		if !strings.Contains(err.Error(), faltante) {
 			t.Errorf("el error debería mencionar %s: %v", faltante, err)
 		}
@@ -602,7 +621,7 @@ func TestLoadRechazaValoresMalFormados(t *testing.T) {
 	}
 }
 
-// El router interno de US-04 pierde su aislamiento de puerto si comparte el
+// El router interno pierde su aislamiento de puerto si comparte el
 // mismo número que el público: dos *http.Server no pueden escuchar el mismo
 // puerto, y si pudieran, ya no habría separación que defender.
 func TestLoadRechazaElPuertoInternoIgualAlPublico(t *testing.T) {

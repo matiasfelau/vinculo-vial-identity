@@ -72,21 +72,6 @@ type deleteAccountRequest struct {
 	Password string `json:"password"`
 }
 
-// verifyOwnershipRequest es el payload interno de US-04 que envía
-// vinculo-vial-vehicle: el contrato compartido lo transporta tal cual, sin
-// que Vehicle lo abra. DNIEnc es un único blob HPKE (enc || ciphertext), a
-// diferencia de las dos piezas separadas de /signup y /signin.
-type verifyOwnershipRequest struct {
-	OwnerID string `json:"owner_id"`
-	DNIEnc  string `json:"dni_enc"`
-}
-
-// verifyOwnershipResponse es la única forma de respuesta de
-// /internal/verify-ownership: un booleano y nada más.
-type verifyOwnershipResponse struct {
-	Match bool `json:"match"`
-}
-
 // auditDNIRequest es el payload interno de POST /internal/audit/dni que envía
 // vinculo-vial-alert antes de crear una alerta: el usuario cuyo DNI se sella y la
 // alerta a la que queda atado el criptograma.
@@ -120,7 +105,7 @@ const (
 	// Activa de /refresh ante el reúso de un Refresh Token ya rotado.
 	codeSessionCompromised = "sesion_comprometida"
 	// codeUnauthorizedService es el código del 401 que produce el router
-	// interno de US-04 (/internal/*) cuando la petición no trae el secreto
+	// interno (/internal/*) cuando la petición no trae el secreto
 	// de servicio a servicio configurado en INTERNAL_SERVICE_TOKEN.
 	codeUnauthorizedService = "servicio_no_autorizado"
 	codeInternal            = "error_interno"
@@ -159,6 +144,45 @@ const (
 	// traduce en 403 ACCOUNT_DELETED.
 	codeUserNotFound = "USER_NOT_FOUND"
 )
+
+// Códigos de error de la verificación de email y la recuperación de contraseña
+// (US-13). Los fija el contrato compartido, en mayúsculas, como los de US-11.
+const (
+	// codeInvalidCode es el 400 de las confirmaciones: el código es incorrecto,
+	// venció, ya se usó, nunca se emitió o agotó sus intentos. Los cinco casos
+	// son indistinguibles a propósito.
+	codeInvalidCode = "INVALID_CODE"
+	// codeEmailNotVerified es el 400 del alta sin un token de verificación de
+	// email utilizable.
+	codeEmailNotVerified = "EMAIL_NOT_VERIFIED"
+	// codeInvalidResetToken es el 400 de la revalidación con un reset_token
+	// ausente, vencido, usado o sin intentos.
+	codeInvalidResetToken = "INVALID_RESET_TOKEN"
+)
+
+// hpkeRequest es el único dato que aceptan los endpoints de US-13: el mismo
+// sobre HPKE del alta y el login, en las dos piezas que fija el contrato
+// compartido. Nada personal viaja en el cuerpo: ni el email, ni el DNI, ni el
+// código, ni la contraseña.
+type hpkeRequest struct {
+	EphemeralPublicKey string `json:"ephemeral_public_key"`
+	Ciphertext         string `json:"ciphertext"`
+}
+
+// emailVerificationConfirmResponse acompaña al 200 de la confirmación del email.
+type emailVerificationConfirmResponse struct {
+	VerificationToken string `json:"verification_token"`
+	// ExpiresIn son los segundos de vida del token.
+	ExpiresIn int64 `json:"expires_in"`
+}
+
+// passwordResetConfirmResponse acompaña al 200 de la confirmación de la
+// recuperación.
+type passwordResetConfirmResponse struct {
+	ResetToken string `json:"reset_token"`
+	// ExpiresIn son los segundos de vida del token.
+	ExpiresIn int64 `json:"expires_in"`
+}
 
 // errorResponse es la forma única de todos los errores de la API.
 type errorResponse struct {

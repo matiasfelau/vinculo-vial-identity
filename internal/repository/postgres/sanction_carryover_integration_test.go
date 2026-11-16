@@ -84,7 +84,7 @@ func conSesiones(t *testing.T, db *gorm.DB, userID uuid.UUID, cantidad int) {
 	t.Helper()
 
 	for i := 0; i < cantidad; i++ {
-		s, err := domain.NewSession(userID, uuid.NewString(), time.Now().Add(time.Hour), time.Now())
+		s, err := domain.NewSession(userID, uuid.NewString(), time.Now().Add(time.Hour), time.Now(), time.Now())
 		if err != nil {
 			t.Fatalf("no se pudo armar la sesión: %v", err)
 		}
@@ -424,7 +424,7 @@ func TestIntegracionLaSancionMigradaSeHereda(t *testing.T) {
 	}
 
 	u := usuarioParaAlta(t, dni)
-	if err := r.users.Create(t.Context(), u, eventoHeredado(t, u.ID)); err != nil {
+	if err := r.users.Create(t.Context(), u, eventoHeredado(t, u.ID), nil); err != nil {
 		t.Fatalf("Create falló: %v", err)
 	}
 
@@ -919,7 +919,7 @@ func TestIntegracionAltaConSancionEnRevisionHeredaLaSancion(t *testing.T) {
 	u := usuarioParaAlta(t, dni)
 	evt := eventoHeredado(t, u.ID)
 
-	if err := r.users.Create(t.Context(), u, evt); err != nil {
+	if err := r.users.Create(t.Context(), u, evt, nil); err != nil {
 		t.Fatalf("Create falló: %v", err)
 	}
 
@@ -959,7 +959,7 @@ func TestIntegracionAltaConSancionActivaHeredaSinPublicar(t *testing.T) {
 	sembrarSancion(t, r.db, dni, domain.AccountStatusActive, -10, 1, time.Hour)
 	u := usuarioParaAlta(t, dni)
 
-	if err := r.users.Create(t.Context(), u, eventoHeredado(t, u.ID)); err != nil {
+	if err := r.users.Create(t.Context(), u, eventoHeredado(t, u.ID), nil); err != nil {
 		t.Fatalf("Create falló: %v", err)
 	}
 
@@ -980,7 +980,7 @@ func TestIntegracionAltaSinSancionNaceLimpia(t *testing.T) {
 	r := nuevosRepos(t)
 	u := usuarioParaAlta(t, uuid.NewString())
 
-	if err := r.users.Create(t.Context(), u, eventoHeredado(t, u.ID)); err != nil {
+	if err := r.users.Create(t.Context(), u, eventoHeredado(t, u.ID), nil); err != nil {
 		t.Fatalf("Create falló: %v", err)
 	}
 
@@ -1007,7 +1007,7 @@ func TestIntegracionAltaTrasUnaBajaSinPenalizacionesNaceLimpia(t *testing.T) {
 	}
 
 	nuevo := usuarioParaAlta(t, u.DNIHashed)
-	if err := r.users.Create(t.Context(), nuevo, eventoHeredado(t, nuevo.ID)); err != nil {
+	if err := r.users.Create(t.Context(), nuevo, eventoHeredado(t, nuevo.ID), nil); err != nil {
 		t.Fatalf("Create falló: %v", err)
 	}
 
@@ -1028,7 +1028,7 @@ func TestIntegracionAltaConSancionVencidaNoHereda(t *testing.T) {
 	sembrarSancion(t, r.db, dni, domain.AccountStatusUnderReview, -30, 2, -time.Hour)
 	u := usuarioParaAlta(t, dni)
 
-	if err := r.users.Create(t.Context(), u, eventoHeredado(t, u.ID)); err != nil {
+	if err := r.users.Create(t.Context(), u, eventoHeredado(t, u.ID), nil); err != nil {
 		t.Fatalf("Create falló: %v", err)
 	}
 
@@ -1052,7 +1052,7 @@ func TestIntegracionLaSancionNoSeHeredaDosVeces(t *testing.T) {
 	sembrarSancion(t, r.db, dni, domain.AccountStatusUnderReview, -30, 2, time.Hour)
 
 	primera := usuarioParaAlta(t, dni)
-	if err := r.users.Create(t.Context(), primera, eventoHeredado(t, primera.ID)); err != nil {
+	if err := r.users.Create(t.Context(), primera, eventoHeredado(t, primera.ID), nil); err != nil {
 		t.Fatalf("primer alta: %v", err)
 	}
 	if primera.AccountStatus != domain.AccountStatusUnderReview {
@@ -1069,7 +1069,7 @@ func TestIntegracionLaSancionNoSeHeredaDosVeces(t *testing.T) {
 	}
 
 	segunda := usuarioParaAlta(t, dni)
-	if err := r.users.Create(t.Context(), segunda, eventoHeredado(t, segunda.ID)); err != nil {
+	if err := r.users.Create(t.Context(), segunda, eventoHeredado(t, segunda.ID), nil); err != nil {
 		t.Fatalf("segunda alta: %v", err)
 	}
 
@@ -1093,7 +1093,7 @@ func TestIntegracionUnAltaQueFallaNoConsumeLaSancion(t *testing.T) {
 
 	fallida := usuarioParaAlta(t, dni)
 	fallida.Email = existente.Email // choca con el índice único de email
-	err := r.users.Create(t.Context(), fallida, eventoHeredado(t, fallida.ID))
+	err := r.users.Create(t.Context(), fallida, eventoHeredado(t, fallida.ID), nil)
 	if !errors.Is(err, domain.ErrDuplicateUser) {
 		t.Fatalf("error = %v, se esperaba ErrDuplicateUser", err)
 	}
@@ -1107,7 +1107,7 @@ func TestIntegracionUnAltaQueFallaNoConsumeLaSancion(t *testing.T) {
 	}
 
 	reintento := usuarioParaAlta(t, dni)
-	if err := r.users.Create(t.Context(), reintento, eventoHeredado(t, reintento.ID)); err != nil {
+	if err := r.users.Create(t.Context(), reintento, eventoHeredado(t, reintento.ID), nil); err != nil {
 		t.Fatalf("el reintento falló: %v", err)
 	}
 	if reintento.AccountStatus != domain.AccountStatusUnderReview {
@@ -1123,7 +1123,7 @@ func TestIntegracionAltaSinEventoParaLaRevisionHeredadaSeDeshace(t *testing.T) {
 	sembrarSancion(t, r.db, dni, domain.AccountStatusUnderReview, -30, 2, time.Hour)
 	u := usuarioParaAlta(t, dni)
 
-	if err := r.users.Create(t.Context(), u, domain.OutboxEvent{}); err == nil {
+	if err := r.users.Create(t.Context(), u, domain.OutboxEvent{}, nil); err == nil {
 		t.Fatal("se esperaba un error sin el evento de la revisión heredada")
 	}
 
@@ -1148,7 +1148,7 @@ func TestIntegracionAltaSiFallaElOutboxNoQuedaNada(t *testing.T) {
 		t.Fatalf("no se pudo sembrar el evento que choca: %v", err)
 	}
 
-	if err := r.users.Create(t.Context(), u, evt); err == nil {
+	if err := r.users.Create(t.Context(), u, evt, nil); err == nil {
 		t.Fatal("se esperaba un error al fallar el outbox")
 	}
 
@@ -1176,7 +1176,7 @@ func TestIntegracionDosAltasConcurrentesConElMismoDNIHeredanUnaVez(t *testing.T)
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			resultados <- r.users.Create(t.Context(), u, evt)
+			resultados <- r.users.Create(t.Context(), u, evt, nil)
 		}()
 	}
 	wg.Wait()
@@ -1220,7 +1220,7 @@ func TestIntegracionBajaYRegistroPosteriorDeLaMismaPersona(t *testing.T) {
 	}
 
 	nuevo := usuarioParaAlta(t, u.DNIHashed)
-	if err := r.users.Create(t.Context(), nuevo, eventoHeredado(t, nuevo.ID)); err != nil {
+	if err := r.users.Create(t.Context(), nuevo, eventoHeredado(t, nuevo.ID), nil); err != nil {
 		t.Fatalf("el registro posterior falló: %v", err)
 	}
 

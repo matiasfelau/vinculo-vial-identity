@@ -117,7 +117,7 @@ func TestNewUserRepositoryRechazaConexionNula(t *testing.T) {
 func TestCreateRechazaUsuarioNulo(t *testing.T) {
 	r := &UserRepository{}
 
-	if err := r.Create(t.Context(), nil, domain.OutboxEvent{}); err == nil {
+	if err := r.Create(t.Context(), nil, domain.OutboxEvent{}, nil); err == nil {
 		t.Error("se esperaba un error al crear un usuario nulo")
 	}
 }

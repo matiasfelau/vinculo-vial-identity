@@ -6,6 +6,7 @@
 package config
 
 import (
+	"encoding/base64"
 	"fmt"
 	"log/slog"
 	"net/url"
@@ -45,6 +46,7 @@ type Config struct {
 	Token      TokenConfig
 	Renaper    RenaperConfig
 	Outbox     OutboxConfig
+	Email      EmailConfig
 }
 
 // HTTPConfig son los parámetros del servidor.
@@ -65,15 +67,15 @@ type HTTPConfig struct {
 // Addr es la dirección de escucha.
 func (c HTTPConfig) Addr() string { return fmt.Sprintf(":%d", c.Port) }
 
-// InternalConfig son los parámetros del router interno de US-04 (rutas
-// /internal/*, como POST /internal/verify-ownership). Se sirve en un
+// InternalConfig son los parámetros del router interno (rutas /internal/*,
+// hoy POST /internal/audit/dni). Se sirve en un
 // *http.Server separado del público, en su propio puerto, que ni Kong ni el
 // docker-compose de este servicio publican fuera de la red interna.
 //
 // Esa separación de puerto es una condición necesaria pero no suficiente:
 // dentro de la red Docker cualquier contenedor puede alcanzar cualquier
 // puerto de otro. ServiceToken es la segunda capa —un secreto compartido de
-// servicio a servicio que vinculo-vial-vehicle debe presentar en cada
+// servicio a servicio que el servicio llamador (vinculo-vial-alert) debe presentar en cada
 // petición— y las dos capas son independientes entre sí (ver el comentario
 // de InternalRouterConfig en internal/delivery/http).
 type InternalConfig struct {
@@ -168,6 +170,11 @@ type TokenConfig struct {
 	// RefreshTokenTTL es la vida del Refresh Token opaco. El contrato compartido
 	// fija la variable en días (REFRESH_TOKEN_TTL_DAYS).
 	RefreshTokenTTL time.Duration
+	// SessionMaxLifetime es la vida máxima de una sesión desde el inicio de
+	// sesión con credenciales (US-12): por mucho que el Refresh Token rote, al
+	// pasarla se exige volver a ingresar. REFRESH_TOKEN_TTL_DAYS sigue siendo
+	// la inactividad máxima. Variable: SESSION_MAX_DAYS, en días.
+	SessionMaxLifetime time.Duration
 	// Issuer es el claim `iss` que lleva el Access Token. Kong lo exige para
 	// mapear el token al Consumer correcto antes de validar la firma RS256.
 	Issuer string
@@ -282,9 +289,66 @@ type SanctionConfig struct {
 	SweepBatchSize int
 }
 
+// EmailConfig son los parámetros de la verificación de email del alta y de la
+// recuperación de contraseña (US-13). Los valores por defecto son los del
+// contrato de la etapa 1, salvo la clave, que es obligatoria.
+type EmailConfig struct {
+	// CodeHMACKey es la clave con que se guardan el subject y el código de los
+	// desafíos (EMAIL_CODE_HMAC_KEY: base64 de al menos 32 bytes). Es propia de
+	// este mecanismo y no puede coincidir con ninguna otra clave del servicio:
+	// la genera cmd/genkeys.
+	CodeHMACKey Secret
+	// CodeTTL es la vida del código enviado por email (EMAIL_CODE_TTL_MINUTES).
+	CodeTTL time.Duration
+	// CodeMaxAttempts es el tope de intentos de un código (EMAIL_CODE_MAX_ATTEMPTS).
+	CodeMaxAttempts int
+	// CodeResendInterval es el mínimo entre dos envíos al mismo subject
+	// (EMAIL_CODE_RESEND_SECONDS). Tiene que coincidir con el del Frontend, que lo
+	// usa en la cuenta regresiva del botón "Reenviar".
+	CodeResendInterval time.Duration
+	// CodeMaxSendsPerDay es el tope de envíos por subject en una ventana de 24 h
+	// (EMAIL_CODE_MAX_SENDS_PER_DAY).
+	CodeMaxSendsPerDay int
+	// VerificationGrantTTL es la vida del token de verificación de email que
+	// consume el alta (EMAIL_VERIFICATION_GRANT_TTL_MINUTES).
+	VerificationGrantTTL time.Duration
+	// ResetGrantTTL es la vida del reset_token de la recuperación
+	// (PASSWORD_RESET_GRANT_TTL_MINUTES).
+	ResetGrantTTL time.Duration
+	// ResetMaxIdentityAttempts es el tope de rechazos de identidad de un
+	// reset_token (PASSWORD_RESET_MAX_IDENTITY_ATTEMPTS).
+	ResetMaxIdentityAttempts int
+	// RequireVerificationOnSignup exige el token de verificación de email en el
+	// alta (SIGNUP_REQUIRE_EMAIL_VERIFICATION). En false existe solo para no romper
+	// el alta en desarrollo mientras el Frontend no lo envía: validate() lo
+	// rechaza con APP_ENV=production.
+	RequireVerificationOnSignup bool
+	// SweepInterval es cada cuánto corre el barrido que borra los desafíos vencidos
+	// (EMAIL_CHALLENGE_SWEEP_INTERVAL).
+	SweepInterval time.Duration
+	// SweepBatchSize acota cuántos desafíos borra cada sentencia del barrido
+	// (EMAIL_CHALLENGE_SWEEP_BATCH_SIZE).
+	SweepBatchSize int
+}
+
 // Valores por defecto pensados para que el entorno local levante sin definir
 // más que los secretos.
 const (
+	// Los valores de US-13 son los del contrato de la etapa 1. El barrido sigue la
+	// misma decisión operativa que el de sanciones: borrar con una hora de demora
+	// no cambia nada.
+	defaultEmailCodeTTLMinutes             = 10
+	defaultEmailCodeMaxAttempts            = 5
+	defaultEmailCodeResendSeconds          = 60
+	defaultEmailCodeMaxSendsPerDay         = 5
+	defaultEmailVerificationGrantMinutes   = 30
+	defaultPasswordResetGrantMinutes       = 15
+	defaultPasswordResetMaxIdentityRetries = 3
+	defaultEmailChallengeSweepInterval     = time.Hour
+	defaultEmailChallengeSweepBatchSize    = 500
+	// minEmailCodeHMACKeyLength es el mínimo de la clave de los desafíos: el
+	// tamaño de salida de SHA-256.
+	minEmailCodeHMACKeyLength = 32
 	// defaultSanctionCarryoverDays es el contrato de US-11: tres años.
 	defaultSanctionCarryoverDays = 1095
 	// defaultSanctionSweepInterval y defaultSanctionSweepBatchSize son una
@@ -365,6 +429,9 @@ const (
 	// asume estos mismos TTL del lado de la verificación.
 	defaultAccessTokenTTLMinutes = 15
 	defaultRefreshTokenTTLDays   = 30
+	// defaultSessionMaxDays es la vida máxima de la sesión que fija el
+	// contrato de US-12.
+	defaultSessionMaxDays = 90
 	// defaultJWTIssuer es el nombre de este servicio en el claim `iss`, el que
 	// Kong espera cuando no se sobrescribe con JWT_ISSUER.
 	defaultJWTIssuer = "vinculo-vial-identity"
@@ -452,9 +519,10 @@ func Load() (*Config, error) {
 		},
 
 		Token: TokenConfig{
-			AccessTokenTTL:  time.Duration(r.integer("ACCESS_TOKEN_TTL_MINUTES", defaultAccessTokenTTLMinutes)) * time.Minute,
-			RefreshTokenTTL: time.Duration(r.integer("REFRESH_TOKEN_TTL_DAYS", defaultRefreshTokenTTLDays)) * 24 * time.Hour,
-			Issuer:          r.str("JWT_ISSUER", defaultJWTIssuer),
+			AccessTokenTTL:     time.Duration(r.integer("ACCESS_TOKEN_TTL_MINUTES", defaultAccessTokenTTLMinutes)) * time.Minute,
+			RefreshTokenTTL:    time.Duration(r.integer("REFRESH_TOKEN_TTL_DAYS", defaultRefreshTokenTTLDays)) * 24 * time.Hour,
+			SessionMaxLifetime: time.Duration(r.integer("SESSION_MAX_DAYS", defaultSessionMaxDays)) * 24 * time.Hour,
+			Issuer:             r.str("JWT_ISSUER", defaultJWTIssuer),
 		},
 
 		Renaper: RenaperConfig{
@@ -467,6 +535,20 @@ func Load() (*Config, error) {
 		Outbox: OutboxConfig{
 			WorkerInterval:  r.duration("OUTBOX_WORKER_INTERVAL", defaultOutboxWorkerInterval),
 			WorkerBatchSize: r.integer("OUTBOX_WORKER_BATCH_SIZE", defaultOutboxWorkerBatchSize),
+		},
+
+		Email: EmailConfig{
+			CodeHMACKey:                 Secret(r.required("EMAIL_CODE_HMAC_KEY")),
+			CodeTTL:                     time.Duration(r.integer("EMAIL_CODE_TTL_MINUTES", defaultEmailCodeTTLMinutes)) * time.Minute,
+			CodeMaxAttempts:             r.integer("EMAIL_CODE_MAX_ATTEMPTS", defaultEmailCodeMaxAttempts),
+			CodeResendInterval:          time.Duration(r.integer("EMAIL_CODE_RESEND_SECONDS", defaultEmailCodeResendSeconds)) * time.Second,
+			CodeMaxSendsPerDay:          r.integer("EMAIL_CODE_MAX_SENDS_PER_DAY", defaultEmailCodeMaxSendsPerDay),
+			VerificationGrantTTL:        time.Duration(r.integer("EMAIL_VERIFICATION_GRANT_TTL_MINUTES", defaultEmailVerificationGrantMinutes)) * time.Minute,
+			ResetGrantTTL:               time.Duration(r.integer("PASSWORD_RESET_GRANT_TTL_MINUTES", defaultPasswordResetGrantMinutes)) * time.Minute,
+			ResetMaxIdentityAttempts:    r.integer("PASSWORD_RESET_MAX_IDENTITY_ATTEMPTS", defaultPasswordResetMaxIdentityRetries),
+			RequireVerificationOnSignup: r.boolean("SIGNUP_REQUIRE_EMAIL_VERIFICATION", true),
+			SweepInterval:               r.duration("EMAIL_CHALLENGE_SWEEP_INTERVAL", defaultEmailChallengeSweepInterval),
+			SweepBatchSize:              r.integer("EMAIL_CHALLENGE_SWEEP_BATCH_SIZE", defaultEmailChallengeSweepBatchSize),
 		},
 	}
 
@@ -558,6 +640,9 @@ func (c *Config) validate() error {
 	if c.Token.RefreshTokenTTL <= 0 {
 		r.fail("config: REFRESH_TOKEN_TTL_DAYS debe ser positivo")
 	}
+	if c.Token.SessionMaxLifetime <= 0 {
+		r.fail("config: SESSION_MAX_DAYS debe ser positivo")
+	}
 
 	if c.Renaper.Timeout <= 0 {
 		r.fail("config: RENAPER_TIMEOUT debe ser positivo")
@@ -578,6 +663,8 @@ func (c *Config) validate() error {
 	if c.Outbox.WorkerBatchSize < 1 {
 		r.fail("config: OUTBOX_WORKER_BATCH_SIZE debe ser al menos 1")
 	}
+
+	c.validateEmail(r)
 
 	if c.Consumer.Prefetch < 1 || c.Consumer.Prefetch > maxConsumerPrefetch {
 		r.fail("config: RABBITMQ_PREFETCH debe estar entre 1 y %d, se recibió %d", maxConsumerPrefetch, c.Consumer.Prefetch)
@@ -618,6 +705,62 @@ func (c *Config) validate() error {
 	}
 
 	return r.err()
+}
+
+// validateEmail valida los parámetros de US-13. La clave de los desafíos es la
+// única que tiene una regla de independencia: una clave por mecanismo, nunca
+// reutilizada, así que no puede ser igual a AES_KEY ni a HMAC_SECRET.
+func (c *Config) validateEmail(r *reader) {
+	e := c.Email
+
+	key := e.CodeHMACKey.Reveal()
+	if raw, err := base64.StdEncoding.DecodeString(key); err != nil {
+		if key != "" { // vacía ya la informó r.required.
+			r.fail("config: EMAIL_CODE_HMAC_KEY no es base64 estándar válido")
+		}
+	} else {
+		if len(raw) < minEmailCodeHMACKeyLength {
+			r.fail("config: EMAIL_CODE_HMAC_KEY mide %d bytes, se requieren al menos %d", len(raw), minEmailCodeHMACKeyLength)
+		}
+		clear(raw)
+		if key == c.Crypto.AESKey.Reveal() || key == c.Crypto.HMACSecret.Reveal() {
+			r.fail("config: EMAIL_CODE_HMAC_KEY no puede reutilizar AES_KEY ni HMAC_SECRET: una clave por mecanismo")
+		}
+	}
+
+	if e.CodeTTL <= 0 {
+		r.fail("config: EMAIL_CODE_TTL_MINUTES debe ser positivo")
+	}
+	if e.CodeMaxAttempts < 1 {
+		r.fail("config: EMAIL_CODE_MAX_ATTEMPTS debe ser al menos 1, se recibió %d", e.CodeMaxAttempts)
+	}
+	if e.CodeResendInterval <= 0 {
+		r.fail("config: EMAIL_CODE_RESEND_SECONDS debe ser positivo")
+	}
+	if e.CodeMaxSendsPerDay < 1 {
+		r.fail("config: EMAIL_CODE_MAX_SENDS_PER_DAY debe ser al menos 1, se recibió %d", e.CodeMaxSendsPerDay)
+	}
+	if e.VerificationGrantTTL <= 0 {
+		r.fail("config: EMAIL_VERIFICATION_GRANT_TTL_MINUTES debe ser positivo")
+	}
+	if e.ResetGrantTTL <= 0 {
+		r.fail("config: PASSWORD_RESET_GRANT_TTL_MINUTES debe ser positivo")
+	}
+	if e.ResetMaxIdentityAttempts < 1 {
+		r.fail("config: PASSWORD_RESET_MAX_IDENTITY_ATTEMPTS debe ser al menos 1, se recibió %d", e.ResetMaxIdentityAttempts)
+	}
+	if e.SweepInterval <= 0 {
+		r.fail("config: EMAIL_CHALLENGE_SWEEP_INTERVAL debe ser positivo")
+	}
+	if e.SweepBatchSize < 1 {
+		r.fail("config: EMAIL_CHALLENGE_SWEEP_BATCH_SIZE debe ser al menos 1, se recibió %d", e.SweepBatchSize)
+	}
+
+	if c.IsProduction() && !e.RequireVerificationOnSignup {
+		// Sin el token, cualquiera da de alta una cuenta con un email ajeno y esa
+		// cuenta no podría recuperarse nunca. Existe solo para desarrollo.
+		r.fail("config: SIGNUP_REQUIRE_EMAIL_VERIFICATION=false no es admisible con APP_ENV=production")
+	}
 }
 
 // unescapeNewlines revierte el escapado de saltos de línea de un PEM
@@ -672,7 +815,18 @@ func (c *Config) LogValue() slog.Value {
 		slog.Int("argon2_memory_kib", c.Crypto.Argon2MemoryKiB),
 		slog.Duration("access_token_ttl", c.Token.AccessTokenTTL),
 		slog.Duration("refresh_token_ttl", c.Token.RefreshTokenTTL),
+		slog.Duration("session_max_lifetime", c.Token.SessionMaxLifetime),
 		slog.String("jwt_issuer", c.Token.Issuer),
+		slog.Duration("email_code_ttl", c.Email.CodeTTL),
+		slog.Int("email_code_max_attempts", c.Email.CodeMaxAttempts),
+		slog.Duration("email_code_resend_interval", c.Email.CodeResendInterval),
+		slog.Int("email_code_max_sends_per_day", c.Email.CodeMaxSendsPerDay),
+		slog.Duration("email_verification_grant_ttl", c.Email.VerificationGrantTTL),
+		slog.Duration("password_reset_grant_ttl", c.Email.ResetGrantTTL),
+		slog.Int("password_reset_max_identity_attempts", c.Email.ResetMaxIdentityAttempts),
+		slog.Bool("signup_require_email_verification", c.Email.RequireVerificationOnSignup),
+		slog.Duration("email_challenge_sweep_interval", c.Email.SweepInterval),
+		slog.Int("email_challenge_sweep_batch_size", c.Email.SweepBatchSize),
 	)
 }
 

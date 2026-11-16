@@ -29,14 +29,16 @@ func routerConDeps(t *testing.T, ready func(context.Context) error, deps *delive
 	t.Helper()
 
 	router, err := delivery.NewRouter(delivery.RouterConfig{
-		SignUp:         &serviceMock{userID: uuid.New()},
-		SignIn:         &signInServiceMock{},
-		Refresh:        &refreshServiceMock{},
-		Logout:         &logoutServiceMock{},
-		DeleteAccount:  &deleteAccountServiceMock{},
-		Logger:         slog.New(slog.NewTextHandler(&strings.Builder{}, nil)),
-		ReadinessCheck: ready,
-		DepsHealth:     deps,
+		SignUp:            &serviceMock{userID: uuid.New()},
+		SignIn:            &signInServiceMock{},
+		Refresh:           &refreshServiceMock{},
+		Logout:            &logoutServiceMock{},
+		DeleteAccount:     &deleteAccountServiceMock{},
+		EmailVerification: &emailVerificationServiceMock{},
+		PasswordReset:     &passwordResetServiceMock{},
+		Logger:            slog.New(slog.NewTextHandler(&strings.Builder{}, nil)),
+		ReadinessCheck:    ready,
+		DepsHealth:        deps,
 	})
 	if err != nil {
 		t.Fatalf("no se pudo armar el router: %v", err)

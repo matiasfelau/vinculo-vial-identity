@@ -24,9 +24,13 @@ func vigenteSession() *domain.Session {
 		RefreshTokenHash: "hash-de:" + validRefreshToken,
 		IsRevoked:        false,
 		ExpiresAt:        time.Date(2026, 9, 18, 10, 0, 0, 0, time.UTC),
+		StartedAt:        time.Date(2026, 6, 20, 10, 0, 0, 0, time.UTC),
 		CreatedAt:        time.Date(2026, 8, 19, 10, 0, 0, 0, time.UTC),
 	}
 }
+
+// maxLifetime es la vida máxima de las pruebas: SESSION_MAX_DAYS por defecto.
+const maxLifetime = 90 * 24 * time.Hour
 
 // harness agrupa los dos dobles de RefreshService y el logger, para que cada
 // test arme la vía feliz completa y degrade solo lo que le interesa
@@ -57,10 +61,11 @@ func (h *harness) service(t *testing.T) *session.RefreshService {
 	t.Helper()
 
 	svc, err := session.NewRefreshService(session.RefreshDeps{
-		Sessions: h.sessions,
-		Tokens:   h.tokens,
-		Logger:   slog.New(slog.NewTextHandler(h.logs, &slog.HandlerOptions{Level: slog.LevelDebug})),
-		Now:      func() time.Time { return h.now },
+		Sessions:    h.sessions,
+		Tokens:      h.tokens,
+		Logger:      slog.New(slog.NewTextHandler(h.logs, &slog.HandlerOptions{Level: slog.LevelDebug})),
+		MaxLifetime: maxLifetime,
+		Now:         func() time.Time { return h.now },
 	})
 	if err != nil {
 		t.Fatalf("no se pudo construir el servicio: %v", err)
@@ -105,6 +110,83 @@ func TestRefreshRotaLaSesionVigente(t *testing.T) {
 	}
 	if !rotated.ExpiresAt.Equal(h.tokens.refreshExpiresAt) {
 		t.Errorf("session.ExpiresAt = %v, se esperaba %v", rotated.ExpiresAt, h.tokens.refreshExpiresAt)
+	}
+	if !rotated.StartedAt.Equal(h.sessions.found.StartedAt) {
+		t.Errorf("session.StartedAt = %v, la rotación debe copiar el de la sesión anterior (%v)", rotated.StartedAt, h.sessions.found.StartedAt)
+	}
+}
+
+// La vida máxima se cuenta desde el login, no desde la última rotación: justo
+// en el límite todavía rota, y un segundo después ya no.
+func TestRefreshEnElLimiteDeLaVidaMaximaTodaviaRota(t *testing.T) {
+	h := newHarness()
+	h.sessions.found.StartedAt = h.now.Add(-maxLifetime)
+	svc := h.service(t)
+
+	if _, _, err := svc.Refresh(context.Background(), validRefreshToken); err != nil {
+		t.Fatalf("error inesperado: %v", err)
+	}
+	if h.sessions.rotateCallCount() != 1 {
+		t.Errorf("RotateSession se llamó %d veces, se esperaba 1", h.sessions.rotateCallCount())
+	}
+}
+
+func TestRefreshConLaVidaMaximaSuperadaResponde401SinDefensaActiva(t *testing.T) {
+	casos := map[string]bool{
+		"sesión vigente":              false,
+		"sesión ya rotada (revocada)": true,
+	}
+
+	for nombre, revocada := range casos {
+		t.Run(nombre, func(t *testing.T) {
+			h := newHarness()
+			h.sessions.found.StartedAt = h.now.Add(-maxLifetime - time.Second)
+			h.sessions.found.IsRevoked = revocada
+			svc := h.service(t)
+
+			access, refresh, err := svc.Refresh(context.Background(), validRefreshToken)
+
+			if !errors.Is(err, domain.ErrSessionExpired) {
+				t.Errorf("error = %v, se esperaba ErrSessionExpired (el mismo que una sesión vencida)", err)
+			}
+			if access != "" || refresh != "" {
+				t.Error("una sesión más allá de su vida máxima no debe emitir tokens")
+			}
+			if h.tokens.accessCalls != 0 {
+				t.Error("no debe emitir un access token")
+			}
+			if h.sessions.rotateCallCount() != 0 {
+				t.Error("no debe rotar")
+			}
+			if h.sessions.revokeAllCallCount() != 0 {
+				t.Error("la vida máxima no dispara la Defensa Activa")
+			}
+
+			logs := h.logs.String()
+			for _, esperado := range []string{"WARN", "intento de refresh rechazado", "vida máxima", h.sessions.found.UserID.String()} {
+				if !strings.Contains(logs, esperado) {
+					t.Errorf("el log debería incluir %q: %s", esperado, logs)
+				}
+			}
+		})
+	}
+}
+
+// Una sesión cuya inactividad venció se informa como tal, aunque además haya
+// superado su vida máxima: es el primer control y no cambia.
+func TestRefreshDistingueLaInactividadDeLaVidaMaximaEnElLog(t *testing.T) {
+	h := newHarness()
+	h.sessions.found.ExpiresAt = h.now.Add(-time.Second)
+	h.sessions.found.StartedAt = h.now.Add(-maxLifetime - time.Hour)
+	svc := h.service(t)
+
+	_, _, err := svc.Refresh(context.Background(), validRefreshToken)
+
+	if !errors.Is(err, domain.ErrSessionExpired) {
+		t.Fatalf("error = %v, se esperaba ErrSessionExpired", err)
+	}
+	if !strings.Contains(h.logs.String(), "sesión expirada") {
+		t.Errorf("el log debería decir sesión expirada: %s", h.logs.String())
 	}
 }
 
@@ -388,13 +470,16 @@ func TestRefreshPropagaElErrorDeBusquedaSinTraducirlo(t *testing.T) {
 func TestNewRefreshServiceValidaLasDependencias(t *testing.T) {
 	h := newHarness()
 	base := session.RefreshDeps{
-		Sessions: h.sessions,
-		Tokens:   h.tokens,
+		Sessions:    h.sessions,
+		Tokens:      h.tokens,
+		MaxLifetime: maxLifetime,
 	}
 
 	cases := map[string]func(*session.RefreshDeps){
-		"sin sessions": func(d *session.RefreshDeps) { d.Sessions = nil },
-		"sin tokens":   func(d *session.RefreshDeps) { d.Tokens = nil },
+		"sin sessions":         func(d *session.RefreshDeps) { d.Sessions = nil },
+		"sin tokens":           func(d *session.RefreshDeps) { d.Tokens = nil },
+		"sin vida máxima":      func(d *session.RefreshDeps) { d.MaxLifetime = 0 },
+		"vida máxima negativa": func(d *session.RefreshDeps) { d.MaxLifetime = -time.Hour },
 	}
 
 	for name, degradar := range cases {

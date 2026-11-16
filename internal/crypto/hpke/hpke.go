@@ -160,8 +160,8 @@ func (d *Decryptor) Decrypt(ephemeralPublicKey, ciphertext []byte) ([]byte, erro
 // un único blob —`enc` seguido del ciphertext— en lugar de las dos piezas
 // separadas que reciben /signup y /signin.
 //
-// Es el formato de dni_enc en US-04: el contrato compartido lo transporta
-// como un solo campo, así que la separación ocurre acá, usando encLen —fijo
+// Es el formato de los criptogramas que llegan como un solo campo, así que
+// la separación ocurre acá, usando encLen —fijo
 // para la suite configurada— para partir el prefijo del encapsulado del
 // resto, que es el ciphertext. Comparte con Decrypt las mismas dos
 // categorías de error: un blob demasiado corto para contener siquiera un
