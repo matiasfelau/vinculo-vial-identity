@@ -1076,6 +1076,44 @@ docker run --rm -v "$PWD:/src" -w /src semgrep/semgrep:1.184.0 \
 `diff-cover` compara contra el árbol de trabajo, así que los archivos nuevos
 tienen que estar al menos con `git add -N` para que cuenten.
 
+### Pruebas de integración y cobertura total
+
+Las `TestIntegracion*` (build tag `integration`) corren contra un PostgreSQL
+real, cada una en un esquema propio que se borra al terminar. Hay dos paquetes:
+
+- `internal/repository/postgres`: tablas, constraints y concurrencia.
+- `cmd/api`: el arranque completo del servicio con `run(ctx, cfg)`. Levanta los
+  tres routers (público, interno y de administración) con claves generadas en la
+  prueba, comprueba la autenticación de cada uno y que el esquema quede migrado,
+  y verifica el apagado ordenado y el reinicio sobre la misma base. `main` queda
+  en `execute()`, que carga la configuración y espera la señal; el resto del
+  arranque no tiene lógica fuera de `run`.
+
+```bash
+export TEST_DATABASE_URL='postgres://identity:identity@localhost:5432/identity?sslmode=disable'
+go test -tags=integration -count=1 -run Integracion ./internal/repository/postgres/
+go test -tags=integration -count=1 -run Integracion ./cmd/api/   # de a un paquete: comparten la base
+```
+
+La cobertura total del repositorio se mide con las pruebas unitarias y las de
+integración en un único reporte, con `-coverpkg=./...` para que cada paquete de
+prueba mida todo el módulo:
+
+```bash
+go test -count=1 -covermode=atomic -coverpkg=./... -coverprofile=coverage/unit.out ./...
+go test -tags=integration -count=1 -run Integracion -covermode=atomic -coverpkg=./...   -coverprofile=coverage/integration_pg.out ./internal/repository/postgres/
+go test -tags=integration -count=1 -run Integracion -covermode=atomic -coverpkg=./...   -coverprofile=coverage/integration_api.out ./cmd/api/
+gocovmerge coverage/unit.out coverage/integration_pg.out coverage/integration_api.out > coverage/total.out
+go tool cover -func=coverage/total.out | tail -1
+```
+
+Con ese reporte el repositorio está en **90,3 %** de las sentencias (88,7 % de
+las líneas en el XML de Cobertura), contra 84,0 % (81,1 %) antes de la rama
+`chore/cobertura-85`. No se excluye ningún archivo: hoy no hay código generado
+en el repo, y el código escrito a mano cuenta entero. El `main` de `cmd/api` y
+el de `cmd/genkeys` siguen en 0 %: son las pocas líneas que llaman a
+`os.Exit`.
+
 ## Arquitectura
 
 Clean Architecture. Los puertos se declaran en `domain` y las implementaciones
