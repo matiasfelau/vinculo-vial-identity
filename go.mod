@@ -1,6 +1,6 @@
 module github.com/matiasfelau/vinculo-vial-identity
 
-go 1.26.0
+go 1.26.11
 
 require (
 	github.com/cloudflare/circl v1.6.5
