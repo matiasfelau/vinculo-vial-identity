@@ -30,8 +30,13 @@ type userModel struct {
 	// verificación de email quedan en NULL, sin backfill, y no pueden recuperar su
 	// contraseña.
 	EmailVerifiedAt *time.Time `gorm:"column:email_verified_at;type:timestamptz"`
-	CreatedAt       time.Time  `gorm:"column:created_at;type:timestamptz;not null"`
-	UpdatedAt       time.Time  `gorm:"column:updated_at;type:timestamptz;not null"`
+	// UnderReviewSince y LastReportedAt (US-17) son nulables, sin backfill: los
+	// usuarios anteriores quedan en NULL. Los actualiza el consumo de
+	// alert.reported y el desbloqueo.
+	UnderReviewSince *time.Time `gorm:"column:under_review_since;type:timestamptz"`
+	LastReportedAt   *time.Time `gorm:"column:last_reported_at;type:timestamptz"`
+	CreatedAt        time.Time  `gorm:"column:created_at;type:timestamptz;not null"`
+	UpdatedAt        time.Time  `gorm:"column:updated_at;type:timestamptz;not null"`
 }
 
 // TableName fija el nombre de la tabla en lugar de depender de la pluralización

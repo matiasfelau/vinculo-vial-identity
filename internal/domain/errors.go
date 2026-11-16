@@ -139,6 +139,18 @@ var (
 	// persistencia (ej. una violación de constraint, ya colapsada en
 	// ErrDuplicateUser) no es este caso: 502 no aplica a la base.
 	ErrDatabaseUnavailable = errors.New("domain: la base de datos no está disponible")
+
+	// ErrNotUnderReview indica que se intentó desbloquear una cuenta que no está
+	// en UNDER_REVIEW (US-17). → 409 NOT_UNDER_REVIEW.
+	ErrNotUnderReview = errors.New("domain: la cuenta no está en revisión")
+
+	// ErrInvalidReviewDecision indica que el motivo o el operador de un
+	// desbloqueo (US-17) no cumplen los largos del contrato. → 400 INVALID_BODY.
+	ErrInvalidReviewDecision = errors.New("domain: decisión de revisión inválida")
+
+	// ErrInvalidCursor indica que el cursor del listado de casos (US-17) no es
+	// uno que haya devuelto el servicio. → 400 INVALID_QUERY.
+	ErrInvalidCursor = errors.New("domain: cursor inválido")
 )
 
 func invalidUser(reason string) error {
