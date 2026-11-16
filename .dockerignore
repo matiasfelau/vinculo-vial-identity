@@ -23,3 +23,5 @@ CLAUDE.md
 
 # CI/CD: no forma parte del contexto que necesita el binario.
 .github
+
+coverage/
