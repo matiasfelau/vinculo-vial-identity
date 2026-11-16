@@ -387,6 +387,8 @@ func TestSignUpMapeaLosErroresDeDominio(t *testing.T) {
 	}{
 		"datos inválidos":         {domain.ErrInvalidInput, http.StatusBadRequest, "datos_invalidos"},
 		"identidad no verificada": {domain.ErrIdentityNotVerified, http.StatusBadRequest, "identidad_no_verificada"},
+		"términos no aceptados":   {domain.ErrTermsNotAccepted, http.StatusBadRequest, "TERMS_NOT_ACCEPTED"},
+		"email no verificado":     {domain.ErrEmailNotVerified, http.StatusBadRequest, "EMAIL_NOT_VERIFIED"},
 		"usuario duplicado":       {domain.ErrDuplicateUser, http.StatusConflict, "registro_no_disponible"},
 		"criptograma mal formado": {domain.ErrMalformedCryptogram, http.StatusBadRequest, "solicitud_invalida"},
 		"criptograma ilegible":    {domain.ErrInvalidCryptogram, http.StatusInternalServerError, "error_interno"},

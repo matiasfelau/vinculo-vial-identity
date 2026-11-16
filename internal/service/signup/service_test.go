@@ -91,8 +91,11 @@ func newHarness(t *testing.T, tune ...func(*signup.Deps)) *harness {
 		// Los tests de US-01 no mandan token: la verificación de email se prueba
 		// aparte, con RequireEmailVerification en true.
 		RequireEmailVerification: false,
-		Logger:                   slog.New(slog.NewTextHandler(h.logs, &slog.HandlerOptions{Level: slog.LevelDebug})),
-		Now:                      func() time.Time { return fijo },
+		// Lo mismo con los términos (US-19): se prueban aparte, con RequireTerms.
+		TermsCurrentVersion: versionVigente,
+		RequireTerms:        false,
+		Logger:              slog.New(slog.NewTextHandler(h.logs, &slog.HandlerOptions{Level: slog.LevelDebug})),
+		Now:                 func() time.Time { return fijo },
 	}
 	for _, f := range tune {
 		f(&deps)
@@ -455,6 +458,8 @@ func TestNewAplicaValoresPorDefecto(t *testing.T) {
 		Users:      &repositoryMock{},
 		Challenges: emailchallenges.New(),
 		Codec:      codec,
+
+		TermsCurrentVersion: versionVigente,
 	})
 	if err != nil {
 		t.Fatalf("error inesperado: %v", err)

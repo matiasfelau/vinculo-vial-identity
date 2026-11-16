@@ -48,6 +48,22 @@ type Config struct {
 	Renaper    RenaperConfig
 	Outbox     OutboxConfig
 	Email      EmailConfig
+	Terms      TermsConfig
+}
+
+// TermsConfig son los parámetros de la aceptación de los Términos y Condiciones
+// en el alta (US-19).
+type TermsConfig struct {
+	// CurrentVersion es la versión vigente del documento (TERMS_CURRENT_VERSION).
+	// El alta solo la acepta si coincide exactamente, y es lo que se guarda en
+	// users.terms_version (varchar(16)). Tiene que coincidir con la que lleva el
+	// Frontend en TERMS_VERSION.
+	CurrentVersion string
+	// RequireOnSignup exige que el alta traiga la versión vigente
+	// (SIGNUP_REQUIRE_TERMS). En false existe solo para no romper el alta entre el
+	// merge de este servicio y el del Frontend: validate() lo rechaza con
+	// APP_ENV=production.
+	RequireOnSignup bool
 }
 
 // HTTPConfig son los parámetros del servidor.
@@ -370,6 +386,10 @@ const (
 	// minEmailCodeHMACKeyLength es el mínimo de la clave de los desafíos: el
 	// tamaño de salida de SHA-256.
 	minEmailCodeHMACKeyLength = 32
+	// defaultTermsCurrentVersion es la versión del texto que fija el contrato de
+	// US-19. maxTermsVersionLength es el largo de la columna terms_version.
+	defaultTermsCurrentVersion = "1.0"
+	maxTermsVersionLength      = 16
 	// defaultSanctionCarryoverDays es el contrato de US-11: tres años.
 	defaultSanctionCarryoverDays = 1095
 	// defaultSanctionSweepInterval y defaultSanctionSweepBatchSize son una
@@ -580,6 +600,11 @@ func Load() (*Config, error) {
 			SweepInterval:               r.duration("EMAIL_CHALLENGE_SWEEP_INTERVAL", defaultEmailChallengeSweepInterval),
 			SweepBatchSize:              r.integer("EMAIL_CHALLENGE_SWEEP_BATCH_SIZE", defaultEmailChallengeSweepBatchSize),
 		},
+
+		Terms: TermsConfig{
+			CurrentVersion:  r.str("TERMS_CURRENT_VERSION", defaultTermsCurrentVersion),
+			RequireOnSignup: r.boolean("SIGNUP_REQUIRE_TERMS", true),
+		},
 	}
 
 	cfg.LogLevel = parseLevel(r, r.str("LOG_LEVEL", "info"))
@@ -696,6 +721,7 @@ func (c *Config) validate() error {
 	}
 
 	c.validateEmail(r)
+	c.validateTerms(r)
 
 	if c.Consumer.Prefetch < 1 || c.Consumer.Prefetch > maxConsumerPrefetch {
 		r.fail("config: RABBITMQ_PREFETCH debe estar entre 1 y %d, se recibió %d", maxConsumerPrefetch, c.Consumer.Prefetch)
@@ -820,6 +846,25 @@ func (c *Config) validateEmail(r *reader) {
 	}
 }
 
+// validateTerms valida los parámetros de US-19.
+func (c *Config) validateTerms(r *reader) {
+	t := c.Terms
+
+	// Una variable vacía o en blanco no llega acá vacía: el lector la reemplaza por
+	// el default.
+	if len(t.CurrentVersion) > maxTermsVersionLength {
+		r.fail("config: TERMS_CURRENT_VERSION mide %d caracteres, el máximo es %d (largo de users.terms_version)",
+			len(t.CurrentVersion), maxTermsVersionLength)
+	}
+
+	if c.IsProduction() && !t.RequireOnSignup {
+		// Sin el campo, el alta no deja consentimiento registrado (art. 5 de la Ley
+		// 25.326). Existe solo para la transición entre los merges de Identity y del
+		// Frontend.
+		r.fail("config: SIGNUP_REQUIRE_TERMS=false no es admisible con APP_ENV=production")
+	}
+}
+
 // unescapeNewlines revierte el escapado de saltos de línea de un PEM
 // almacenado en una sola línea de .env: "\n" literal (barra invertida + ene)
 // vuelve a ser un salto de línea real. El parser de .env de este servicio no
@@ -884,6 +929,8 @@ func (c *Config) LogValue() slog.Value {
 		slog.Duration("password_reset_grant_ttl", c.Email.ResetGrantTTL),
 		slog.Int("password_reset_max_identity_attempts", c.Email.ResetMaxIdentityAttempts),
 		slog.Bool("signup_require_email_verification", c.Email.RequireVerificationOnSignup),
+		slog.String("terms_current_version", c.Terms.CurrentVersion),
+		slog.Bool("signup_require_terms", c.Terms.RequireOnSignup),
 		slog.Duration("email_challenge_sweep_interval", c.Email.SweepInterval),
 		slog.Int("email_challenge_sweep_batch_size", c.Email.SweepBatchSize),
 	)

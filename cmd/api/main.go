@@ -279,6 +279,10 @@ func run() error {
 		logger.Warn("SIGNUP_REQUIRE_EMAIL_VERIFICATION=false: el alta no exige verificar el email; las cuentas nuevas sin token no podrán recuperar su contraseña. Solo para desarrollo")
 	}
 
+	if !cfg.Terms.RequireOnSignup {
+		logger.Warn("SIGNUP_REQUIRE_TERMS=false: el alta no exige aceptar los términos; las cuentas nuevas sin el campo quedan sin consentimiento registrado. Solo para desarrollo")
+	}
+
 	signUpService, err := signup.New(signup.Deps{
 		Decryptor:                decryptor,
 		Indexer:                  indexer,
@@ -289,6 +293,8 @@ func run() error {
 		Challenges:               emailChallenges,
 		Codec:                    emailCodec,
 		RequireEmailVerification: cfg.Email.RequireVerificationOnSignup,
+		TermsCurrentVersion:      cfg.Terms.CurrentVersion,
+		RequireTerms:             cfg.Terms.RequireOnSignup,
 		Logger:                   logger,
 	})
 	if err != nil {

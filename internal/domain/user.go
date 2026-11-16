@@ -53,8 +53,23 @@ type User struct {
 	// las cuentas que nunca lo verificaron: solo una cuenta con este campo no
 	// nulo puede recuperar su contraseña.
 	EmailVerifiedAt *time.Time
+	// TermsVersion y TermsAcceptedAt (US-19) son la versión de los Términos y
+	// Condiciones que el usuario aceptó en el alta y cuándo: el consentimiento
+	// registrado que exige el art. 5 de la Ley 25.326. Quedan vacíos (nil) en las
+	// cuentas anteriores a US-19 y en las dadas de alta con SIGNUP_REQUIRE_TERMS=false
+	// sin el campo; ahí no hay consentimiento registrado.
+	TermsVersion    string
+	TermsAcceptedAt *time.Time
 	CreatedAt       time.Time
 	UpdatedAt       time.Time
+}
+
+// AcceptTerms registra que el usuario aceptó esa versión de los términos en ese
+// instante.
+func (u *User) AcceptTerms(version string, at time.Time) {
+	accepted := at.UTC()
+	u.TermsVersion = version
+	u.TermsAcceptedAt = &accepted
 }
 
 // IsPenalized informa si la cuenta tiene alguna sanción (US-11): está en

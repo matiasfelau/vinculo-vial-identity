@@ -57,3 +57,24 @@ func TestNewUser(t *testing.T) {
 		}
 	})
 }
+
+// US-19: AcceptTerms deja la versión y el instante de la aceptación, en UTC.
+func TestAcceptTerms(t *testing.T) {
+	now := time.Date(2026, 11, 16, 9, 30, 0, 0, time.FixedZone("ART", -3*60*60))
+	u, err := domain.NewUser("vecino@example.com", "$argon2id$hash", "blindindex", "cifrado", now)
+	if err != nil {
+		t.Fatalf("error inesperado: %v", err)
+	}
+	if u.TermsVersion != "" || u.TermsAcceptedAt != nil {
+		t.Fatalf("un usuario nuevo no tiene consentimiento registrado: (%q, %v)", u.TermsVersion, u.TermsAcceptedAt)
+	}
+
+	u.AcceptTerms("1.0", now)
+
+	if u.TermsVersion != "1.0" {
+		t.Errorf("terms version = %q, se esperaba \"1.0\"", u.TermsVersion)
+	}
+	if u.TermsAcceptedAt == nil || !u.TermsAcceptedAt.Equal(now) || u.TermsAcceptedAt.Location() != time.UTC {
+		t.Errorf("terms accepted at = %v, se esperaba %v en UTC", u.TermsAcceptedAt, now)
+	}
+}

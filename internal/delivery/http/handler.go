@@ -382,6 +382,11 @@ func (h *Handler) abortWithDomainError(c *gin.Context, err error) {
 		// servicio, identificado por dni_hashed.
 		h.abort(c, http.StatusUnauthorized, codeInvalidCredentials, "credenciales inválidas", nil)
 
+	case errors.Is(err, domain.ErrTermsNotAccepted):
+		// US-19: el alta sin la versión vigente de los términos. La app lo trata
+		// como "pedile que los acepte de nuevo", así que alcanza con el código.
+		h.abort(c, http.StatusBadRequest, codeTermsNotAccepted, "no se aceptó la versión vigente de los términos y condiciones", nil)
+
 	case errors.Is(err, domain.ErrEmailNotVerified):
 		// US-13: el alta sin un token de verificación de email utilizable. Un solo
 		// código para ausente, vencido, usado o de otro email: decir cuál de los

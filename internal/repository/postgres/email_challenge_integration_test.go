@@ -656,6 +656,74 @@ func TestIntegracionElAltaSinGrantNaceConElEmailSinVerificar(t *testing.T) {
 	}
 }
 
+// US-19: la versión de los términos y su fecha se guardan con el usuario, en la
+// misma inserción del alta, y vuelven al leerlo.
+func TestIntegracionElAltaGuardaLaVersionYLaFechaDeLosTerminos(t *testing.T) {
+	r := nuevosReposDeRecuperacion(t)
+	u := aspiranteAUsuario(t)
+	aceptado := ahoraUTC()
+	u.AcceptTerms("1.0", aceptado)
+
+	if err := r.users.Create(t.Context(), u, domain.OutboxEvent{}, nil); err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+
+	got, err := r.users.FindByID(t.Context(), u.ID)
+	if err != nil {
+		t.Fatalf("FindByID: %v", err)
+	}
+	if got.TermsVersion != "1.0" {
+		t.Errorf("terms_version = %q, se esperaba \"1.0\"", got.TermsVersion)
+	}
+	if got.TermsAcceptedAt == nil || !got.TermsAcceptedAt.Equal(aceptado) {
+		t.Errorf("terms_accepted_at = %v, se esperaba %v", got.TermsAcceptedAt, aceptado)
+	}
+}
+
+// Un alta sin términos —flag apagado— deja las dos columnas en NULL, no en "".
+func TestIntegracionElAltaSinTerminosDejaLasColumnasEnNull(t *testing.T) {
+	r := nuevosReposDeRecuperacion(t)
+	u := aspiranteAUsuario(t)
+
+	if err := r.users.Create(t.Context(), u, domain.OutboxEvent{}, nil); err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+
+	var version *string
+	var aceptados *time.Time
+	row := r.db.Raw("SELECT terms_version, terms_accepted_at FROM users WHERE id = ?", u.ID).Row()
+	if err := row.Scan(&version, &aceptados); err != nil {
+		t.Fatalf("no se pudo leer las columnas: %v", err)
+	}
+	if version != nil || aceptados != nil {
+		t.Errorf("terms = (%v, %v), se esperaba NULL y NULL", version, aceptados)
+	}
+}
+
+// Un alta que falla no deja el consentimiento a medias: el grant inválido deshace
+// la transacción entera, con los términos incluidos.
+func TestIntegracionUnAltaRechazadaNoDejaTerminosGuardados(t *testing.T) {
+	r := nuevosReposDeRecuperacion(t)
+	u := aspiranteAUsuario(t)
+	u.AcceptTerms("1.0", ahoraUTC())
+	grantInexistente := &domain.GrantConsumption{
+		Purpose: domain.EmailChallengePurposeEmailVerification, SubjectHMAC: "no-existe", GrantHash: "no-existe", Now: ahoraUTC(),
+	}
+
+	err := r.users.Create(t.Context(), u, domain.OutboxEvent{}, grantInexistente)
+	if !errors.Is(err, domain.ErrEmailNotVerified) {
+		t.Fatalf("Create = %v, se esperaba ErrEmailNotVerified", err)
+	}
+
+	var cuantos int64
+	if err := r.db.Raw("SELECT count(*) FROM users WHERE id = ?", u.ID).Row().Scan(&cuantos); err != nil {
+		t.Fatalf("no se pudo contar: %v", err)
+	}
+	if cuantos != 0 {
+		t.Errorf("hay %d usuarios, se esperaba 0", cuantos)
+	}
+}
+
 // Un grant que ya no sirve —usado, vencido, de otro email, inexistente— frena el
 // alta entera: ni usuario ni nada consumido.
 func TestIntegracionElAltaRechazaUnGrantQueNoSirveSinCrearElUsuario(t *testing.T) {

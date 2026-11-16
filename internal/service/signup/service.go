@@ -46,6 +46,9 @@ type payload struct {
 	// EmailVerificationToken es el token que emite la confirmación del código
 	// enviado al email (US-13). El alta lo consume; si no se exige, puede faltar.
 	EmailVerificationToken string `json:"email_verification_token"`
+	// TermsVersion es la versión de los Términos y Condiciones que el usuario
+	// aceptó en el formulario (US-19). Si se exige, tiene que ser la vigente.
+	TermsVersion string `json:"terms_version"`
 }
 
 // maxVerificationTokenLength acota el token que se acepta antes de hashearlo: el
@@ -71,7 +74,14 @@ type Deps struct {
 	// el alta mientras el Frontend no lo envía—, pero si llega un token se
 	// valida y se consume igual.
 	RequireEmailVerification bool
-	Logger                   *slog.Logger
+	// TermsCurrentVersion (TERMS_CURRENT_VERSION) es la versión vigente de los
+	// Términos y Condiciones (US-19). Es obligatoria.
+	TermsCurrentVersion string
+	// RequireTerms (SIGNUP_REQUIRE_TERMS) exige que el alta traiga la versión
+	// vigente. En false, el campo puede faltar —solo existe para no romper el alta
+	// mientras el Frontend no lo envía—, pero si llega se valida igual.
+	RequireTerms bool
+	Logger       *slog.Logger
 	// Now permite fijar el reloj en los tests. Si es nil se usa time.Now.
 	Now func() time.Time
 }
@@ -103,6 +113,8 @@ func New(d Deps) (*Service, error) {
 		return nil, errors.New("signup: falta el repositorio de desafíos de email")
 	case d.Codec == nil:
 		return nil, errors.New("signup: falta el codec de códigos de email")
+	case d.TermsCurrentVersion == "":
+		return nil, errors.New("signup: falta la versión vigente de los términos")
 	}
 
 	if d.Logger == nil {
@@ -121,7 +133,12 @@ func New(d Deps) (*Service, error) {
 //
 // Devuelve el identificador del usuario creado y, ante fallos, uno de los
 // centinelas de domain: ErrInvalidCryptogram, ErrInvalidInput,
-// ErrEmailNotVerified, ErrIdentityNotVerified o ErrDuplicateUser.
+// ErrTermsNotAccepted, ErrEmailNotVerified, ErrIdentityNotVerified o
+// ErrDuplicateUser.
+//
+// La versión de los términos (US-19) se comprueba antes de todo lo que cuesta o
+// consume algo —el token de email y RENAPER—, y se guarda, con la fecha, en la
+// misma transacción que crea el usuario.
 //
 // El token de verificación de email (US-13) se valida antes de consultar RENAPER
 // y se consume en la misma transacción que crea el usuario: un alta que falla no
@@ -174,6 +191,14 @@ func (s *Service) SignUp(ctx context.Context, ephemeralPublicKey, ciphertext []b
 		return uuid.Nil, err
 	}
 
+	// Los términos se miran primero entre los chequeos que no son de formato: es
+	// una comparación en memoria, y rechazarlos no gasta ni el token de email ni
+	// una consulta a RENAPER.
+	acceptTerms, err := s.termsAcceptance(p.TermsVersion)
+	if err != nil {
+		return uuid.Nil, err
+	}
+
 	// El token de verificación se mira antes de RENAPER, por el mismo motivo que
 	// la validación local: no se gasta una consulta externa en un alta que no
 	// puede terminar.
@@ -222,6 +247,9 @@ func (s *Service) SignUp(ctx context.Context, ephemeralPublicKey, ciphertext []b
 		verifiedAt := user.CreatedAt
 		user.EmailVerifiedAt = &verifiedAt
 	}
+	if acceptTerms {
+		user.AcceptTerms(p.TermsVersion, user.CreatedAt)
+	}
 
 	// Si el mismo DNI fue dado de baja con una sanción vigente (US-11), el
 	// repositorio hace que la cuenta la herede y, si queda en revisión, persiste
@@ -244,6 +272,25 @@ func (s *Service) SignUp(ctx context.Context, ephemeralPublicKey, ciphertext []b
 	)
 
 	return user.ID, nil
+}
+
+// termsAcceptance decide si el alta registra la aceptación de los términos.
+//
+// Devuelve true si el payload trae la versión vigente. Un campo vacío es
+// ErrTermsNotAccepted si se exige, y "sin consentimiento registrado" si no. Una
+// versión que no coincide con la vigente es siempre ErrTermsNotAccepted: con el
+// flag apagado el campo es opcional, pero no se acepta un valor equivocado.
+func (s *Service) termsAcceptance(version string) (bool, error) {
+	if version == "" {
+		if s.deps.RequireTerms {
+			return false, domain.ErrTermsNotAccepted
+		}
+		return false, nil
+	}
+	if version != s.deps.TermsCurrentVersion {
+		return false, domain.ErrTermsNotAccepted
+	}
+	return true, nil
 }
 
 // verificationGrant valida el token de verificación de email del alta y devuelve

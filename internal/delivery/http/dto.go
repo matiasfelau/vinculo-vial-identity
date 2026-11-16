@@ -160,6 +160,10 @@ const (
 	codeInvalidResetToken = "INVALID_RESET_TOKEN"
 )
 
+// codeTermsNotAccepted (US-19) es el 400 del alta sin la versión vigente de los
+// Términos y Condiciones: falta el campo (si se exige) o es otra versión.
+const codeTermsNotAccepted = "TERMS_NOT_ACCEPTED"
+
 // hpkeRequest es el único dato que aceptan los endpoints de US-13: el mismo
 // sobre HPKE del alta y el login, en las dos piezas que fija el contrato
 // compartido. Nada personal viaja en el cuerpo: ni el email, ni el DNI, ni el
