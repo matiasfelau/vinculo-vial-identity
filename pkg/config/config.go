@@ -67,15 +67,15 @@ type HTTPConfig struct {
 // Addr es la dirección de escucha.
 func (c HTTPConfig) Addr() string { return fmt.Sprintf(":%d", c.Port) }
 
-// InternalConfig son los parámetros del router interno de US-04 (rutas
-// /internal/*, como POST /internal/verify-ownership). Se sirve en un
+// InternalConfig son los parámetros del router interno (rutas /internal/*,
+// hoy POST /internal/audit/dni). Se sirve en un
 // *http.Server separado del público, en su propio puerto, que ni Kong ni el
 // docker-compose de este servicio publican fuera de la red interna.
 //
 // Esa separación de puerto es una condición necesaria pero no suficiente:
 // dentro de la red Docker cualquier contenedor puede alcanzar cualquier
 // puerto de otro. ServiceToken es la segunda capa —un secreto compartido de
-// servicio a servicio que vinculo-vial-vehicle debe presentar en cada
+// servicio a servicio que el servicio llamador (vinculo-vial-alert) debe presentar en cada
 // petición— y las dos capas son independientes entre sí (ver el comentario
 // de InternalRouterConfig en internal/delivery/http).
 type InternalConfig struct {

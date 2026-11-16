@@ -36,8 +36,8 @@ func (m *decryptorMock) Decrypt(ephemeralPublicKey, ciphertext []byte) ([]byte, 
 }
 
 // DecryptCombined no lo ejercita ningún test de signup: es parte de
-// domain.HPKEDecryptor solo porque /internal/verify-ownership (US-04) lo
-// necesita sobre el mismo descifrador.
+// domain.HPKEDecryptor solo porque la interfaz lo declara (lo usan las pruebas
+// del sellado hacia Audit).
 func (m *decryptorMock) DecryptCombined([]byte) ([]byte, error) {
 	panic("signup: DecryptCombined no se usa en el alta")
 }
@@ -185,13 +185,6 @@ func (m *repositoryMock) FindByID(context.Context, uuid.UUID) (*domain.User, err
 // corresponde.
 func (m *repositoryMock) FindByDNIHashed(context.Context, string) (*domain.User, error) {
 	panic("signup: FindByDNIHashed no se usa en el alta")
-}
-
-// FindByOwnerAndDNIHash tampoco lo ejercita ningún test de signup: es parte
-// de domain.UserRepository solo porque /internal/verify-ownership (US-04) lo
-// necesita sobre el mismo repositorio.
-func (m *repositoryMock) FindByOwnerAndDNIHash(context.Context, uuid.UUID, string) (*domain.User, error) {
-	panic("signup: FindByOwnerAndDNIHash no se usa en el alta")
 }
 
 func (m *repositoryMock) last() domain.User {
