@@ -123,6 +123,9 @@ const (
 	// UserStatusReasonInheritedOnSignup indica que la cuenta nació en revisión
 	// porque el mismo DNI había sido dado de baja con una sanción vigente (US-11).
 	UserStatusReasonInheritedOnSignup UserStatusReason = "INHERITED_ON_SIGNUP"
+	// UserStatusReasonManualUnblock indica que un operador levantó la revisión
+	// desde el router de administración (US-17).
+	UserStatusReasonManualUnblock UserStatusReason = "MANUAL_UNBLOCK"
 )
 
 // EventTypeUserStatusChanged es el tipo del evento que anuncia un cambio de

@@ -35,6 +35,7 @@ import (
 	"github.com/matiasfelau/vinculo-vial-identity/internal/service/outbox"
 	"github.com/matiasfelau/vinculo-vial-identity/internal/service/passwordreset"
 	"github.com/matiasfelau/vinculo-vial-identity/internal/service/reputation"
+	"github.com/matiasfelau/vinculo-vial-identity/internal/service/review"
 	"github.com/matiasfelau/vinculo-vial-identity/internal/service/sanction"
 	"github.com/matiasfelau/vinculo-vial-identity/internal/service/session"
 	"github.com/matiasfelau/vinculo-vial-identity/internal/service/signin"
@@ -128,6 +129,14 @@ func run() error {
 	// processed_events: la marca de deduplicación de los consumidores (US-08).
 	// Requiere que users ya esté migrada: actualiza sus columnas de reputación.
 	reputationRepo, err := postgres.NewReputationRepository(ctx, db)
+	if err != nil {
+		return err
+	}
+
+	// review_decisions (US-17): el historial de desbloqueos. Requiere que users y
+	// outbox_events ya estén migradas: declara una clave foránea hacia users y el
+	// desbloqueo escribe en el outbox.
+	reviewRepo, err := postgres.NewReviewRepository(ctx, db)
 	if err != nil {
 		return err
 	}
@@ -379,7 +388,41 @@ func run() error {
 		return err
 	}
 
-	return serve(ctx, cfg, router, internalRouter, logger)
+	adminRouter, err := buildAdminRouter(cfg, reviewRepo, logger)
+	if err != nil {
+		return err
+	}
+
+	return serve(ctx, cfg, router, internalRouter, adminRouter, logger)
+}
+
+// buildAdminRouter arma el router de administración de US-17, o devuelve nil si
+// ADMIN_API_KEY está vacía: sin clave no hay superficie de administración, y el
+// servicio lo deja dicho en el log en vez de arrancar un puerto sin autenticación.
+func buildAdminRouter(cfg *config.Config, repo domain.ReviewRepository, logger *slog.Logger) (http.Handler, error) {
+	if !cfg.Admin.Enabled() {
+		logger.Warn("ADMIN_API_KEY vacía: el router de administración no arranca; no se pueden consultar ni desbloquear los casos de usuarios reportados")
+		return nil, nil
+	}
+
+	reviewService, err := review.New(review.Deps{Repo: repo, Logger: logger})
+	if err != nil {
+		return nil, err
+	}
+
+	// NewAdminRouter rechaza una clave de menos de 32 caracteres: con
+	// APP_ENV=production la configuración ya lo hizo antes, y esto cubre el
+	// desarrollo.
+	router, err := delivery.NewAdminRouter(delivery.AdminRouterConfig{
+		Review: reviewService,
+		Logger: logger,
+		APIKey: cfg.Admin.APIKey.Reveal(),
+		Debug:  cfg.HTTP.Debug,
+	})
+	if err != nil {
+		return nil, err
+	}
+	return router, nil
 }
 
 func newLogger(cfg *config.Config) *slog.Logger {
@@ -548,10 +591,12 @@ func buildRenaper(cfg *config.Config, logger *slog.Logger) *renaper.CircuitBreak
 	}, logger)
 }
 
-// serve levanta el servidor público y el interno a la vez, cada uno
-// en su propio puerto, y los apaga juntos: son dos superficies del mismo
-// proceso y ninguna tiene sentido sin la otra en pie.
-func serve(ctx context.Context, cfg *config.Config, publicHandler, internalHandler http.Handler, logger *slog.Logger) error {
+// serve levanta el servidor público, el interno y, si hay router, el de
+// administración a la vez, cada uno en su propio puerto, y los apaga juntos: son
+// superficies del mismo proceso y ninguna tiene sentido sin las otras en pie.
+// adminHandler nil significa que ADMIN_API_KEY está vacía: ese servidor no se
+// levanta.
+func serve(ctx context.Context, cfg *config.Config, publicHandler, internalHandler, adminHandler http.Handler, logger *slog.Logger) error {
 	newServer := func(addr string, handler http.Handler) *http.Server {
 		return &http.Server{
 			Addr:    addr,
@@ -568,6 +613,9 @@ func serve(ctx context.Context, cfg *config.Config, publicHandler, internalHandl
 	servers := map[string]*http.Server{
 		"público": newServer(cfg.HTTP.Addr(), publicHandler),
 		"interno": newServer(cfg.Internal.Addr(), internalHandler),
+	}
+	if adminHandler != nil {
+		servers["administración"] = newServer(cfg.Admin.Addr(), adminHandler)
 	}
 
 	errCh := make(chan error, len(servers))

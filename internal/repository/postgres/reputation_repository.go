@@ -124,8 +124,8 @@ func (r *ReputationRepository) ApplyReport(ctx context.Context, event domain.Pro
 
 		var row reportCountRow
 		counted := tx.Raw(
-			"UPDATE users SET report_count = report_count + 1, updated_at = ? WHERE id = ? RETURNING report_count, account_status",
-			event.ProcessedAt.UTC(), userID,
+			"UPDATE users SET report_count = report_count + 1, last_reported_at = ?, updated_at = ? WHERE id = ? RETURNING report_count, account_status",
+			event.ProcessedAt.UTC(), event.ProcessedAt.UTC(), userID,
 		).Scan(&row)
 		if counted.Error != nil {
 			return fmt.Errorf("no se pudo contar el reporte: %w", counted.Error)
@@ -142,8 +142,9 @@ func (r *ReputationRepository) ApplyReport(ctx context.Context, event domain.Pro
 		escalated := tx.Model(&userModel{}).
 			Where("id = ? AND account_status = ?", userID, string(domain.AccountStatusActive)).
 			Updates(map[string]any{
-				"account_status": string(domain.AccountStatusUnderReview),
-				"updated_at":     event.ProcessedAt.UTC(),
+				"account_status":     string(domain.AccountStatusUnderReview),
+				"under_review_since": event.ProcessedAt.UTC(),
+				"updated_at":         event.ProcessedAt.UTC(),
 			})
 		if escalated.Error != nil {
 			return fmt.Errorf("no se pudo pasar al usuario a revisión: %w", escalated.Error)
