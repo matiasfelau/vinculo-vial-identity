@@ -132,6 +132,3 @@ func (m *usersMock) Create(context.Context, *domain.User, domain.OutboxEvent, *d
 	panic("no se usa")
 }
 func (m *usersMock) ExistsByEmail(context.Context, string) (bool, error) { panic("no se usa") }
-func (m *usersMock) FindByOwnerAndDNIHash(context.Context, uuid.UUID, string) (*domain.User, error) {
-	panic("no se usa")
-}

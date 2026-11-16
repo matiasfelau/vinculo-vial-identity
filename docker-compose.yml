@@ -73,7 +73,7 @@ services:
     ports:
       - "127.0.0.1:${HTTP_PORT:-8080}:8080"
     # Deliberadamente sin publicar HTTP_INTERNAL_PORT: las rutas /internal/*
-    # (US-04) no se exponen fuera de la red interna. Vehicle las alcanza igual
+    # no se exponen fuera de la red interna. Alert las alcanza igual
     # dentro de la red `vinculo-vial`, sin necesidad de un `ports:` acá. El
     # secreto INTERNAL_SERVICE_TOKEN es la segunda capa de esa protección.
     depends_on:
@@ -82,7 +82,7 @@ services:
     networks:
       # Red privada del componente, donde vive su base.
       - identity-internal
-      # Red compartida de la plataforma: acá lo alcanzan el Gateway y Vehicle.
+      # Red compartida de la plataforma: acá lo alcanzan el Gateway y Alert.
       # La clave del servicio es el nombre completo y no `identity` a secas
       # porque Compose publica la clave del servicio como alias DNS, y en una red
       # con varios componentes ese nombre es demasiado genérico y colisiona fácil.

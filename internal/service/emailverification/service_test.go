@@ -65,9 +65,6 @@ func (m *usersMock) FindByID(context.Context, uuid.UUID) (*domain.User, error) {
 func (m *usersMock) FindByDNIHashed(context.Context, string) (*domain.User, error) {
 	panic("no se usa")
 }
-func (m *usersMock) FindByOwnerAndDNIHash(context.Context, uuid.UUID, string) (*domain.User, error) {
-	panic("no se usa")
-}
 
 type harness struct {
 	svc       *emailverification.Service

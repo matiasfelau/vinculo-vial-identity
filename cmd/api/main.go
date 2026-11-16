@@ -33,7 +33,6 @@ import (
 	"github.com/matiasfelau/vinculo-vial-identity/internal/service/emailchallenge"
 	"github.com/matiasfelau/vinculo-vial-identity/internal/service/emailverification"
 	"github.com/matiasfelau/vinculo-vial-identity/internal/service/outbox"
-	"github.com/matiasfelau/vinculo-vial-identity/internal/service/ownership"
 	"github.com/matiasfelau/vinculo-vial-identity/internal/service/passwordreset"
 	"github.com/matiasfelau/vinculo-vial-identity/internal/service/reputation"
 	"github.com/matiasfelau/vinculo-vial-identity/internal/service/sanction"
@@ -339,16 +338,6 @@ func run() error {
 		return err
 	}
 
-	verifyOwnershipService, err := ownership.New(ownership.Deps{
-		Decryptor: decryptor,
-		Indexer:   indexer,
-		Users:     users,
-		Logger:    logger,
-	})
-	if err != nil {
-		return err
-	}
-
 	router, err := delivery.NewRouter(delivery.RouterConfig{
 		SignUp:        signUpService,
 		SignIn:        signInService,
@@ -380,12 +369,11 @@ func run() error {
 	}
 
 	internalRouter, err := delivery.NewInternalRouter(delivery.InternalRouterConfig{
-		VerifyOwnership: verifyOwnershipService,
-		AuditDNI:        auditDNIService,
-		Logger:          logger,
-		ServiceToken:    cfg.Internal.ServiceToken.Reveal(),
-		MaxBodyBytes:    cfg.HTTP.MaxBodyBytes,
-		Debug:           cfg.HTTP.Debug,
+		AuditDNI:     auditDNIService,
+		Logger:       logger,
+		ServiceToken: cfg.Internal.ServiceToken.Reveal(),
+		MaxBodyBytes: cfg.HTTP.MaxBodyBytes,
+		Debug:        cfg.HTTP.Debug,
 	})
 	if err != nil {
 		return err
@@ -560,7 +548,7 @@ func buildRenaper(cfg *config.Config, logger *slog.Logger) *renaper.CircuitBreak
 	}, logger)
 }
 
-// serve levanta el servidor público y el interno (US-04) a la vez, cada uno
+// serve levanta el servidor público y el interno a la vez, cada uno
 // en su propio puerto, y los apaga juntos: son dos superficies del mismo
 // proceso y ninguna tiene sentido sin la otra en pie.
 func serve(ctx context.Context, cfg *config.Config, publicHandler, internalHandler http.Handler, logger *slog.Logger) error {

@@ -165,7 +165,6 @@ func TestAuditDNINoLogueaElCriptogramaNiElParUsuarioAlerta(t *testing.T) {
 	var logs bytes.Buffer
 	audit := &auditDNIServiceMock{result: domain.AuditDNI{Sealed: "criptograma-secreto-en-base64", KeyID: "2026-11"}}
 	router, err := delivery.NewInternalRouter(delivery.InternalRouterConfig{
-		VerifyOwnership: &verifyOwnershipServiceMock{},
 		AuditDNI:        audit,
 		ServiceToken:    secretoDePrueba,
 		Logger:          slog.New(slog.NewTextHandler(&logs, &slog.HandlerOptions{Level: slog.LevelDebug})),
@@ -173,7 +172,7 @@ func TestAuditDNINoLogueaElCriptogramaNiElParUsuarioAlerta(t *testing.T) {
 	if err != nil {
 		t.Fatalf("no se pudo armar el router interno: %v", err)
 	}
-	ts := &internalTestServer{handler: router, verifyOwnership: &verifyOwnershipServiceMock{}, auditDNI: audit}
+	ts := &internalTestServer{handler: router, auditDNI: audit}
 	userID, alertID := uuid.NewString(), uuid.NewString()
 
 	ts.post(t, pathAuditDNI, auditDNIBody(userID, alertID))
@@ -231,7 +230,6 @@ func TestAuditDNIDeExtremoAExtremoSeAbreConLaClavePrivadaYElInfoDeLaAlerta(t *te
 		t.Fatalf("no se pudo armar el servicio: %v", err)
 	}
 	router, err := delivery.NewInternalRouter(delivery.InternalRouterConfig{
-		VerifyOwnership: &verifyOwnershipServiceMock{},
 		AuditDNI:        service,
 		ServiceToken:    secretoDePrueba,
 	})
@@ -298,7 +296,6 @@ func TestAuditDNIDeExtremoAExtremoConUsuarioInexistenteDevuelve404(t *testing.T)
 		t.Fatalf("no se pudo armar el servicio: %v", err)
 	}
 	router, err := delivery.NewInternalRouter(delivery.InternalRouterConfig{
-		VerifyOwnership: &verifyOwnershipServiceMock{},
 		AuditDNI:        service,
 		ServiceToken:    secretoDePrueba,
 	})

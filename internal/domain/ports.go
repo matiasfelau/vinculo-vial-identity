@@ -49,17 +49,6 @@ type UserRepository interface {
 	// se persiste. Debe devolver ErrUserNotFound (envuelto o no) cuando ningún
 	// usuario tiene ese índice.
 	FindByDNIHashed(ctx context.Context, dniHashed string) (*User, error)
-
-	// FindByOwnerAndDNIHash busca el usuario cuyo id es ownerID Y cuyo Blind
-	// Index de DNI es dniHashed. La usa /internal/verify-ownership (US-04)
-	// para confirmar que el DNI del QR corresponde al dueño de la sesión
-	// activa, sin decir nunca cuál de las dos condiciones falló: que el
-	// predicado combine ambas con AND en una sola consulta es lo que impide
-	// distinguir "ese owner_id no existe" de "existe, pero ese no es su
-	// DNI" — las dos devuelven, indistinguiblemente, ErrUserNotFound
-	// (envuelto o no). Nunca se usa para autenticar ni para nada que no sea
-	// esa comparación puntual.
-	FindByOwnerAndDNIHash(ctx context.Context, ownerID uuid.UUID, dniHashed string) (*User, error)
 }
 
 // ReputationRepository aplica a los usuarios los efectos de los eventos de
@@ -258,12 +247,10 @@ type HPKEDecryptor interface {
 
 	// DecryptCombined revierte el mismo sellado HPKE que Decrypt, pero a
 	// partir de un único blob (`enc` seguido del ciphertext) en lugar de las
-	// dos piezas separadas. Es el formato de dni_enc en US-04: a diferencia
-	// de /signup y /signin, el contrato compartido transporta ese campo como
-	// un solo valor —Vehicle lo reenvía sin abrir, tal cual lo produjo la
-	// app—, así que la separación en sus dos piezas ocurre de este lado. El
-	// llamador es responsable de limpiar el buffer devuelto cuando termina
-	// de usarlo.
+	// dos piezas separadas. Es el formato de los criptogramas que llegan
+	// como un único valor, a diferencia de /signup y /signin: la separación en
+	// sus dos piezas ocurre de este lado. El llamador es responsable de
+	// limpiar el buffer devuelto cuando termina de usarlo.
 	DecryptCombined(cryptogram []byte) ([]byte, error)
 }
 

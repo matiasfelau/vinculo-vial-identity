@@ -621,7 +621,7 @@ func TestLoadRechazaValoresMalFormados(t *testing.T) {
 	}
 }
 
-// El router interno de US-04 pierde su aislamiento de puerto si comparte el
+// El router interno pierde su aislamiento de puerto si comparte el
 // mismo número que el público: dos *http.Server no pueden escuchar el mismo
 // puerto, y si pudieran, ya no habría separación que defender.
 func TestLoadRechazaElPuertoInternoIgualAlPublico(t *testing.T) {

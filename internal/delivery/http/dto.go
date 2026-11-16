@@ -72,21 +72,6 @@ type deleteAccountRequest struct {
 	Password string `json:"password"`
 }
 
-// verifyOwnershipRequest es el payload interno de US-04 que envía
-// vinculo-vial-vehicle: el contrato compartido lo transporta tal cual, sin
-// que Vehicle lo abra. DNIEnc es un único blob HPKE (enc || ciphertext), a
-// diferencia de las dos piezas separadas de /signup y /signin.
-type verifyOwnershipRequest struct {
-	OwnerID string `json:"owner_id"`
-	DNIEnc  string `json:"dni_enc"`
-}
-
-// verifyOwnershipResponse es la única forma de respuesta de
-// /internal/verify-ownership: un booleano y nada más.
-type verifyOwnershipResponse struct {
-	Match bool `json:"match"`
-}
-
 // auditDNIRequest es el payload interno de POST /internal/audit/dni que envía
 // vinculo-vial-alert antes de crear una alerta: el usuario cuyo DNI se sella y la
 // alerta a la que queda atado el criptograma.
@@ -120,7 +105,7 @@ const (
 	// Activa de /refresh ante el reúso de un Refresh Token ya rotado.
 	codeSessionCompromised = "sesion_comprometida"
 	// codeUnauthorizedService es el código del 401 que produce el router
-	// interno de US-04 (/internal/*) cuando la petición no trae el secreto
+	// interno (/internal/*) cuando la petición no trae el secreto
 	// de servicio a servicio configurado en INTERNAL_SERVICE_TOKEN.
 	codeUnauthorizedService = "servicio_no_autorizado"
 	codeInternal            = "error_interno"
