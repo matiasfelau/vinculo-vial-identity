@@ -236,9 +236,9 @@ func TestBuildPublisherDeshabilitadoDevuelveElInerteYAvisa(t *testing.T) {
 func TestBuildPublisherHabilitadoFallaRapidoSinBrokerYNoFiltraLaURL(t *testing.T) {
 	const secreto = "s3cr3to-del-broker"
 	cfg := entornoValido(t, map[string]string{
-		"APP_ENV":              "development",
-		"RABBITMQ_ENABLED":     "true",
-		"RABBITMQ_URL":         "amqp://usuario:" + secreto + "@127.0.0.1:" + puertoCerrado(t) + "/",
+		"APP_ENV":               "development",
+		"RABBITMQ_ENABLED":      "true",
+		"RABBITMQ_URL":          "amqp://usuario:" + secreto + "@127.0.0.1:" + puertoCerrado(t) + "/",
 		"RABBITMQ_DIAL_TIMEOUT": "1s",
 	})
 
