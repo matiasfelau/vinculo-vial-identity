@@ -1015,9 +1015,9 @@ pruebas de integración contra Postgres (se exige que corran todas las
 - **Gate sobre el código nuevo.** `diff-cover` exige 85 % de cobertura sobre
   las líneas que el PR agrega o cambia respecto de su rama base. Si el PR no
   toca código medible, pasa.
-- **Cobertura total.** Se publica en el resumen del job (`$GITHUB_STEP_SUMMARY`)
-  y en el artefacto `cobertura`, sin cortar el job. En v0.14, cuando todos los
-  repos estén en 85 % o más, el gate pasa a ser sobre el total.
+- **Gate sobre la cobertura total.** Se publica en el resumen del job
+  (`$GITHUB_STEP_SUMMARY`) y en el artefacto `cobertura`, y el job falla si
+  baja de 85 %. Ninguna rama puede bajar el total de ese mínimo.
 - **Exclusiones.** Ninguna: hoy no hay código generado en el repo, y no se
   excluye código escrito a mano para subir el número. Si aparece código
   generado, se lista acá con su motivo.
@@ -1056,8 +1056,11 @@ docker run -d --name vv-identity-it -e POSTGRES_USER=identity \
   -p 127.0.0.1:55432:5432 postgres:17-alpine
 TEST_DATABASE_URL='postgres://identity:identity@127.0.0.1:55432/identity?sslmode=disable' \
   go test -tags=integration -count=1 -run Integracion -covermode=atomic \
-  -coverpkg=./... -coverprofile=coverage/integration.out ./internal/repository/postgres/
-gocovmerge coverage/unit.out coverage/integration.out > coverage/total.out
+  -coverpkg=./... -coverprofile=coverage/integration-1.out ./internal/repository/postgres/
+TEST_DATABASE_URL='postgres://identity:identity@127.0.0.1:55432/identity?sslmode=disable' \
+  go test -tags=integration -count=1 -run Integracion -covermode=atomic \
+  -coverpkg=./... -coverprofile=coverage/integration-2.out ./cmd/api/
+gocovmerge coverage/unit.out coverage/integration-*.out > coverage/total.out
 gocover-cobertura < coverage/total.out > coverage/cobertura.xml
 go tool cover -func=coverage/total.out | tail -1          # cobertura total
 
@@ -1107,7 +1110,7 @@ gocovmerge coverage/unit.out coverage/integration_pg.out coverage/integration_ap
 go tool cover -func=coverage/total.out | tail -1
 ```
 
-Con ese reporte el repositorio está en **90,3 %** de las sentencias (88,7 % de
+Con ese reporte el repositorio está en **90,4 %** de las sentencias (89,6 % de
 las líneas en el XML de Cobertura), contra 84,0 % (81,1 %) antes de la rama
 `chore/cobertura-85`. No se excluye ningún archivo: hoy no hay código generado
 en el repo, y el código escrito a mano cuenta entero. El `main` de `cmd/api` y
