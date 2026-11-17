@@ -64,6 +64,29 @@ func TestExecuteRechazaUnDotenvMalFormado(t *testing.T) {
 	}
 }
 
+func TestExecuteConConfiguracionValidaLlegaARunYDevuelveSuError(t *testing.T) {
+	// Sin .env en el directorio de trabajo: las variables salen del entorno,
+	// como en un contenedor. La base apunta a un puerto cerrado, así que el
+	// error tiene que venir de run y no de la configuración.
+	t.Chdir(t.TempDir())
+	entornoValido(t, map[string]string{"POSTGRES_HOST": "127.0.0.1", "POSTGRES_PORT": puertoCerrado(t)})
+
+	hecho := make(chan error, 1)
+	go func() { hecho <- execute() }()
+
+	select {
+	case err := <-hecho:
+		if err == nil {
+			t.Fatal("execute debería devolver el error de arranque con la base caída")
+		}
+		if strings.Contains(err.Error(), contrasenaDeLaBaseFalsa) {
+			t.Errorf("el error de arranque filtra la contraseña de la base: %v", err)
+		}
+	case <-time.After(30 * time.Second):
+		t.Fatal("execute no terminó con la base caída")
+	}
+}
+
 // --- run: fallas de configuración que se detectan antes de tocar la base ---
 
 func TestRunRechazaClavesInutilizablesSinTocarLaBase(t *testing.T) {
