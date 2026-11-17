@@ -45,7 +45,7 @@ import (
 )
 
 func main() {
-	if err := run(); err != nil {
+	if err := execute(); err != nil {
 		// El logger estructurado puede no existir todavía si el fallo fue al
 		// cargar la configuración, así que el último recurso es stderr.
 		slog.Error("el servicio no pudo continuar", slog.String("error", err.Error()))
@@ -53,7 +53,11 @@ func main() {
 	}
 }
 
-func run() error {
+// execute carga la configuración y corre el servicio hasta que llegue SIGINT o
+// SIGTERM, que es como Kubernetes y Docker piden el apagado. main queda en
+// llamarla y salir con el estado que corresponda; el arranque en sí vive en
+// run, que recibe la configuración y el contexto y se prueba sin señales.
+func execute() error {
 	// El .env es una comodidad de desarrollo; en contenedor las variables las
 	// inyecta el orquestador y este archivo no existe.
 	if err := config.LoadDotEnv(".env"); err != nil {
@@ -65,13 +69,23 @@ func run() error {
 		return err
 	}
 
-	logger := newLogger(cfg)
-	slog.SetDefault(logger)
-
-	// El contexto se cancela con SIGINT o SIGTERM, que es como Kubernetes y
-	// Docker piden el apagado.
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
+
+	return run(ctx, cfg)
+}
+
+// run arma las dependencias y sirve hasta que ctx se cancele. Devuelve nil en un
+// apagado ordenado.
+func run(ctx context.Context, cfg *config.Config) error {
+	// Cancelable por separado del contexto de entrada: el apagado también lo
+	// dispara el defer de más abajo para detener los procesos periódicos antes de
+	// cerrar la base.
+	ctx, stop := context.WithCancel(ctx)
+	defer stop()
+
+	logger := newLogger(cfg)
+	slog.SetDefault(logger)
 
 	logger.Info("iniciando vinculo-vial-identity", slog.Any("config", cfg))
 
