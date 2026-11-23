@@ -26,4 +26,9 @@ coverage.*
 
 # Notas locales de trabajo — no versionar
 CLAUDE.md
+CONTRATO-*.md
 .clauderules
+clauderules
+
+# Reportes de cobertura del CI (ver sección CI del README)
+/coverage/

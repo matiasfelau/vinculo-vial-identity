@@ -101,7 +101,7 @@ func TestDecryptRoundTrip(t *testing.T) {
 	}
 }
 
-// dni_enc (US-04) llega como un único blob, a diferencia de las dos piezas
+// Un criptograma combinado llega como un único blob, a diferencia de las dos piezas
 // separadas de /signup y /signin: DecryptCombined tiene que partirlo él mismo
 // y descifrar exactamente lo mismo que Decrypt con esas dos piezas ya separadas.
 func TestDecryptCombinedRoundTrip(t *testing.T) {

@@ -3,12 +3,28 @@ name: CI
 # Corre en todo pull request hacia dev o main. docker-release.yml solo corre
 # en main y tags, así que sin este workflow ningún cambio pasaba por CI antes
 # de llegar a dev.
+#
+# Dos jobs, dos checks para la regla de protección de la rama:
+#   - build-and-test: compila, pruebas unitarias y de integración con
+#     cobertura, y el gate de cobertura sobre el código nuevo (diff-cover).
+#   - security: Trivy, govulncheck y Semgrep (este último solo informativo).
 on:
   pull_request:
     branches: [dev, main]
 
 permissions:
   contents: read
+
+env:
+  # Versiones de las herramientas, fijadas para que un PR no cambie de
+  # resultado por una release ajena. Dependabot no las ve: se actualizan a mano.
+  GOCOVMERGE_VERSION: b5bfa59ec0adc420475f97f89b58045c721d761c
+  GOCOVER_COBERTURA_VERSION: v1.5.0
+  GOVULNCHECK_VERSION: v1.9.0
+  DIFF_COVER_VERSION: 11.0.1
+  SEMGREP_VERSION: 1.184.0
+  # Umbral de cobertura exigido a las líneas que cambia el PR.
+  DIFF_COVERAGE_MIN: 85
 
 jobs:
   build-and-test:
@@ -30,13 +46,28 @@ jobs:
           --health-timeout 5s
           --health-retries 10
     steps:
+      # fetch-depth 0: diff-cover compara contra la rama base y necesita su
+      # historia.
       - name: Descargar código fuente
-        uses: actions/checkout@v4
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
 
       - name: Configurar Go
-        uses: actions/setup-go@v5
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version-file: go.mod
+
+      - name: Configurar Python
+        uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: "3.13"
+
+      - name: Instalar herramientas de cobertura
+        run: |
+          go install github.com/wadey/gocovmerge@${GOCOVMERGE_VERSION}
+          go install github.com/boumenot/gocover-cobertura@${GOCOVER_COBERTURA_VERSION}
+          python -m pip install --quiet "diff-cover==${DIFF_COVER_VERSION}"
 
       - name: Descargar dependencias
         run: go mod download
@@ -49,27 +80,166 @@ jobs:
       - name: Vet
         run: go vet -tags=integration ./...
 
-      - name: Ejecutar pruebas
-        run: go test -count=1 ./...
+      # -coverpkg=./... mide todo el módulo desde cada paquete de prueba, no
+      # solo el paquete que se prueba: el servicio que ejercita un repositorio
+      # (y al revés) suma cobertura donde corresponde.
+      - name: Ejecutar pruebas (con cobertura)
+        run: |
+          mkdir -p coverage
+          go test -count=1 -covermode=atomic -coverpkg=./... \
+            -coverprofile=coverage/unit.out ./...
 
       # Paso aparte, con el tag. Las pruebas fallan (no se omiten) si falta
       # TEST_DATABASE_URL, y además se exige que corran todas las que existen:
       # un -run que no coincide con nada también sale en verde ("no tests to
       # run"), y eso dejaría pasar un CI que no prueba nada.
-      - name: Ejecutar pruebas de integración (Postgres real)
+      #
+      # Un paquete por vez: todos trabajan contra la misma base (cada uno en su
+      # propio esquema), y así no corren en paralelo entre sí. cmd/api prueba el
+      # arranque completo del servicio (run), que no se puede ejercitar sin base.
+      - name: Ejecutar pruebas de integración (Postgres real, con cobertura)
         shell: bash
         env:
           TEST_DATABASE_URL: postgres://identity:identity@localhost:5432/identity?sslmode=disable
         run: |
-          pkg=./internal/repository/postgres/
-          esperadas=$(go test -tags=integration -list Integracion "$pkg" | grep -c '^TestIntegracion' || true)
-          if [ "$esperadas" -eq 0 ]; then
-            echo "::error::no hay pruebas TestIntegracion*: el paso no probaría nada"
-            exit 1
+          i=0
+          for pkg in ./internal/repository/postgres/ ./cmd/api/; do
+            i=$((i + 1))
+            esperadas=$(go test -tags=integration -list Integracion "$pkg" | grep -c '^TestIntegracion' || true)
+            if [ "$esperadas" -eq 0 ]; then
+              echo "::error::no hay pruebas TestIntegracion* en $pkg: el paso no probaría nada"
+              exit 1
+            fi
+            go test -tags=integration -count=1 -run Integracion -v \
+              -covermode=atomic -coverpkg=./... \
+              -coverprofile="coverage/integration-${i}.out" "$pkg" | tee integracion.log
+            pasaron=$(grep -c -- '^--- PASS: TestIntegracion' integracion.log || true)
+            if [ "$pasaron" -ne "$esperadas" ]; then
+              echo "::error::en $pkg pasaron $pasaron de $esperadas pruebas de integración"
+              exit 1
+            fi
+          done
+
+      # Un único reporte con las unitarias y las de integración.
+      - name: Unir perfiles y convertir a Cobertura XML
+        run: |
+          gocovmerge coverage/unit.out coverage/integration-*.out > coverage/total.out
+          gocover-cobertura < coverage/total.out > coverage/cobertura.xml
+
+      # Cobertura total del repositorio: se publica en el resumen y, en el paso
+      # siguiente, ninguna rama puede bajarla de 85 %.
+      - name: Publicar cobertura total
+        if: always()
+        run: |
+          if [ -f coverage/total.out ]; then
+            total=$(go tool cover -func=coverage/total.out | awk '/^total:/ {print $3}')
+            {
+              echo "## Cobertura total"
+              echo
+              echo "**${total}** de las sentencias del módulo (unitarias + integración). Mínimo: 85 %."
+            } >> "$GITHUB_STEP_SUMMARY"
           fi
-          go test -tags=integration -count=1 -run Integracion -v "$pkg" | tee integracion.log
-          pasaron=$(grep -c -- '^--- PASS: TestIntegracion' integracion.log || true)
-          if [ "$pasaron" -ne "$esperadas" ]; then
-            echo "::error::pasaron $pasaron de $esperadas pruebas de integración"
-            exit 1
+
+      - name: Gate de cobertura total (>= 85 %)
+        run: |
+          total=$(go tool cover -func=coverage/total.out | awk '/^total:/ { gsub("%", "", $3); print $3 }')
+          echo "Cobertura total: ${total} %"
+          awk -v t="${total}" 'BEGIN { exit (t >= 85) ? 0 : 1 }'
+
+      # Gate: el código que agrega o cambia el PR tiene que estar cubierto al
+      # menos en DIFF_COVERAGE_MIN %. Compara contra la rama base del PR.
+      - name: Gate de cobertura sobre el código nuevo
+        env:
+          # Por variable de entorno y no interpolado en el script: el nombre de
+          # la rama lo controla quien abre el PR (inyección de shell).
+          BASE_REF: ${{ github.base_ref }}
+        run: |
+          diff-cover coverage/cobertura.xml \
+            --compare-branch="origin/${BASE_REF}" \
+            --fail-under="${DIFF_COVERAGE_MIN}" \
+            --format "markdown:coverage/diff-cover.md,html:coverage/diff-cover.html"
+
+      - name: Publicar cobertura del código nuevo
+        if: always()
+        run: |
+          if [ -f coverage/diff-cover.md ]; then
+            {
+              echo "## Cobertura del código nuevo (mínimo ${DIFF_COVERAGE_MIN} %)"
+              echo
+              cat coverage/diff-cover.md
+            } >> "$GITHUB_STEP_SUMMARY"
           fi
+
+      - name: Subir reportes de cobertura
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: cobertura
+          path: coverage/
+          if-no-files-found: ignore
+
+  security:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Descargar código fuente
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Configurar Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+
+      - name: Configurar Python
+        uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: "3.13"
+
+      # Dependencias, secretos y configuración (Dockerfile). --ignore-unfixed:
+      # solo falla si el hallazgo tiene corrección disponible. Las excepciones
+      # van en .trivyignore, cada una con su motivo y hasta cuándo.
+      - name: Trivy (vulnerabilidades, secretos y misconfig)
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          scan-type: fs
+          scan-ref: .
+          scanners: vuln,secret,misconfig
+          severity: HIGH,CRITICAL
+          ignore-unfixed: true
+          exit-code: "1"
+          trivyignores: .trivyignore
+
+      # Falla ante vulnerabilidades alcanzables desde el código del servicio.
+      - name: govulncheck
+        run: |
+          go install golang.org/x/vuln/cmd/govulncheck@${GOVULNCHECK_VERSION}
+          govulncheck ./...
+
+      # Informativo por ahora: no corta el job y vuelca el resultado en el
+      # resumen. Pasa a gate en v0.14.
+      - name: Semgrep (informativo)
+        continue-on-error: true
+        run: |
+          python -m pip install --quiet "semgrep==${SEMGREP_VERSION}"
+          mkdir -p semgrep
+          semgrep scan --config p/default --metrics=off --quiet \
+            --json --output semgrep/semgrep.json .
+
+      - name: Publicar hallazgos de Semgrep
+        if: always()
+        run: |
+          {
+            echo "## Semgrep (informativo)"
+            echo
+            if [ -f semgrep/semgrep.json ]; then
+              n=$(jq '.results | length' semgrep/semgrep.json)
+              echo "**${n}** hallazgos con \`p/default\`. Hoy no cortan el job; pasan a gate en v0.14."
+              if [ "$n" -gt 0 ]; then
+                echo
+                echo "| Regla | Severidad | Ubicación |"
+                echo "|---|---|---|"
+                jq -r '.results[] | "| \(.check_id) | \(.extra.severity) | \(.path):\(.start.line) |"' semgrep/semgrep.json
+              fi
+            else
+              echo "Semgrep no produjo reporte (falló la ejecución). Ver el log del paso."
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"

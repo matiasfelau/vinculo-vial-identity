@@ -158,12 +158,14 @@ func (s *Service) SignIn(ctx context.Context, ephemeralPublicKey, ciphertext []b
 		return "", "", fmt.Errorf("signin: no se pudo emitir el access token: %w", err)
 	}
 
+	now := s.deps.Now()
+
 	refreshToken, hash, expiresAt, err := s.deps.Tokens.NewRefreshToken()
 	if err != nil {
 		return "", "", fmt.Errorf("signin: no se pudo emitir el refresh token: %w", err)
 	}
 
-	session, err := domain.NewSession(user.ID, hash, expiresAt, s.deps.Now())
+	session, err := domain.NewSession(user.ID, hash, expiresAt, now, now)
 	if err != nil {
 		return "", "", err
 	}

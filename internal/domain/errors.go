@@ -95,6 +95,32 @@ var (
 	// sesión. → 403 Forbidden (Defensa Activa).
 	ErrSessionReused = errors.New("domain: refresh token reusado")
 
+	// ErrInvalidCode indica que el código de email recibido no sirve: es
+	// incorrecto, venció, ya se usó, nunca se emitió o agotó sus intentos. Los
+	// cinco casos son deliberadamente indistinguibles, en el error y en la
+	// respuesta, para no habilitar enumeración. → 400 INVALID_CODE.
+	ErrInvalidCode = errors.New("domain: código inválido")
+
+	// ErrEmailNotVerified indica que el alta no trae un token de verificación de
+	// email utilizable: ausente, vencido, usado o de otro email. → 400
+	// EMAIL_NOT_VERIFIED.
+	ErrEmailNotVerified = errors.New("domain: email no verificado")
+
+	// ErrTermsNotAccepted indica que el alta no trae la versión vigente de los
+	// Términos y Condiciones (US-19): falta el campo (si se exige) o es otra
+	// versión. → 400 TERMS_NOT_ACCEPTED.
+	ErrTermsNotAccepted = errors.New("domain: términos no aceptados")
+
+	// ErrInvalidResetToken indica que el reset_token de la recuperación no sirve:
+	// ausente, vencido, usado o sin intentos. → 400 INVALID_RESET_TOKEN.
+	ErrInvalidResetToken = errors.New("domain: reset token inválido")
+
+	// ErrChallengeNotFound indica que no existe el desafío por email buscado. Es
+	// un detalle entre el repositorio y los casos de uso, que lo traducen a
+	// ErrInvalidCode, ErrEmailNotVerified o ErrInvalidResetToken antes de que
+	// salga de esa capa.
+	ErrChallengeNotFound = errors.New("domain: desafío de email no encontrado")
+
 	// ErrUpstreamUnavailable indica que una dependencia síncrona propia —hoy
 	// solo RenaperService— no respondió: timeout, conexión rechazada o
 	// circuito abierto. No es un veredicto sobre la solicitud, es un fallo de
@@ -118,6 +144,18 @@ var (
 	// persistencia (ej. una violación de constraint, ya colapsada en
 	// ErrDuplicateUser) no es este caso: 502 no aplica a la base.
 	ErrDatabaseUnavailable = errors.New("domain: la base de datos no está disponible")
+
+	// ErrNotUnderReview indica que se intentó desbloquear una cuenta que no está
+	// en UNDER_REVIEW (US-17). → 409 NOT_UNDER_REVIEW.
+	ErrNotUnderReview = errors.New("domain: la cuenta no está en revisión")
+
+	// ErrInvalidReviewDecision indica que el motivo o el operador de un
+	// desbloqueo (US-17) no cumplen los largos del contrato. → 400 INVALID_BODY.
+	ErrInvalidReviewDecision = errors.New("domain: decisión de revisión inválida")
+
+	// ErrInvalidCursor indica que el cursor del listado de casos (US-17) no es
+	// uno que haya devuelto el servicio. → 400 INVALID_QUERY.
+	ErrInvalidCursor = errors.New("domain: cursor inválido")
 )
 
 func invalidUser(reason string) error {

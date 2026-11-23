@@ -9,16 +9,15 @@ import (
 	"github.com/gin-gonic/gin"
 )
 
-// HeaderInternalServiceToken es la cabecera donde vinculo-vial-vehicle debe
-// enviar el secreto compartido de servicio a servicio en cada petición a
+// HeaderInternalServiceToken es la cabecera donde el servicio llamador
+// (vinculo-vial-alert) debe enviar el secreto compartido de servicio a servicio en cada petición a
 // /internal/*. No es un token de sesión de usuario ni lo emite este
 // servicio: es un valor estático, provisto por configuración en los dos
 // extremos.
 const HeaderInternalServiceToken = "X-Internal-Service-Token"
 
 // InternalRouterConfig son los parámetros de armado del router de las rutas
-// /internal/* (POST /internal/verify-ownership de US-04 y POST
-// /internal/audit/dni de US-11).
+// /internal/* (hoy, POST /internal/audit/dni de US-11).
 //
 // Este router se sirve por separado de NewRouter, en su propio *http.Server y
 // su propio puerto (ver cmd/api): ni Kong ni el docker-compose de este
@@ -30,9 +29,6 @@ const HeaderInternalServiceToken = "X-Internal-Service-Token"
 // son independientes: aunque el puerto interno quedara mal aislado en algún
 // entorno, el secreto seguiría bloqueando a un contenedor que no lo conozca.
 type InternalRouterConfig struct {
-	// VerifyOwnership es el caso de uso de POST /internal/verify-ownership
-	// (US-04).
-	VerifyOwnership VerifyOwnershipService
 	// AuditDNI es el caso de uso de POST /internal/audit/dni (US-11, Audit).
 	AuditDNI AuditDNIService
 	Logger   *slog.Logger
@@ -62,7 +58,7 @@ func NewInternalRouter(cfg InternalRouterConfig) (*gin.Engine, error) {
 		logger = slog.Default()
 	}
 
-	handler, err := NewInternalHandler(cfg.VerifyOwnership, cfg.AuditDNI, logger)
+	handler, err := NewInternalHandler(cfg.AuditDNI, logger)
 	if err != nil {
 		return nil, err
 	}
@@ -94,7 +90,6 @@ func NewInternalRouter(cfg InternalRouterConfig) (*gin.Engine, error) {
 		c.JSON(http.StatusOK, gin.H{"status": "ok"})
 	})
 
-	r.POST("/internal/verify-ownership", handler.VerifyOwnership)
 	r.POST("/internal/audit/dni", handler.AuditDNI)
 
 	r.NoRoute(func(c *gin.Context) {

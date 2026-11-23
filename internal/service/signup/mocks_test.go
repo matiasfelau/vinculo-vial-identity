@@ -36,8 +36,8 @@ func (m *decryptorMock) Decrypt(ephemeralPublicKey, ciphertext []byte) ([]byte, 
 }
 
 // DecryptCombined no lo ejercita ningún test de signup: es parte de
-// domain.HPKEDecryptor solo porque /internal/verify-ownership (US-04) lo
-// necesita sobre el mismo descifrador.
+// domain.HPKEDecryptor solo porque la interfaz lo declara (lo usan las pruebas
+// del sellado hacia Audit).
 func (m *decryptorMock) DecryptCombined([]byte) ([]byte, error) {
 	panic("signup: DecryptCombined no se usa en el alta")
 }
@@ -142,9 +142,12 @@ type repositoryMock struct {
 	// inheritedStatus es el user.status.changed que el servicio entregó en cada
 	// Create, tal como lo recibe el repositorio.
 	inheritedStatus []domain.OutboxEvent
+	// grants es el grant de verificación que el servicio entregó en cada Create
+	// (nil cuando el alta no lleva token).
+	grants []*domain.GrantConsumption
 }
 
-func (m *repositoryMock) Create(_ context.Context, u *domain.User, inheritedStatus domain.OutboxEvent) error {
+func (m *repositoryMock) Create(_ context.Context, u *domain.User, inheritedStatus domain.OutboxEvent, grant *domain.GrantConsumption) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
@@ -157,7 +160,15 @@ func (m *repositoryMock) Create(_ context.Context, u *domain.User, inheritedStat
 	}
 	m.created = append(m.created, *u)
 	m.inheritedStatus = append(m.inheritedStatus, inheritedStatus)
+	m.grants = append(m.grants, grant)
 	return nil
+}
+
+// ExistsByEmail no lo ejercita ningún test de signup: es parte de
+// domain.UserRepository solo porque la verificación de email (US-13) lo
+// necesita sobre el mismo repositorio.
+func (m *repositoryMock) ExistsByEmail(context.Context, string) (bool, error) {
+	panic("signup: ExistsByEmail no se usa en el alta")
 }
 
 // FindByID no lo ejercita ningún test de signup: es parte de
@@ -174,13 +185,6 @@ func (m *repositoryMock) FindByID(context.Context, uuid.UUID) (*domain.User, err
 // corresponde.
 func (m *repositoryMock) FindByDNIHashed(context.Context, string) (*domain.User, error) {
 	panic("signup: FindByDNIHashed no se usa en el alta")
-}
-
-// FindByOwnerAndDNIHash tampoco lo ejercita ningún test de signup: es parte
-// de domain.UserRepository solo porque /internal/verify-ownership (US-04) lo
-// necesita sobre el mismo repositorio.
-func (m *repositoryMock) FindByOwnerAndDNIHash(context.Context, uuid.UUID, string) (*domain.User, error) {
-	panic("signup: FindByOwnerAndDNIHash no se usa en el alta")
 }
 
 func (m *repositoryMock) last() domain.User {

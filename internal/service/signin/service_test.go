@@ -124,6 +124,9 @@ func TestSignInExitoso(t *testing.T) {
 	if !s.ExpiresAt.Equal(h.tokens.refreshExpiresAt) {
 		t.Errorf("session.ExpiresAt = %v, se esperaba %v", s.ExpiresAt, h.tokens.refreshExpiresAt)
 	}
+	if !s.StartedAt.Equal(h.now) {
+		t.Errorf("session.StartedAt = %v, el login debe fijar el instante actual (%v)", s.StartedAt, h.now)
+	}
 }
 
 // El DNI inexistente y la contraseña incorrecta tienen que producir

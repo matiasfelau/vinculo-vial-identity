@@ -25,7 +25,11 @@ type RouterConfig struct {
 	Logout  LogoutService
 	// DeleteAccount atiende DELETE /api/v1/users/me (US-11).
 	DeleteAccount DeleteAccountService
-	Logger        *slog.Logger
+	// EmailVerification y PasswordReset atienden la verificación del email del
+	// alta y la recuperación de contraseña (US-13).
+	EmailVerification EmailVerificationService
+	PasswordReset     PasswordResetService
+	Logger            *slog.Logger
 	// ReadinessCheck reporta si las dependencias externas responden. Si es nil,
 	// /ready se limita a informar que el proceso está vivo.
 	ReadinessCheck func(context.Context) error
@@ -49,6 +53,11 @@ func NewRouter(cfg RouterConfig) (*gin.Engine, error) {
 	}
 
 	accountHandler, err := NewAccountHandler(cfg.DeleteAccount, cfg.Logger)
+	if err != nil {
+		return nil, err
+	}
+
+	recoveryHandler, err := NewRecoveryHandler(cfg.EmailVerification, cfg.PasswordReset, cfg.Logger)
 	if err != nil {
 		return nil, err
 	}
@@ -119,6 +128,16 @@ func NewRouter(cfg RouterConfig) (*gin.Engine, error) {
 	auth.POST("/signin", handler.SignIn)
 	auth.POST("/refresh", handler.Refresh)
 	auth.POST("/logout", handler.Logout)
+
+	// US-13. Los cuatro primeros pasos llevan un email, un DNI o un código: un
+	// tope de cuerpo propio, mucho menor al del alta. La revalidación lleva una
+	// selfie y usa el tope del grupo.
+	small := limitBody(maxRecoveryBodyBytes)
+	auth.POST("/email-verifications", small, recoveryHandler.RequestEmailVerification)
+	auth.POST("/email-verifications/confirm", small, recoveryHandler.ConfirmEmailVerification)
+	auth.POST("/password-resets", small, recoveryHandler.RequestPasswordReset)
+	auth.POST("/password-resets/confirm", small, recoveryHandler.ConfirmPasswordReset)
+	auth.POST("/password-resets/complete", recoveryHandler.CompletePasswordReset)
 
 	users := r.Group("/api/v1/users", limitBody(maxAccountBodyBytes), noStore())
 	users.DELETE("/me", accountHandler.Delete)

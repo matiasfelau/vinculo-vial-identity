@@ -13,6 +13,7 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/google/uuid"
 
@@ -98,6 +99,8 @@ type testServer struct {
 	refreshSvc *refreshServiceMock
 	logoutSvc  *logoutServiceMock
 	deleteSvc  *deleteAccountServiceMock
+	emailSvc   *emailVerificationServiceMock
+	resetSvc   *passwordResetServiceMock
 	logs       *strings.Builder
 }
 
@@ -109,22 +112,26 @@ func newTestServer(t *testing.T, ready func(context.Context) error) *testServer 
 	refreshSvc := &refreshServiceMock{accessToken: "access-token-rotado", refreshToken: "refresh-token-rotado"}
 	logoutSvc := &logoutServiceMock{}
 	deleteSvc := &deleteAccountServiceMock{}
+	emailSvc := &emailVerificationServiceMock{token: "verification-token", expiresIn: 30 * time.Minute}
+	resetSvc := &passwordResetServiceMock{token: "reset-token", expiresIn: 15 * time.Minute}
 	logs := &strings.Builder{}
 
 	router, err := delivery.NewRouter(delivery.RouterConfig{
-		SignUp:         svc,
-		SignIn:         signInSvc,
-		Refresh:        refreshSvc,
-		Logout:         logoutSvc,
-		DeleteAccount:  deleteSvc,
-		Logger:         slog.New(slog.NewTextHandler(logs, &slog.HandlerOptions{Level: slog.LevelDebug})),
-		ReadinessCheck: ready,
+		SignUp:            svc,
+		SignIn:            signInSvc,
+		Refresh:           refreshSvc,
+		Logout:            logoutSvc,
+		DeleteAccount:     deleteSvc,
+		EmailVerification: emailSvc,
+		PasswordReset:     resetSvc,
+		Logger:            slog.New(slog.NewTextHandler(logs, &slog.HandlerOptions{Level: slog.LevelDebug})),
+		ReadinessCheck:    ready,
 	})
 	if err != nil {
 		t.Fatalf("no se pudo armar el router: %v", err)
 	}
 
-	return &testServer{handler: router, svc: svc, signInSvc: signInSvc, refreshSvc: refreshSvc, logoutSvc: logoutSvc, deleteSvc: deleteSvc, logs: logs}
+	return &testServer{handler: router, svc: svc, signInSvc: signInSvc, refreshSvc: refreshSvc, logoutSvc: logoutSvc, deleteSvc: deleteSvc, emailSvc: emailSvc, resetSvc: resetSvc, logs: logs}
 }
 
 func (ts *testServer) post(t *testing.T, path, body string) *httptest.ResponseRecorder {
@@ -380,6 +387,8 @@ func TestSignUpMapeaLosErroresDeDominio(t *testing.T) {
 	}{
 		"datos inválidos":         {domain.ErrInvalidInput, http.StatusBadRequest, "datos_invalidos"},
 		"identidad no verificada": {domain.ErrIdentityNotVerified, http.StatusBadRequest, "identidad_no_verificada"},
+		"términos no aceptados":   {domain.ErrTermsNotAccepted, http.StatusBadRequest, "TERMS_NOT_ACCEPTED"},
+		"email no verificado":     {domain.ErrEmailNotVerified, http.StatusBadRequest, "EMAIL_NOT_VERIFIED"},
 		"usuario duplicado":       {domain.ErrDuplicateUser, http.StatusConflict, "registro_no_disponible"},
 		"criptograma mal formado": {domain.ErrMalformedCryptogram, http.StatusBadRequest, "solicitud_invalida"},
 		"criptograma ilegible":    {domain.ErrInvalidCryptogram, http.StatusInternalServerError, "error_interno"},

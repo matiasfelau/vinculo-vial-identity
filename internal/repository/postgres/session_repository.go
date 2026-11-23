@@ -37,6 +37,50 @@ BEGIN
 END $$;
 `
 
+// sessionsMigrationLockKey es la clave del advisory lock que serializa la
+// migración de sessions.started_at cuando varias réplicas arrancan a la vez.
+const sessionsMigrationLockKey int64 = 0x6c68_0003
+
+// backfillSessionsStartedAt agrega started_at a una tabla sessions que ya
+// existe sin la columna (US-12) y la rellena con created_at. AutoMigrate no
+// sirve para esto: agregaría la columna NOT NULL sobre filas existentes y
+// Postgres lo rechaza. Es idempotente y no ejecuta DDL si la tabla no existe
+// (AutoMigrate la crea después con la columna ya declarada) o si started_at ya
+// es NOT NULL: así, con la migración aplicada a mano por un DBA, el rol del
+// servicio no necesita ser dueño de la tabla para arrancar.
+const backfillSessionsStartedAt = `
+DO $$
+BEGIN
+	IF to_regclass('sessions') IS NOT NULL AND NOT EXISTS (
+		SELECT 1 FROM information_schema.columns
+		WHERE table_schema = current_schema() AND table_name = 'sessions'
+			AND column_name = 'started_at' AND is_nullable = 'NO'
+	) THEN
+		ALTER TABLE sessions ADD COLUMN IF NOT EXISTS started_at timestamptz;
+		UPDATE sessions SET started_at = created_at WHERE started_at IS NULL;
+		ALTER TABLE sessions ALTER COLUMN started_at SET NOT NULL;
+	END IF;
+END $$;
+`
+
+// migrateSessions deja sessions en el esquema vigente: backfill de started_at
+// y AutoMigrate, en una transacción bajo advisory lock para que las réplicas
+// que arrancan juntas no choquen en el catálogo.
+func migrateSessions(ctx context.Context, db *gorm.DB) error {
+	return db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		if err := tx.Exec("SELECT pg_advisory_xact_lock(?)", sessionsMigrationLockKey).Error; err != nil {
+			return fmt.Errorf("no se pudo tomar el lock de la migración: %w", err)
+		}
+		if err := tx.Exec(backfillSessionsStartedAt).Error; err != nil {
+			return fmt.Errorf("no se pudo rellenar started_at: %w", err)
+		}
+		if err := tx.AutoMigrate(&sessionModel{}); err != nil {
+			return fmt.Errorf("no se pudo migrar el esquema: %w", err)
+		}
+		return nil
+	})
+}
+
 // NewSessionRepository construye el repositorio, ejecuta AutoMigrate y agrega
 // la restricción de clave foránea hacia users.
 //
@@ -47,7 +91,7 @@ func NewSessionRepository(ctx context.Context, db *gorm.DB) (*SessionRepository,
 		return nil, errors.New("postgres: se requiere una conexión GORM")
 	}
 
-	if err := db.WithContext(ctx).AutoMigrate(&sessionModel{}); err != nil {
+	if err := migrateSessions(ctx, db); err != nil {
 		return nil, fmt.Errorf("postgres: falló la migración del esquema de sessions: %w", err)
 	}
 
@@ -129,23 +173,32 @@ func (r *SessionRepository) RevokeAllByUserID(ctx context.Context, userID uuid.U
 	defer cancel()
 
 	err := r.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
-		if err := tx.Model(&sessionModel{}).
-			Where("user_id = ?", userID).
-			Update("is_revoked", true).Error; err != nil {
-			return fmt.Errorf("no se pudo revocar las sesiones del usuario: %w", err)
-		}
-
-		if outboxEvent != nil {
-			if err := tx.Create(toOutboxModel(outboxEvent)).Error; err != nil {
-				return fmt.Errorf("no se pudo encolar el evento de outbox: %w", err)
-			}
-		}
-
-		return nil
+		return revokeAllSessions(tx, userID, outboxEvent)
 	})
 	if err != nil {
 		return fmt.Errorf("postgres: no se pudo ejecutar la defensa activa: %w", classifyDBError(err))
 	}
+	return nil
+}
+
+// revokeAllSessions revoca todas las sesiones del usuario y, si outboxEvent no
+// es nil, encola el evento, sobre la transacción tx que le pasa el llamador. Es
+// el cuerpo de RevokeAllByUserID, separado para que la recuperación de
+// contraseña (US-13) lo ejecute dentro de la misma transacción que cambia la
+// contraseña, en lugar de abrir una propia.
+func revokeAllSessions(tx *gorm.DB, userID uuid.UUID, outboxEvent *domain.OutboxEvent) error {
+	if err := tx.Model(&sessionModel{}).
+		Where("user_id = ?", userID).
+		Update("is_revoked", true).Error; err != nil {
+		return fmt.Errorf("no se pudo revocar las sesiones del usuario: %w", err)
+	}
+
+	if outboxEvent != nil {
+		if err := tx.Create(toOutboxModel(outboxEvent)).Error; err != nil {
+			return fmt.Errorf("no se pudo encolar el evento de outbox: %w", err)
+		}
+	}
+
 	return nil
 }
 

@@ -2,8 +2,9 @@
 
 # ── Etapa de compilación ──────────────────────────────────────────────────────
 # La imagen coincide con la directiva `go` del go.mod. CLAUDE.md proponía 1.22,
-# pero las versiones vigentes de gin, gorm y circl exigen 1.25 como mínimo.
-FROM golang:1.25-alpine AS builder
+# pero las versiones vigentes de gin, gorm y circl exigen 1.25 como mínimo, y las
+# correcciones de CVE de golang.org/x/net y x/crypto exigen 1.26.
+FROM golang:1.26-alpine AS builder
 
 # ca-certificates se instala acá únicamente para copiar el bundle a la imagen
 # final: sin él, un Postgres con sslmode=require o un broker amqps no validarían

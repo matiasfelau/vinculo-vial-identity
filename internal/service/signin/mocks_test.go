@@ -38,8 +38,8 @@ func (m *decryptorMock) Decrypt(ephemeralPublicKey, ciphertext []byte) ([]byte, 
 }
 
 // DecryptCombined no lo ejercita ningún test de signin: es parte de
-// domain.HPKEDecryptor solo porque /internal/verify-ownership (US-04) lo
-// necesita sobre el mismo descifrador.
+// domain.HPKEDecryptor solo porque la interfaz lo declara (lo usan las pruebas
+// del sellado hacia Audit).
 func (m *decryptorMock) DecryptCombined([]byte) ([]byte, error) {
 	panic("signin: DecryptCombined no se usa en el login")
 }
@@ -125,8 +125,12 @@ type usersMock struct {
 	dniHasheados []string
 }
 
-func (m *usersMock) Create(context.Context, *domain.User, domain.OutboxEvent) error {
+func (m *usersMock) Create(context.Context, *domain.User, domain.OutboxEvent, *domain.GrantConsumption) error {
 	panic("signin: Create no se usa en el login")
+}
+
+func (m *usersMock) ExistsByEmail(context.Context, string) (bool, error) {
+	panic("signin: ExistsByEmail no se usa en el login")
 }
 
 func (m *usersMock) FindByID(context.Context, uuid.UUID) (*domain.User, error) {
@@ -143,13 +147,6 @@ func (m *usersMock) FindByDNIHashed(_ context.Context, dniHashed string) (*domai
 		return nil, m.err
 	}
 	return m.user, nil
-}
-
-// FindByOwnerAndDNIHash no lo ejercita ningún test de signin: es parte de
-// domain.UserRepository solo porque /internal/verify-ownership (US-04) lo
-// necesita sobre el mismo repositorio.
-func (m *usersMock) FindByOwnerAndDNIHash(context.Context, uuid.UUID, string) (*domain.User, error) {
-	panic("signin: FindByOwnerAndDNIHash no se usa en el login")
 }
 
 type sessionsMock struct {

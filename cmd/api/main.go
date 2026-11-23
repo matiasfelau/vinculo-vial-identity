@@ -18,6 +18,7 @@ import (
 
 	"github.com/matiasfelau/vinculo-vial-identity/internal/crypto/auditseal"
 	"github.com/matiasfelau/vinculo-vial-identity/internal/crypto/blindindex"
+	"github.com/matiasfelau/vinculo-vial-identity/internal/crypto/emailcode"
 	"github.com/matiasfelau/vinculo-vial-identity/internal/crypto/hpke"
 	"github.com/matiasfelau/vinculo-vial-identity/internal/crypto/password"
 	"github.com/matiasfelau/vinculo-vial-identity/internal/crypto/symmetric"
@@ -29,9 +30,12 @@ import (
 	"github.com/matiasfelau/vinculo-vial-identity/internal/repository/postgres"
 	"github.com/matiasfelau/vinculo-vial-identity/internal/service/account"
 	"github.com/matiasfelau/vinculo-vial-identity/internal/service/audit"
+	"github.com/matiasfelau/vinculo-vial-identity/internal/service/emailchallenge"
+	"github.com/matiasfelau/vinculo-vial-identity/internal/service/emailverification"
 	"github.com/matiasfelau/vinculo-vial-identity/internal/service/outbox"
-	"github.com/matiasfelau/vinculo-vial-identity/internal/service/ownership"
+	"github.com/matiasfelau/vinculo-vial-identity/internal/service/passwordreset"
 	"github.com/matiasfelau/vinculo-vial-identity/internal/service/reputation"
+	"github.com/matiasfelau/vinculo-vial-identity/internal/service/review"
 	"github.com/matiasfelau/vinculo-vial-identity/internal/service/sanction"
 	"github.com/matiasfelau/vinculo-vial-identity/internal/service/session"
 	"github.com/matiasfelau/vinculo-vial-identity/internal/service/signin"
@@ -41,7 +45,7 @@ import (
 )
 
 func main() {
-	if err := run(); err != nil {
+	if err := execute(); err != nil {
 		// El logger estructurado puede no existir todavía si el fallo fue al
 		// cargar la configuración, así que el último recurso es stderr.
 		slog.Error("el servicio no pudo continuar", slog.String("error", err.Error()))
@@ -49,7 +53,11 @@ func main() {
 	}
 }
 
-func run() error {
+// execute carga la configuración y corre el servicio hasta que llegue SIGINT o
+// SIGTERM, que es como Kubernetes y Docker piden el apagado. main queda en
+// llamarla y salir con el estado que corresponda; el arranque en sí vive en
+// run, que recibe la configuración y el contexto y se prueba sin señales.
+func execute() error {
 	// El .env es una comodidad de desarrollo; en contenedor las variables las
 	// inyecta el orquestador y este archivo no existe.
 	if err := config.LoadDotEnv(".env"); err != nil {
@@ -61,13 +69,23 @@ func run() error {
 		return err
 	}
 
-	logger := newLogger(cfg)
-	slog.SetDefault(logger)
-
-	// El contexto se cancela con SIGINT o SIGTERM, que es como Kubernetes y
-	// Docker piden el apagado.
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
+
+	return run(ctx, cfg)
+}
+
+// run arma las dependencias y sirve hasta que ctx se cancele. Devuelve nil en un
+// apagado ordenado.
+func run(ctx context.Context, cfg *config.Config) error {
+	// Cancelable por separado del contexto de entrada: el apagado también lo
+	// dispara el defer de más abajo para detener los procesos periódicos antes de
+	// cerrar la base.
+	ctx, stop := context.WithCancel(ctx)
+	defer stop()
+
+	logger := newLogger(cfg)
+	slog.SetDefault(logger)
 
 	logger.Info("iniciando vinculo-vial-identity", slog.Any("config", cfg))
 
@@ -106,6 +124,14 @@ func run() error {
 		return err
 	}
 
+	// email_challenges (US-13): los desafíos de la verificación de email y la
+	// recuperación de contraseña. Requiere que users ya esté migrada: declara una
+	// clave foránea hacia ella.
+	emailChallenges, err := postgres.NewEmailChallengeRepository(ctx, db)
+	if err != nil {
+		return err
+	}
+
 	// outbox_events no depende de users ni de sessions: es la tabla del
 	// patrón Transactional Outbox de la Defensa Activa (US-06), ver
 	// domain.OutboxEvent.
@@ -117,6 +143,14 @@ func run() error {
 	// processed_events: la marca de deduplicación de los consumidores (US-08).
 	// Requiere que users ya esté migrada: actualiza sus columnas de reputación.
 	reputationRepo, err := postgres.NewReputationRepository(ctx, db)
+	if err != nil {
+		return err
+	}
+
+	// review_decisions (US-17): el historial de desbloqueos. Requiere que users y
+	// outbox_events ya estén migradas: declara una clave foránea hacia users y el
+	// desbloqueo escribe en el outbox.
+	reviewRepo, err := postgres.NewReviewRepository(ctx, db)
 	if err != nil {
 		return err
 	}
@@ -186,21 +220,96 @@ func run() error {
 		defer close(sweeperDone)
 		sweeper.Run(ctx)
 	}()
+
+	// Sweeper de desafíos de email vencidos (US-13), con el mismo esquema y el
+	// mismo apagado ordenado que el de sanciones.
+	emailSweeper, err := emailchallenge.NewSweeper(emailChallenges, cfg.Email.SweepInterval, cfg.Email.SweepBatchSize, logger)
+	if err != nil {
+		return err
+	}
+	emailSweeperDone := make(chan struct{})
+	go func() {
+		defer close(emailSweeperDone)
+		emailSweeper.Run(ctx)
+	}()
 	defer func() {
 		stop()
 		<-sweeperDone
+		<-emailSweeperDone
 	}()
 
 	renaperSvc := buildRenaper(cfg, logger)
 
-	signUpService, err := signup.New(signup.Deps{
+	// Falla el arranque si la clave de los desafíos no es utilizable: sin ella no
+	// se puede emitir ni confirmar ningún código.
+	emailCodec, err := emailcode.NewFromBase64(cfg.Email.CodeHMACKey.Reveal())
+	if err != nil {
+		return err
+	}
+	challengeEngine, err := emailchallenge.New(emailchallenge.Deps{
+		Challenges: emailChallenges,
+		Codec:      emailCodec,
+		Settings: emailchallenge.Settings{
+			CodeTTL:         cfg.Email.CodeTTL,
+			MaxCodeAttempts: cfg.Email.CodeMaxAttempts,
+			ResendInterval:  cfg.Email.CodeResendInterval,
+			MaxSendsPerDay:  cfg.Email.CodeMaxSendsPerDay,
+		},
+		Logger: logger,
+	})
+	if err != nil {
+		return err
+	}
+
+	emailVerificationService, err := emailverification.New(emailverification.Deps{
 		Decryptor: decryptor,
-		Indexer:   indexer,
-		Cipher:    cipher,
-		Hasher:    hasher,
-		Renaper:   renaperSvc,
 		Users:     users,
+		Engine:    challengeEngine,
+		GrantTTL:  cfg.Email.VerificationGrantTTL,
 		Logger:    logger,
+	})
+	if err != nil {
+		return err
+	}
+
+	passwordResetService, err := passwordreset.New(passwordreset.Deps{
+		Decryptor:           decryptor,
+		Indexer:             indexer,
+		Hasher:              hasher,
+		Renaper:             renaperSvc,
+		Users:               users,
+		Challenges:          emailChallenges,
+		Codec:               emailCodec,
+		Engine:              challengeEngine,
+		GrantTTL:            cfg.Email.ResetGrantTTL,
+		MaxIdentityAttempts: cfg.Email.ResetMaxIdentityAttempts,
+		Logger:              logger,
+	})
+	if err != nil {
+		return err
+	}
+
+	if !cfg.Email.RequireVerificationOnSignup {
+		logger.Warn("SIGNUP_REQUIRE_EMAIL_VERIFICATION=false: el alta no exige verificar el email; las cuentas nuevas sin token no podrán recuperar su contraseña. Solo para desarrollo")
+	}
+
+	if !cfg.Terms.RequireOnSignup {
+		logger.Warn("SIGNUP_REQUIRE_TERMS=false: el alta no exige aceptar los términos; las cuentas nuevas sin el campo quedan sin consentimiento registrado. Solo para desarrollo")
+	}
+
+	signUpService, err := signup.New(signup.Deps{
+		Decryptor:                decryptor,
+		Indexer:                  indexer,
+		Cipher:                   cipher,
+		Hasher:                   hasher,
+		Renaper:                  renaperSvc,
+		Users:                    users,
+		Challenges:               emailChallenges,
+		Codec:                    emailCodec,
+		RequireEmailVerification: cfg.Email.RequireVerificationOnSignup,
+		TermsCurrentVersion:      cfg.Terms.CurrentVersion,
+		RequireTerms:             cfg.Terms.RequireOnSignup,
+		Logger:                   logger,
 	})
 	if err != nil {
 		return err
@@ -220,9 +329,10 @@ func run() error {
 	}
 
 	refreshService, err := session.NewRefreshService(session.RefreshDeps{
-		Sessions: sessions,
-		Tokens:   tokens,
-		Logger:   logger,
+		Sessions:    sessions,
+		Tokens:      tokens,
+		Logger:      logger,
+		MaxLifetime: cfg.Token.SessionMaxLifetime,
 	})
 	if err != nil {
 		return err
@@ -257,25 +367,18 @@ func run() error {
 		return err
 	}
 
-	verifyOwnershipService, err := ownership.New(ownership.Deps{
-		Decryptor: decryptor,
-		Indexer:   indexer,
-		Users:     users,
-		Logger:    logger,
-	})
-	if err != nil {
-		return err
-	}
-
 	router, err := delivery.NewRouter(delivery.RouterConfig{
 		SignUp:        signUpService,
 		SignIn:        signInService,
 		Refresh:       refreshService,
 		Logout:        logoutService,
 		DeleteAccount: deleteAccountService,
-		Logger:        logger,
-		MaxBodyBytes:  cfg.HTTP.MaxBodyBytes,
-		Debug:         cfg.HTTP.Debug,
+		// US-13: verificación de email del alta y recuperación de contraseña.
+		EmailVerification: emailVerificationService,
+		PasswordReset:     passwordResetService,
+		Logger:            logger,
+		MaxBodyBytes:      cfg.HTTP.MaxBodyBytes,
+		Debug:             cfg.HTTP.Debug,
 		// Readiness apoyada en la base: si no responde, ni un alta ni un login
 		// podrían persistirse y el orquestador no debería mandar tráfico acá.
 		ReadinessCheck: func(ctx context.Context) error { return postgres.Ping(ctx, db) },
@@ -295,18 +398,51 @@ func run() error {
 	}
 
 	internalRouter, err := delivery.NewInternalRouter(delivery.InternalRouterConfig{
-		VerifyOwnership: verifyOwnershipService,
-		AuditDNI:        auditDNIService,
-		Logger:          logger,
-		ServiceToken:    cfg.Internal.ServiceToken.Reveal(),
-		MaxBodyBytes:    cfg.HTTP.MaxBodyBytes,
-		Debug:           cfg.HTTP.Debug,
+		AuditDNI:     auditDNIService,
+		Logger:       logger,
+		ServiceToken: cfg.Internal.ServiceToken.Reveal(),
+		MaxBodyBytes: cfg.HTTP.MaxBodyBytes,
+		Debug:        cfg.HTTP.Debug,
 	})
 	if err != nil {
 		return err
 	}
 
-	return serve(ctx, cfg, router, internalRouter, logger)
+	adminRouter, err := buildAdminRouter(cfg, reviewRepo, logger)
+	if err != nil {
+		return err
+	}
+
+	return serve(ctx, cfg, router, internalRouter, adminRouter, logger)
+}
+
+// buildAdminRouter arma el router de administración de US-17, o devuelve nil si
+// ADMIN_API_KEY está vacía: sin clave no hay superficie de administración, y el
+// servicio lo deja dicho en el log en vez de arrancar un puerto sin autenticación.
+func buildAdminRouter(cfg *config.Config, repo domain.ReviewRepository, logger *slog.Logger) (http.Handler, error) {
+	if !cfg.Admin.Enabled() {
+		logger.Warn("ADMIN_API_KEY vacía: el router de administración no arranca; no se pueden consultar ni desbloquear los casos de usuarios reportados")
+		return nil, nil
+	}
+
+	reviewService, err := review.New(review.Deps{Repo: repo, Logger: logger})
+	if err != nil {
+		return nil, err
+	}
+
+	// NewAdminRouter rechaza una clave de menos de 32 caracteres: con
+	// APP_ENV=production la configuración ya lo hizo antes, y esto cubre el
+	// desarrollo.
+	router, err := delivery.NewAdminRouter(delivery.AdminRouterConfig{
+		Review: reviewService,
+		Logger: logger,
+		APIKey: cfg.Admin.APIKey.Reveal(),
+		Debug:  cfg.HTTP.Debug,
+	})
+	if err != nil {
+		return nil, err
+	}
+	return router, nil
 }
 
 func newLogger(cfg *config.Config) *slog.Logger {
@@ -475,10 +611,12 @@ func buildRenaper(cfg *config.Config, logger *slog.Logger) *renaper.CircuitBreak
 	}, logger)
 }
 
-// serve levanta el servidor público y el interno (US-04) a la vez, cada uno
-// en su propio puerto, y los apaga juntos: son dos superficies del mismo
-// proceso y ninguna tiene sentido sin la otra en pie.
-func serve(ctx context.Context, cfg *config.Config, publicHandler, internalHandler http.Handler, logger *slog.Logger) error {
+// serve levanta el servidor público, el interno y, si hay router, el de
+// administración a la vez, cada uno en su propio puerto, y los apaga juntos: son
+// superficies del mismo proceso y ninguna tiene sentido sin las otras en pie.
+// adminHandler nil significa que ADMIN_API_KEY está vacía: ese servidor no se
+// levanta.
+func serve(ctx context.Context, cfg *config.Config, publicHandler, internalHandler, adminHandler http.Handler, logger *slog.Logger) error {
 	newServer := func(addr string, handler http.Handler) *http.Server {
 		return &http.Server{
 			Addr:    addr,
@@ -495,6 +633,9 @@ func serve(ctx context.Context, cfg *config.Config, publicHandler, internalHandl
 	servers := map[string]*http.Server{
 		"público": newServer(cfg.HTTP.Addr(), publicHandler),
 		"interno": newServer(cfg.Internal.Addr(), internalHandler),
+	}
+	if adminHandler != nil {
+		servers["administración"] = newServer(cfg.Admin.Addr(), adminHandler)
 	}
 
 	errCh := make(chan error, len(servers))

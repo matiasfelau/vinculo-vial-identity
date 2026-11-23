@@ -3,8 +3,9 @@
 Microservicio de identidad de Vínculo Vial. Bounded context estricto: identidad
 y seguridad. No conoce vehículos ni patentes.
 
-Alcance actual: **US-01 / CU-01 — Registro de un vecino** y **US-02 / CU-02 —
-Inicio de sesión**.
+Alcance actual: **US-01 / CU-01 — Registro de un vecino**, **US-02 / CU-02 —
+Inicio de sesión** y, en la etapa 1, **US-12** (vida máxima de la sesión) y
+**US-13** (verificación de email y recuperación de contraseña).
 
 ## Cómo funciona un alta
 
@@ -33,14 +34,33 @@ POST /api/v1/auth/signup
       ├─ 3. Validar formato y fortaleza        → 400 si algo no pasa
       │      (incluye la selfie: base64 +
       │       magic bytes JPEG/PNG + tamaño)
-      ├─ 4. Verificar identidad contra RENAPER → 400 si no se confirma
+      ├─ 4. Comprobar la versión de los        → 400 TERMS_NOT_ACCEPTED (US-19)
+      │      términos (antes de RENAPER)
+      ├─ 5. Validar el token de verificación   → 400 EMAIL_NOT_VERIFIED (US-13)
+      │      de email (antes de RENAPER)
+      ├─ 6. Verificar identidad contra RENAPER → 400 si no se confirma
       │      (dni + tramite + sexo + selfie)      500 si RENAPER no responde
-      ├─ 5. Blind Index del DNI (HMAC-SHA256)
-      ├─ 6. Cifrar el DNI at-rest (AES-256-GCM, clave distinta)
-      ├─ 7. Derivar la contraseña (Argon2id)
-      └─ 8. Persistir                          → 409 si email o DNI ya existen
-                                                → 201
+      ├─ 7. Blind Index del DNI (HMAC-SHA256)
+      ├─ 8. Cifrar el DNI at-rest (AES-256-GCM, clave distinta)
+      ├─ 9. Derivar la contraseña (Argon2id)
+      └─ 10. Persistir, consumiendo el token   → 409 si email o DNI ya existen
+              y guardando versión y fecha de
+              los términos, en la misma
+              transacción                        → 201
 ```
+
+Desde US-19 el payload lleva además `terms_version`, la versión de los Términos y
+Condiciones y Política de Privacidad que el usuario aceptó en el formulario (ver
+[Aceptación de los términos](#aceptación-de-los-términos-us-19)).
+
+Desde US-13 el payload lleva además `email_verification_token`, el token que
+emite la confirmación del código enviado al email (ver
+[Verificación de email y recuperación de contraseña](#verificación-de-email-y-recuperación-de-contraseña-us-13)).
+Con `SIGNUP_REQUIRE_EMAIL_VERIFICATION=true` (el default) es obligatorio: sin él,
+o con uno vencido, usado o de otro email, el alta responde `400
+EMAIL_NOT_VERIFIED`. El token se valida antes de RENAPER y se consume en la
+misma transacción que crea el usuario —que queda con `email_verified_at`—, así
+que un alta que falla no lo gasta y un token no sirve para dos altas.
 
 El DNI, el trámite, el sexo, la selfie y la contraseña en claro existen
 únicamente en memoria durante estos pasos, en buffers que se limpian al salir
@@ -57,6 +77,8 @@ una identidad que no se confirmó.
 |---|---|
 | `201` | Alta exitosa. Devuelve el id opaco del usuario, sin tokens: la sesión es US-02. |
 | `400` | El cuerpo no es interpretable, el mensaje cifrado no tiene forma de mensaje HPKE, los datos descifrados no validan, o RENAPER no pudo confirmar la identidad. Detalla los campos rechazados de la validación local, nunca los valores; el rechazo de RENAPER es siempre genérico. |
+| `400` `TERMS_NOT_ACCEPTED` | `terms_version` falta (si se exige) o no es la versión vigente (`TERMS_CURRENT_VERSION`). No se consultó RENAPER ni se gastó el token de email (US-19). |
+| `400` `EMAIL_NOT_VERIFIED` | El token de verificación de email falta (si se exige), venció, ya se usó o es de otro email. Los cuatro casos son indistinguibles (US-13). |
 | `409` | El email o el DNI ya existen. Mensaje genérico deliberado: distinguirlos permitiría enumerar usuarios. |
 | `500` | Un mensaje bien formado que no descifra, RENAPER no pudo consultarse (caído, timeout — no es un veredicto sobre la identidad), o un fallo interno. Sin detalle criptográfico en el cuerpo. |
 
@@ -75,6 +97,47 @@ contrato dice "base64" sin precisar cuál y cada plataforma elige distinto.
 
 El `403` que enumera el contrato compartido lo produce el gateway cuando la App
 Attestation no convence; nunca lo emite este servicio.
+
+## Aceptación de los términos (US-19)
+
+El Frontend muestra un documento único —Términos y Condiciones y Política de
+Privacidad, versionado— y exige aceptarlo en el alta. Identity guarda qué
+versión aceptó cada usuario y cuándo, para que el consentimiento sea expreso,
+informado y demostrable (art. 5 de la Ley 25.326).
+
+- **Qué viaja:** `terms_version` dentro del payload HPKE del alta, junto al resto
+  de los datos. No hay un endpoint aparte.
+- **Qué se comprueba:** que sea exactamente `TERMS_CURRENT_VERSION` (por defecto
+  `"1.0"`). Si falta (con `SIGNUP_REQUIRE_TERMS=true`) o es otra, el alta responde
+  `400 TERMS_NOT_ACCEPTED`. La comprobación corre después de la validación de
+  formato y antes del token de email y de RENAPER: un rechazo no consume ni
+  gasta nada.
+- **Qué se guarda:** `users.terms_version` y `users.terms_accepted_at` (el
+  instante del alta), en la misma transacción que crea el usuario. Las cuentas
+  anteriores a US-19 quedan en `NULL`, sin backfill: no hay consentimiento que
+  registrar.
+- **`SIGNUP_REQUIRE_TERMS=false`:** el campo puede faltar y la cuenta queda sin
+  versión ni fecha. Si el campo llega, se valida igual: una versión equivocada
+  sigue siendo `400 TERMS_NOT_ACCEPTED`. Existe solo para no romper el alta entre
+  el merge de Identity y el del Frontend; la configuración lo rechaza con
+  `APP_ENV=production`.
+- **Anti-enumeración:** la respuesta no depende de que exista una cuenta, un DNI o
+  un email, y la versión no se loguea.
+
+El acceso, la rectificación y la supresión de los datos (arts. 14 y 16) no tienen
+autoservicio: se piden por email al contacto que figura en el documento. La
+supresión total ya existe como baja de cuenta.
+
+**Fuera de alcance:** volver a pedir la aceptación cuando cambie la versión. Una
+cuenta conserva la versión con la que se registró; si se publica una nueva, solo
+cambia lo que exige el alta de ahí en adelante, y la app informa los cambios.
+
+### Variables
+
+| Variable | Default | Descripción |
+|---|---|---|
+| `TERMS_CURRENT_VERSION` | `1.0` | Versión vigente. Hasta 16 caracteres (largo de `users.terms_version`). Tiene que coincidir con `TERMS_VERSION` del Frontend |
+| `SIGNUP_REQUIRE_TERMS` | `true` | En `false`, el alta no exige `terms_version` (si llega, se valida igual). **La configuración lo rechaza con `APP_ENV=production`** |
 
 ## Verificación de identidad (RENAPER)
 
@@ -174,10 +237,218 @@ TTL 15 minutos, claim `sub` = UUID interno del usuario y ningún otro
 dato —ni DNI, ni email, ni el Blind Index—. Refresh Token opaco
 (`crypto/rand`), TTL 30 días, persistido en `sessions` solo como su SHA-256.
 
+### Vida máxima de la sesión (US-12)
+
+El Refresh Token rota en cada `/auth/refresh`, así que una sesión podría
+renovarse para siempre. Para que no sea así, cada sesión lleva `started_at`,
+el instante del login con contraseña: el signin lo fija en el momento actual y
+la rotación lo copia sin cambios a la sesión nueva.
+
+- `/auth/refresh` responde el mismo `401 sesion_invalida` que una sesión
+  vencida cuando `now > started_at + SESSION_MAX_DAYS`. El cuerpo y el status
+  no distinguen el motivo; el log interno sí (`vida máxima de la sesión
+  superada`, con el `user_id`).
+- No dispara la Defensa Activa: el cliente no reusó nada, solo superó el
+  plazo. Si la sesión además estaba revocada, gana la vida máxima y tampoco
+  se revoca el resto de las sesiones.
+- `REFRESH_TOKEN_TTL_DAYS` (30) sigue siendo la inactividad máxima: se mide
+  desde la última rotación y se controla antes que la vida máxima.
+- `SESSION_MAX_DAYS` (default 90) tiene que ser positivo; si no, el servicio
+  no arranca.
+
 **Fuera de alcance de este CU**: bloqueo de cuenta por intentos fallidos
 (`failed_login_attempts` / `lock_until` no existen; la defensa contra fuerza
-bruta masiva es del gateway), recuperación de contraseña, y la rotación del
-Refresh Token (`/refresh`, `/logout`), que es US-03.
+bruta masiva es del gateway), y la rotación del Refresh Token (`/refresh`,
+`/logout`), que es US-03. La recuperación de contraseña es US-13: ver
+[más abajo](#verificación-de-email-y-recuperación-de-contraseña-us-13).
+
+## Verificación de email y recuperación de contraseña (US-13)
+
+Dos flujos con la misma mecánica: un código de 6 dígitos que llega por email, que
+se cambia por un token de un solo uso. Notification envía los mails
+(`email.requested`); este servicio decide cuándo y con qué.
+
+**Verificación del email en el alta.** El vecino pide un código para su email,
+lo confirma, y el token que recibe viaja en el signup
+(`email_verification_token`). El alta lo valida antes de RENAPER y lo consume en
+la misma transacción que crea el usuario, que queda con `email_verified_at`.
+
+**Recuperación de contraseña.** El vecino ingresa su DNI, confirma el código que
+llega al email de la cuenta y, con el `reset_token`, **revalida su identidad**:
+escanea el DNI, hace la prueba de vida y manda la contraseña nueva. Solo
+recuperan las cuentas con `email_verified_at` no nulo; las cuentas anteriores a
+US-13 no pueden.
+
+```
+POST /api/v1/auth/email-verifications            { email }                  → 202
+POST /api/v1/auth/email-verifications/confirm    { email, code }            → 200 { verification_token, expires_in }
+POST /api/v1/auth/signup                         { …vigente, email_verification_token }
+
+POST /api/v1/auth/password-resets                { dni }                    → 202
+POST /api/v1/auth/password-resets/confirm        { dni, code }              → 200 { reset_token, expires_in }
+POST /api/v1/auth/password-resets/complete       { reset_token, dni, tramite, sexo, selfie, new_password } → 204
+```
+
+Los cinco endpoints reciben el sobre HPKE vigente (`{ ephemeral_public_key,
+ciphertext }`, `info` vacío, igual que signup y signin): ni el email, ni el DNI, ni
+el código, ni la contraseña viajan en el cuerpo. Los cuatro primeros llevan un
+tope de cuerpo propio de 8 KiB; `complete` lleva una selfie y usa el del alta.
+
+### Respuestas
+
+Los códigos nuevos van en mayúsculas; donde el caso es el mismo que en `/auth`, se
+reusan los de allá.
+
+| Endpoint | Status | `code` | Caso |
+|---|---|---|---|
+| `email-verifications` | 202 | — | Siempre que el email sea válido, exista o no una cuenta |
+| | 400 | `datos_invalidos` | Email mal formado |
+| `email-verifications/confirm` | 200 | — | `{ "verification_token", "expires_in" }` (segundos) |
+| | 400 | `INVALID_CODE` | Incorrecto, vencido, usado, inexistente o sin intentos: indistinguibles. Un email o un código mal formados también |
+| `signup` (cambio) | 400 | `EMAIL_NOT_VERIFIED` | Token ausente, vencido, usado o de otro email |
+| `password-resets` | 202 | — | Siempre que el DNI sea válido |
+| | 400 | `datos_invalidos` | DNI mal formado |
+| `password-resets/confirm` | 200 | — | `{ "reset_token", "expires_in" }` |
+| | 400 | `INVALID_CODE` | Igual que en la verificación; también un DNI sin cuenta o con la cuenta sin email verificado |
+| `password-resets/complete` | 204 | — | Contraseña cambiada |
+| | 400 | `INVALID_RESET_TOKEN` | Ausente, vencido, usado o sin intentos |
+| | 400 | `datos_invalidos` | Contraseña o campos inválidos (mismo detalle que el alta). No descuenta intentos |
+| | 400 | `identidad_no_verificada` | RENAPER rechaza, o el DNI escaneado no es el de la cuenta. Descuenta un intento del token |
+| todos | 400 | `solicitud_invalida` | Sobre HPKE ausente o mal formado |
+| todos | 429 | — | Rate limit (Kong) |
+| todos | 503 | `dependencia_no_disponible` | Base o RENAPER caídos; header `Retry-After`. No descuenta intentos |
+
+Un RENAPER que responde con un error de su lado o fuera de contrato (no que no
+responda) sale como `502 upstream_invalido`, igual que en el alta.
+
+### Anti-enumeración
+
+Ningún status, cuerpo, orden de magnitud de latencia ni log de nivel info revela si
+existe un DNI, un email o una cuenta.
+
+- Los dos `202` son idénticos exista o no la cuenta. El outbox se escribe solo
+  cuando corresponde.
+- Con un **email ya registrado**, el pedido de verificación encola
+  `ACCOUNT_EXISTS` (sin código) en lugar de `EMAIL_VERIFICATION`: el dueño de la
+  cuenta se entera, quien tantea no.
+- Con un **DNI sin cuenta** (o con la cuenta sin email verificado) el pedido de
+  recuperación no hace nada.
+- Los motivos de un `INVALID_CODE` son indistinguibles: el error no los diferencia
+  ni en el tipo ni en el texto.
+- Los logs de estos flujos nunca llevan el email, el DNI, el código ni los
+  tokens. Lo que decide el flujo interno (si se envió, si se descartó por el
+  throttle) queda solo en nivel debug y sin identificar al sujeto.
+
+### Reglas de los desafíos
+
+- **Código:** 6 dígitos de `crypto/rand`, sin sesgo, comparado a tiempo constante.
+  No se guarda en claro: solo su HMAC. En claro solo viaja en el payload del
+  outbox.
+- **Pedido nuevo del mismo subject:** reemplaza el código, pone los intentos en 0 y
+  anula el grant anterior, siempre que el throttle lo permita.
+- **Throttle:** solo se envía si pasaron `EMAIL_CODE_RESEND_SECONDS` desde el último
+  envío y hubo menos de `EMAIL_CODE_MAX_SENDS_PER_DAY` envíos en la ventana de
+  24 h. Si no, no se envía y la respuesta es la misma `202`. `ACCOUNT_EXISTS` cuenta
+  para el throttle del subject del email. Se decide dentro de la transacción, con la
+  fila bloqueada: pedidos paralelos del mismo subject no lo saltean.
+- **Confirmar:** sin código, con código vencido o con `EMAIL_CODE_MAX_ATTEMPTS`
+  intentos gastados, responde `INVALID_CODE`. Uno incorrecto suma un intento. Uno
+  correcto borra el código y emite el grant: 32 bytes aleatorios en base64url sin
+  relleno, de los que solo se guarda el SHA-256.
+- **Grants:** el de verificación lo consume el signup, y token y email tienen que
+  coincidir. El de recuperación lo consume `complete`; cada
+  `identidad_no_verificada` suma un intento, y al llegar a
+  `PASSWORD_RESET_MAX_IDENTITY_ATTEMPTS` el token queda inválido.
+
+### Completar la recuperación
+
+`complete` valida en este orden, y recién entonces cambia nada:
+
+1. el `reset_token` (`INVALID_RESET_TOKEN`);
+2. la contraseña y los campos, con las reglas del alta —incluida la similitud con
+   el email y el DNI— (`datos_invalidos`);
+3. que el DNI escaneado sea el de la cuenta, por Blind Index y en tiempo constante
+   (`identidad_no_verificada`, sin gastar una llamada a RENAPER);
+4. la identidad contra RENAPER, con el timeout y el breaker vigentes.
+
+Después, **en una única transacción**: cambia el hash de la contraseña (Argon2id),
+consume el token, revoca todas las sesiones del usuario con el mismo código que la
+Defensa Activa (`user.sessions.revoked` con `reason: PASSWORD_RESET`) y encola el
+aviso `email.requested` con la plantilla `PASSWORD_CHANGED`. Si cualquier paso
+falla no queda nada hecho. Los otros dispositivos con sesión abierta caen al login
+en su próximo refresh.
+
+La app compara el DNI escaneado con el ingresado antes de enviar; el servidor lo
+vuelve a validar.
+
+### Tabla `email_challenges`
+
+Creada con `AutoMigrate` y una clave foránea hacia `users` (`ON DELETE CASCADE`: la
+baja de la cuenta se lleva sus desafíos), todo bajo un advisory lock. Hay a lo sumo
+una fila por `(purpose, subject_hmac)`.
+
+| Columna | Tipo | Nota |
+|---|---|---|
+| `id` | uuid PK | |
+| `purpose` | varchar(32) not null | `EMAIL_VERIFICATION` o `PASSWORD_RESET` |
+| `subject_hmac` | varchar(64) not null | HMAC-SHA256(`EMAIL_CODE_HMAC_KEY`, `purpose + ":" + email normalizado`) o (`purpose + ":" + user_id`). Único junto con `purpose` |
+| `user_id` | uuid null | Solo `PASSWORD_RESET` |
+| `code_hmac` | varchar(64) null | HMAC-SHA256(`EMAIL_CODE_HMAC_KEY`, `id + ":" + código`) |
+| `code_expires_at` | timestamptz null | |
+| `code_attempts` | int not null default 0 | |
+| `grant_hash` | varchar(64) null, único | SHA-256 del token emitido al confirmar el código |
+| `grant_expires_at` | timestamptz null | |
+| `grant_attempts` | int not null default 0 | Rechazos de identidad (solo `PASSWORD_RESET`) |
+| `sends_count` | int not null default 0 | Envíos en la ventana de 24 h |
+| `sends_window_started_at` | timestamptz null | |
+| `last_sent_at` | timestamptz null | |
+| `consumed_at` | timestamptz null | |
+| `created_at` | timestamptz not null | |
+
+**Sweeper.** `emailchallenge.Sweeper`, con el mismo esquema que el de sanciones: un
+barrido al arrancar y después uno por `EMAIL_CHALLENGE_SWEEP_INTERVAL`, de a lotes
+de `EMAIL_CHALLENGE_SWEEP_BATCH_SIZE`, con `FOR UPDATE SKIP LOCKED` para que varias
+réplicas repartan el trabajo. Borra las filas cuyo `code_expires_at`,
+`grant_expires_at` y fin de ventana de envíos (`sends_window_started_at + 24 h`) ya
+pasaron todos; un plazo ausente cuenta como pasado.
+
+### Outbox: `email.requested`
+
+Las filas de `email.requested` llevan el email y el código en claro, así que **se
+borran al marcarse como enviadas** (`OutboxRepository.MarkSent`), en lugar de
+quedar como `sent`. Una fila pendiente, en cambio, conserva el código hasta que
+Notification la reciba.
+
+### Variables
+
+| Variable | Default | Nota |
+|---|---|---|
+| `EMAIL_CODE_HMAC_KEY` | — | **Obligatoria.** Base64 de al menos 32 bytes. La genera `go run ./cmd/genkeys`. Propia de este mecanismo: el servicio no arranca si coincide con `AES_KEY` o `HMAC_SECRET` |
+| `EMAIL_CODE_TTL_MINUTES` | `10` | Vida del código |
+| `EMAIL_CODE_MAX_ATTEMPTS` | `5` | Intentos por código |
+| `EMAIL_CODE_RESEND_SECONDS` | `60` | Mínimo entre dos envíos al mismo subject. **Tiene que coincidir con el del Frontend** (cuenta regresiva del botón "Reenviar") |
+| `EMAIL_CODE_MAX_SENDS_PER_DAY` | `5` | Envíos por subject en 24 h |
+| `EMAIL_VERIFICATION_GRANT_TTL_MINUTES` | `30` | Vida del token de verificación de email |
+| `PASSWORD_RESET_GRANT_TTL_MINUTES` | `15` | Vida del `reset_token` |
+| `PASSWORD_RESET_MAX_IDENTITY_ATTEMPTS` | `3` | Rechazos de identidad por `reset_token` |
+| `SIGNUP_REQUIRE_EMAIL_VERIFICATION` | `true` | En `false`, el alta no exige el token (si llega uno, se valida y se consume igual). Existe solo para no romper el alta en desarrollo hasta que el Frontend lo envíe; **la configuración lo rechaza con `APP_ENV=production`** |
+| `EMAIL_CHALLENGE_SWEEP_INTERVAL` | `1h` | Cada cuánto corre el sweeper |
+| `EMAIL_CHALLENGE_SWEEP_BATCH_SIZE` | `500` | Filas por sentencia de borrado |
+
+### Fuera de alcance y límites conocidos
+
+- Cambio de contraseña con la sesión iniciada, cambio de email y verificación del
+  email de cuentas existentes: sin email verificado no hay recuperación.
+- La prueba de vida no se verifica en el servidor: es una limitación documentada
+  del contrato.
+- El `409 registro_no_disponible` del alta, por DNI ya registrado, sigue
+  existiendo como en US-01: un email libre con un DNI ya registrado llega a él
+  después de verificar el email y de RENAPER.
+- Un `email.requested` que no se pudo entregar sigue en `outbox_events`, con el
+  código en claro, hasta que el broker responda: Notification descarta los
+  vencidos, pero la fila no tiene vencimiento propio en este servicio.
+- El tiempo de respuesta de los `202` es del mismo orden de magnitud en los
+  distintos casos (una o dos operaciones de base), no idéntico.
 
 ## Los dos mecanismos criptográficos
 
@@ -193,7 +464,9 @@ A eso se suman el Blind Index del DNI (HMAC-SHA256, `HMAC_SECRET`) que habilita
 la detección de duplicados sin exponer el dato, y Argon2id para la contraseña.
 
 Comprometer una clave no debe comprometer las otras, y cada una tiene su propio
-ciclo de rotación. `go run ./cmd/genkeys` genera las cuatro.
+ciclo de rotación. `go run ./cmd/genkeys` genera las cinco claves privadas: las
+cuatro de arriba (HPKE, `AES_KEY`, `HMAC_SECRET` y la de firma JWT) y
+`EMAIL_CODE_HMAC_KEY`, la de los códigos de email (US-13).
 
 ## Firma de sesión (JWT)
 
@@ -211,47 +484,22 @@ RSASSA-PKCS1-v1_5 sobre SHA-256, algo que la librería estándar cubre por
 completo y que este servicio nunca necesita volver a interpretar —firma, pero
 no verifica los tokens que él mismo emite—.
 
-## Router interno (US-04)
+## Router interno
 
 Además del router público (`HTTP_PORT`, default `8080`), el servicio levanta
 un segundo `*http.Server` en `HTTP_INTERNAL_PORT` (default **`8081`**) con las
 rutas `/internal/*` que otros componentes de la plataforma consumen directo
 por red interna. Kong nunca enruta hacia acá.
 
-Desde otro contenedor de la red `vinculo-vial`, la llamada completa es:
+Hoy expone una sola ruta, `POST /internal/audit/dni`, que usa
+`vinculo-vial-alert` para obtener el DNI del emisor sellado hacia el Audit
+Service: ver [Sellado del DNI para Audit](#sellado-del-dni-para-audit-us-11).
 
-```bash
-curl -X POST http://vinculo-vial-identity:8081/internal/verify-ownership \
-  -H "X-Internal-Service-Token: $INTERNAL_SERVICE_TOKEN" \
-  -H "Content-Type: application/json" \
-  -d '{"owner_id":"<UUID>","dni_enc":"<base64 de enc||ciphertext>"}'
-```
-
-Hoy expone dos rutas. La primera, `POST /internal/verify-ownership`, la usa
-`vinculo-vial-vehicle` para confirmar si un DNI corresponde al usuario dueño
-de `owner_id`. Identity lo descifra, calcula su Blind Index y compara contra
-`users`, sin persistir ni loguear nunca el DNI en claro. La segunda,
-`POST /internal/audit/dni`, la usa `vinculo-vial-alert` para obtener el DNI del
-emisor sellado hacia el Audit Service: ver
-[Sellado del DNI para Audit](#sellado-del-dni-para-audit-us-11).
-
-`owner_id` viaja en el **body**, no en un header: es el mismo UUID que Kong
-le inyectó a Vehicle como `X-User-Id`, reenviado como campo del JSON.
-
-`dni_enc` es un **único blob** `enc || ciphertext` en base64 —los primeros 32
-bytes son la clave pública efímera del KEM (X25519), el resto el ciphertext
-del AEAD—, **no las dos piezas separadas** que usan `/signup` y `/signin` en
-sus campos `ephemeral_public_key` y `ciphertext`. Se aceptan las cuatro
-variantes de base64. Desde el ajuste de arquitectura de agosto 2026 lo cifra
-Vehicle contra `IDENTITY_HPKE_PUBLIC_KEY`, con el DNI que obtiene de su
-integración con la DNRPA; antes reenviaba sin abrir uno producido por la app.
-
-| Código | Cuándo |
-|---|---|
-| `200` | `{"match": true}` o `{"match": false}`, y nada más. Que el `owner_id` no exista y que el DNI no le corresponda son **indistinguibles**: ambos son `false`, para no convertir el endpoint en un oráculo de verificación de DNI. |
-| `400` | Cuerpo no interpretable, `owner_id` que no es UUID, `dni_enc` que no es base64, o criptograma sin forma de mensaje HPKE. |
-| `401` | Falta `X-Internal-Service-Token` o es incorrecto. |
-| `500` | El criptograma no descifra (clave desincronizada o manipulación), o falla algo interno. |
+Desde la US-14, Identity ya no verifica la titularidad de las patentes:
+`POST /internal/verify-ownership` se eliminó, junto con el servicio que lo
+atendía. Vehicle vincula la patente al usuario de la sesión sin consultar a
+Identity. Una llamada a esa ruta, incluso con el secreto de servicio correcto,
+responde `404`.
 
 Que el puerto no esté publicado (ni en Kong ni en el `docker-compose` de este
 servicio) es una condición necesaria pero no suficiente: dentro de una red
@@ -261,6 +509,123 @@ además el secreto `INTERNAL_SERVICE_TOKEN` en la cabecera
 `X-Internal-Service-Token`, comparado a tiempo constante. Sin ese secreto (o
 con uno incorrecto), el servidor responde `401` — incluso para una ruta que
 no existe, para no delatar por el status qué rutas expone.
+
+## Router de administración (US-17)
+
+Un tercer `*http.Server`, en `HTTP_ADMIN_PORT` (default **`8082`**), con las
+rutas `/admin/*` para que un operador consulte los usuarios reportados y los
+desbloquee. Es una interfaz de administración privada: Kong no la expone, no hay
+rol de administrador ni sesión de usuario, y la interfaz gráfica queda como
+trabajo futuro. En el `docker-compose.yml` de desarrollo el puerto se publica
+solo en `127.0.0.1:8082`, para poder usar `curl`. En AWS, estos puertos se
+alcanzan solo desde la VPC (security group de administración y port forwarding de
+SSM): eso es de la etapa de AWS y no está resuelto en este repo.
+
+**Autenticación.** Toda ruta exige `X-Admin-Api-Key` igual a `ADMIN_API_KEY`
+(mínimo 32 caracteres), comparada a tiempo constante (sobre el SHA-256 de ambos
+valores, así tampoco se filtra el largo). Sin clave válida responde `401` en
+cualquier ruta, exista o no, y no llega a ningún caso de uso. La clave es propia
+de este mecanismo: tiene que ser distinta de `INTERNAL_SERVICE_TOKEN` (la
+configuración lo rechaza) y distinta de la de Alert.
+
+**Configuración.**
+
+| Variable | Default | Notas |
+|---|---|---|
+| `HTTP_ADMIN_PORT` | `8082` | Distinto de `HTTP_PORT` y `HTTP_INTERNAL_PORT` |
+| `ADMIN_API_KEY` | vacía | Vacía: el router de administración **no arranca** y el servicio lo avisa en el log (WARN). Con `APP_ENV=production`, una clave de menos de 32 caracteres impide arrancar |
+
+Para generar la clave: `openssl rand -base64 48`. `genkeys` no la genera: es un
+secreto de acceso, no una clave criptográfica del servicio.
+
+**Errores.** `{ "error", "code", "request_id" }` (el `request_id` correlaciona con
+el log). Los códigos son en mayúsculas: `UNAUTHORIZED`, `INVALID_BODY`,
+`INVALID_QUERY`, `USER_NOT_FOUND`, `NOT_UNDER_REVIEW`, `DEPENDENCY_UNAVAILABLE`
+(con `Retry-After`), `NOT_FOUND` y `METHOD_NOT_ALLOWED` (estos dos, solo con una
+clave válida).
+
+| Método y ruta | Respuesta |
+|---|---|
+| `GET /admin/v1/review-cases?status=UNDER_REVIEW&limit=50&cursor=` | `200 { "items": [ { "user_id", "account_status", "report_count", "reputation_score", "under_review_since", "last_reported_at" } ], "next_cursor" }` |
+| `POST /admin/v1/review-cases/{user_id}/unblock` | body `{ "reason", "operator" }` → `204`; `404 USER_NOT_FOUND`; `409 NOT_UNDER_REVIEW`; `400 INVALID_BODY` |
+| `GET /admin/v1/review-cases/{user_id}/decisions` | `200 { "items": [ { "decision", "reason", "operator", "decided_at" } ] }` |
+
+**Listado.** Del caso más viejo al más nuevo (`under_review_since`; si es nulo, la
+fecha de alta de la cuenta), con paginación por cursor opaco: `next_cursor` es
+`null` en la última página. `status` solo admite `UNDER_REVIEW`, `limit` va de 1 a
+100 y un cursor que no devolvió el servicio da `400 INVALID_QUERY`. Las fechas
+van en UTC (RFC 3339). Las respuestas **nunca** incluyen email ni DNI.
+
+**Desbloqueo.** `reason` de 10 a 500 caracteres y `operator` de 1 a 100 (contados
+en caracteres y sin los espacios de los extremos); el cuerpo no admite campos
+desconocidos. En **una transacción**: `account_status = ACTIVE`,
+`report_count = 0` y `under_review_since = NULL`; una fila en `review_decisions`;
+y `user.status.changed` con `account_status: "ACTIVE"` y `reason:
+"MANUAL_UNBLOCK"` en el outbox (ver [`user.status.changed`](#userstatuschanged)).
+`report_count` vuelve a 0 para que el próximo reporte abra un caso nuevo y no
+vuelva a bloquear a la cuenta por los reportes viejos; `reputation_score` no
+cambia. Si falla cualquier paso no queda nada hecho. Dos desbloqueos concurrentes
+de la misma cuenta: uno gana (`204`) y el otro recibe `409 NOT_UNDER_REVIEW`. Un
+`user_id` que no es un UUID responde `404 USER_NOT_FOUND`.
+
+**Historial.** Las decisiones de la cuenta, de la más nueva a la más vieja; vacío
+si no hay (o si el id no existe).
+
+**Lo que se loguea.** El id de la decisión y el del usuario; nunca el `reason` ni
+el `operator`.
+
+### Tabla `review_decisions`
+
+Creada con `AutoMigrate` en el arranque, con la clave foránea a `users` agregada
+con SQL idempotente (como `sessions`). La baja de la cuenta se lleva su historial.
+
+| Columna | Tipo | Nota |
+|---|---|---|
+| `id` | uuid | PK |
+| `user_id` | uuid NOT NULL | FK a `users(id)` ON DELETE CASCADE; con índice |
+| `decision` | varchar(16) NOT NULL | `UNBLOCK` |
+| `reason` | varchar(500) NOT NULL | Texto del operador |
+| `operator` | varchar(100) NOT NULL | Quién decidió |
+| `decided_at` | timestamptz NOT NULL | |
+
+### `email.requested`
+
+Le pide a Notification que envíe un email (US-13). Sale por el outbox, con el
+routing key igual al `eventType`. `actor` es el `user_id` en `PASSWORD_RESET` y
+`PASSWORD_CHANGED`, y `null` en `EMAIL_VERIFICATION` y `ACCOUNT_EXISTS`: ahí todavía
+no hay cuenta, o el pedido no es de su dueño.
+
+```json
+{
+  "eventId": "…",
+  "eventType": "email.requested",
+  "timestamp": "2026-11-02T15:04:05Z",
+  "producer": "vinculo-vial-identity",
+  "actor": "6f2a4c1e-9d3b-4f5a-8c7d-1e2f3a4b5c6d",
+  "payload": {
+    "template": "PASSWORD_RESET",
+    "to": "vecino@example.com",
+    "code": "042917",
+    "expires_at": "2026-11-02T15:14:05Z"
+  }
+}
+```
+
+| `template` | `code` | `expires_at` | `actor` |
+|---|---|---|---|
+| `EMAIL_VERIFICATION` | los 6 dígitos | vencimiento del código | `null` |
+| `ACCOUNT_EXISTS` | `null` | `null` | `null` |
+| `PASSWORD_RESET` | los 6 dígitos | vencimiento del código | `user_id` |
+| `PASSWORD_CHANGED` | `null` | `null` | `user_id` |
+
+Es el único evento con datos personales —el destinatario y el código—, porque
+Notification no tiene otra forma de saberlos. Por eso ni el publisher, ni el
+publisher inerte, ni el worker del outbox los incluyen jamás en un log o en el
+`last_error` de la fila, y la fila se borra al enviarse. Core declara la cola
+`notification.email-requested`.
+
+El `user.sessions.revoked` de la recuperación de contraseña usa
+`reason: PASSWORD_RESET`; Notification lo trata como los demás motivos.
 
 ## Baja de cuenta (US-11)
 
@@ -509,7 +874,7 @@ curl -X POST http://vinculo-vial-identity:8081/internal/audit/dni \
 |---|---|---|
 | 200 | — | `{ "dni_enc_audit": "<base64 de enc‖ct>", "audit_key_id": "<string>" }`, y nada más |
 | 400 | `INVALID_BODY` | Cuerpo no interpretable, o `user_id` o `alert_id` ausentes, nulos o que no son UUID |
-| 401 | `servicio_no_autorizado` | Falta `X-Internal-Service-Token` o es incorrecto (igual que `verify-ownership`) |
+| 401 | `servicio_no_autorizado` | Falta `X-Internal-Service-Token` o es incorrecto (igual que el resto de `/internal/*`) |
 | 404 | `USER_NOT_FOUND` | El usuario no existe. Alert lo traduce en `403 ACCOUNT_DELETED` |
 | 500 | `error_interno` | Falla algo interno, por ejemplo un `dni_encrypted` que no abre; sin detalle |
 | 503 | `DEPENDENCY_UNAVAILABLE` | Base caída o en timeout; header `Retry-After` |
@@ -549,7 +914,7 @@ El servicio no arranca sin ellas, ni compose.
 
 ```bash
 cp .env.example .env
-go run ./cmd/genkeys        # copiar las cuatro claves privadas al .env
+go run ./cmd/genkeys        # copiar las cinco claves privadas al .env (incluida EMAIL_CODE_HMAC_KEY)
 docker compose up --build
 ```
 
@@ -559,6 +924,15 @@ cifrar el payload del registro, la segunda va al Gateway para verificar los
 Access Token. Cada par (privada + pública) tiene que salir de la misma
 corrida.
 
+`EMAIL_CODE_HMAC_KEY` es obligatoria (el servicio no arranca sin ella) y sí sale
+de `genkeys`: es la clave propia de los códigos de email de US-13, y no puede
+coincidir con `AES_KEY` ni con `HMAC_SECRET`. Mientras el Frontend no envíe el
+token de verificación de email, el alta desde la app necesita
+`SIGNUP_REQUIRE_EMAIL_VERIFICATION=false` en el `.env` local; con
+`APP_ENV=production` esa opción se rechaza. Lo mismo vale para
+`SIGNUP_REQUIRE_TERMS` (US-19): hasta que el Frontend envíe `terms_version`, el
+alta desde la app necesita `SIGNUP_REQUIRE_TERMS=false` en el `.env` local.
+
 `AUDIT_PUBLIC_KEY` y `AUDIT_KEY_ID` son obligatorias (el servicio no arranca sin
 ellas, ni compose) y **no** salen de `genkeys`: el par de Audit lo genera
 `audit-keygen`, en el repo del Audit Service, fuera de línea y con la privada
@@ -566,6 +940,10 @@ fuera de cualquier repo. Ver
 [Sellado del DNI para Audit](#sellado-del-dni-para-audit-us-11). Para desarrollo
 local alcanza con un par de prueba, que se genera con `audit-keygen` o con
 cualquier par X25519 en base64, y un id como `dev`.
+
+`ADMIN_API_KEY` es opcional: sin ella el router de administración (US-17) no
+arranca. Para usarlo en local, generarla (`openssl rand -base64 48`) y pegarla en
+el `.env`; ver [Router de administración](#router-de-administración-us-17).
 
 Para correr el servicio fuera del contenedor hace falta un Postgres accesible y
 `POSTGRES_HOST` apuntando a él:
@@ -617,7 +995,127 @@ docker compose up --build                     # entorno local completo
 ```
 
 Los tests son unitarios y no necesitan Postgres ni RabbitMQ: todo lo externo
-está detrás de interfaces de `domain` y se ejercita con dobles.
+está detrás de interfaces de `domain` y se ejercita con dobles. Las pruebas de
+integración del repositorio (`-tags=integration`) sí necesitan Postgres; ver
+la sección CI.
+
+## CI
+
+`.github/workflows/ci.yml` corre en todo pull request hacia `dev` o `main` y
+tiene dos jobs. Para la regla de protección de `dev` hay que exigir los dos
+checks: `build-and-test` y `security`.
+
+**`build-and-test`**: compila, `go vet -tags=integration`, pruebas unitarias,
+pruebas de integración contra Postgres (se exige que corran todas las
+`TestIntegracion*`) y cobertura.
+
+- **Un solo reporte.** Las unitarias y las de integración se miden con
+  `-covermode=atomic -coverpkg=./...`, se unen con `gocovmerge` y se convierten
+  a Cobertura XML con `gocover-cobertura`.
+- **Gate sobre el código nuevo.** `diff-cover` exige 85 % de cobertura sobre
+  las líneas que el PR agrega o cambia respecto de su rama base. Si el PR no
+  toca código medible, pasa.
+- **Gate sobre la cobertura total.** Se publica en el resumen del job
+  (`$GITHUB_STEP_SUMMARY`) y en el artefacto `cobertura`, y el job falla si
+  baja de 85 %. Ninguna rama puede bajar el total de ese mínimo.
+- **Exclusiones.** Ninguna: hoy no hay código generado en el repo, y no se
+  excluye código escrito a mano para subir el número. Si aparece código
+  generado, se lista acá con su motivo.
+
+**`security`**:
+
+- **Trivy** (`fs`, `vuln,secret,misconfig`, `HIGH,CRITICAL`, `--ignore-unfixed`):
+  falla ante hallazgos con corrección disponible. Las excepciones van solo en
+  `.trivyignore`, cada una con un comentario con el motivo y hasta cuándo.
+- **govulncheck** (`./...`): falla ante vulnerabilidades alcanzables desde el
+  código.
+- **Semgrep** (`p/default`): solo informativo. Los hallazgos salen en el
+  resumen del job y no cortan nada; pasa a gate en v0.14.
+
+Las acciones de terceros están fijadas por SHA de commit (la versión va en un
+comentario) y el workflow tiene `permissions: contents: read`. Dependabot
+propone semanalmente actualizaciones de `gomod`, `github-actions` y `docker`
+contra `dev`.
+
+### Correrlo en local
+
+Con Go y Python instalados (las versiones de las herramientas están en el
+bloque `env` de `ci.yml`):
+
+```bash
+go install github.com/wadey/gocovmerge@b5bfa59ec0adc420475f97f89b58045c721d761c
+go install github.com/boumenot/gocover-cobertura@v1.5.0
+go install golang.org/x/vuln/cmd/govulncheck@v1.9.0
+python -m pip install diff-cover==11.0.1
+
+# Cobertura: unitarias + integración (Postgres en 127.0.0.1:55432)
+mkdir -p coverage
+go test -count=1 -covermode=atomic -coverpkg=./... -coverprofile=coverage/unit.out ./...
+docker run -d --name vv-identity-it -e POSTGRES_USER=identity \
+  -e POSTGRES_PASSWORD=identity -e POSTGRES_DB=identity \
+  -p 127.0.0.1:55432:5432 postgres:17-alpine
+TEST_DATABASE_URL='postgres://identity:identity@127.0.0.1:55432/identity?sslmode=disable' \
+  go test -tags=integration -count=1 -run Integracion -covermode=atomic \
+  -coverpkg=./... -coverprofile=coverage/integration-1.out ./internal/repository/postgres/
+TEST_DATABASE_URL='postgres://identity:identity@127.0.0.1:55432/identity?sslmode=disable' \
+  go test -tags=integration -count=1 -run Integracion -covermode=atomic \
+  -coverpkg=./... -coverprofile=coverage/integration-2.out ./cmd/api/
+gocovmerge coverage/unit.out coverage/integration-*.out > coverage/total.out
+gocover-cobertura < coverage/total.out > coverage/cobertura.xml
+go tool cover -func=coverage/total.out | tail -1          # cobertura total
+
+# Gate sobre el código nuevo (contra la rama base; hace falta `git fetch origin`)
+diff-cover coverage/cobertura.xml --compare-branch=origin/dev --fail-under=85
+
+# Escaneos
+govulncheck ./...
+docker run --rm -v "$PWD:/src:ro" aquasec/trivy:latest fs \
+  --scanners vuln,secret,misconfig --severity HIGH,CRITICAL --ignore-unfixed \
+  --exit-code 1 --skip-files /src/.env /src
+docker run --rm -v "$PWD:/src" -w /src semgrep/semgrep:1.184.0 \
+  semgrep scan --config p/default --metrics=off .
+```
+
+`diff-cover` compara contra el árbol de trabajo, así que los archivos nuevos
+tienen que estar al menos con `git add -N` para que cuenten.
+
+### Pruebas de integración y cobertura total
+
+Las `TestIntegracion*` (build tag `integration`) corren contra un PostgreSQL
+real, cada una en un esquema propio que se borra al terminar. Hay dos paquetes:
+
+- `internal/repository/postgres`: tablas, constraints y concurrencia.
+- `cmd/api`: el arranque completo del servicio con `run(ctx, cfg)`. Levanta los
+  tres routers (público, interno y de administración) con claves generadas en la
+  prueba, comprueba la autenticación de cada uno y que el esquema quede migrado,
+  y verifica el apagado ordenado y el reinicio sobre la misma base. `main` queda
+  en `execute()`, que carga la configuración y espera la señal; el resto del
+  arranque no tiene lógica fuera de `run`.
+
+```bash
+export TEST_DATABASE_URL='postgres://identity:identity@localhost:5432/identity?sslmode=disable'
+go test -tags=integration -count=1 -run Integracion ./internal/repository/postgres/
+go test -tags=integration -count=1 -run Integracion ./cmd/api/   # de a un paquete: comparten la base
+```
+
+La cobertura total del repositorio se mide con las pruebas unitarias y las de
+integración en un único reporte, con `-coverpkg=./...` para que cada paquete de
+prueba mida todo el módulo:
+
+```bash
+go test -count=1 -covermode=atomic -coverpkg=./... -coverprofile=coverage/unit.out ./...
+go test -tags=integration -count=1 -run Integracion -covermode=atomic -coverpkg=./...   -coverprofile=coverage/integration_pg.out ./internal/repository/postgres/
+go test -tags=integration -count=1 -run Integracion -covermode=atomic -coverpkg=./...   -coverprofile=coverage/integration_api.out ./cmd/api/
+gocovmerge coverage/unit.out coverage/integration_pg.out coverage/integration_api.out > coverage/total.out
+go tool cover -func=coverage/total.out | tail -1
+```
+
+Con ese reporte el repositorio está en **90,4 %** de las sentencias (89,6 % de
+las líneas en el XML de Cobertura), contra 84,0 % (81,1 %) antes de la rama
+`chore/cobertura-85`. No se excluye ningún archivo: hoy no hay código generado
+en el repo, y el código escrito a mano cuenta entero. El `main` de `cmd/api` y
+el de `cmd/genkeys` siguen en 0 %: son las pocas líneas que llaman a
+`os.Exit`.
 
 ## Arquitectura
 
@@ -631,11 +1129,15 @@ cmd/genkeys/                generación del material criptográfico
 internal/domain/            entidades User y Session, eventos, errores centinela, puertos
 internal/service/signup/    orquestación del alta (US-01)
 internal/service/signin/    orquestación del login (US-02)
+internal/service/emailchallenge/     desafíos por email: emisión con throttle, confirmación y barrido (US-13)
+internal/service/emailverification/  verificación del email del alta (US-13)
+internal/service/passwordreset/      recuperación de contraseña (US-13)
 internal/service/outbox/    worker en background del patrón Transactional Outbox (US-06)
 internal/service/account/   baja de cuenta (US-11)
 internal/service/audit/     sellado del DNI del emisor hacia Audit (US-11)
 internal/service/sanction/  barrido de las sanciones heredables vencidas (US-11)
-internal/repository/postgres/  persistencia GORM (users, sessions, outbox_events, sanction_carryovers)
+internal/service/review/    casos de usuarios reportados: listado, desbloqueo e historial (US-17)
+internal/repository/postgres/  persistencia GORM (users, sessions, outbox_events, sanction_carryovers, email_challenges, review_decisions)
 internal/delivery/http/     handlers Gin, DTOs, middlewares
 internal/delivery/events/   publisher RabbitMQ (+ inerte)
 internal/delivery/consumer/ infraestructura de consumo RabbitMQ: ack manual, reintentos, DLQ (US-08)
@@ -643,6 +1145,7 @@ internal/crypto/hpke/       descifrado del transporte
 internal/crypto/auditseal/  sellado HPKE del DNI hacia la clave pública de Audit (US-11)
 internal/crypto/symmetric/  cifrado at-rest
 internal/crypto/blindindex/ Blind Index del DNI
+internal/crypto/emailcode/  HMAC del subject y del código de los desafíos, código de 6 dígitos y grants (US-13)
 internal/crypto/password/   Argon2id
 internal/token/             emisión de Access Token (JWT RS256) y Refresh Token opaco
 internal/renaper/           verificación de identidad (hoy solo Mock)
@@ -667,6 +1170,11 @@ Tabla `users`, creada con `AutoMigrate` en la inicialización del repositorio.
 | `account_status` | varchar(32) | `ACTIVE` o `UNDER_REVIEW` (US-08) |
 | `reputation_score` | integer | NOT NULL, default 0 (US-08); baja `FRAUD_PENALTY` por cada alerta rechazada por fraude y puede quedar negativa |
 | `report_count` | integer | NOT NULL, default 0 (US-08); solo el conteo, nunca quién reportó |
+| `email_verified_at` | timestamptz | NULL (US-13); cuándo se verificó el email con un código. Solo una cuenta con este campo no nulo puede recuperar su contraseña. Las cuentas anteriores quedan en NULL, sin backfill |
+| `terms_version` | varchar(16) | NULL (US-19); versión de los términos que el usuario aceptó en el alta. Las cuentas anteriores quedan en NULL, sin backfill |
+| `terms_accepted_at` | timestamptz | NULL (US-19); cuándo los aceptó, en la misma transacción del alta |
+| `under_review_since` | timestamptz | NULL (US-17); cuándo pasó a `UNDER_REVIEW` el caso vigente. Lo escribe el consumo de `alert.reported` al escalar y lo borra el desbloqueo. Las cuentas que ya estaban en revisión antes de US-17, y las que nacen en revisión por herencia de sanción (US-11), quedan en NULL, sin backfill: el listado de casos las ordena por `created_at` |
+| `last_reported_at` | timestamptz | NULL (US-17); cuándo se contó el último reporte (`alert.reported`). Sin backfill |
 | `created_at` / `updated_at` | timestamptz | |
 
 `AutoMigrate` es una decisión de MVP: solo agrega columnas e índices. Va contra
@@ -693,8 +1201,22 @@ foránea hacia ella.
 | `user_id` | uuid | FK → `users.id`, `ON DELETE CASCADE` |
 | `refresh_token_hash` | varchar(64) | UNIQUE — SHA-256 del Refresh Token opaco |
 | `is_revoked` | boolean | `false` al crearse; US-03 la revoca |
-| `expires_at` | timestamptz | +30 días desde la emisión |
+| `expires_at` | timestamptz | +30 días desde la emisión (`REFRESH_TOKEN_TTL_DAYS`) |
+| `started_at` | timestamptz | NOT NULL — instante del login; la rotación lo copia. Ancla de la vida máxima (`SESSION_MAX_DAYS`, US-12) |
 | `created_at` | timestamptz | |
+
+Una base anterior a US-12 no tiene `started_at`: el arranque agrega la columna,
+rellena las filas existentes con `started_at = created_at` y la deja `NOT NULL`,
+todo en una transacción bajo advisory lock (varias réplicas arrancando a la vez
+no chocan) y de forma idempotente. Es DDL, así que el rol que arranca el
+servicio necesita poder alterar `sessions`; un DBA que prefiera aplicarlo a
+mano puede correr, antes del despliegue:
+
+```sql
+ALTER TABLE sessions ADD COLUMN IF NOT EXISTS started_at timestamptz;
+UPDATE sessions SET started_at = created_at WHERE started_at IS NULL;
+ALTER TABLE sessions ALTER COLUMN started_at SET NOT NULL;
+```
 
 El Refresh Token en claro nunca se persiste: solo existe en la respuesta HTTP
 que recibe el cliente. La clave foránea con `ON DELETE CASCADE` se agrega con
@@ -709,7 +1231,7 @@ interna del patrón Transactional Outbox (US-06), no un dato de negocio.
 | campo | tipo | notas |
 |---|---|---|
 | `id` | uuid | PK; mismo valor que `eventId` al publicarse |
-| `type` | varchar(64) | tipo de evento: `user.sessions.revoked`, `user.status.changed` (US-08) o `user.deleted` (US-11) |
+| `type` | varchar(64) | tipo de evento: `user.sessions.revoked`, `user.status.changed` (US-08), `user.deleted` (US-11) o `email.requested` (US-13) |
 | `payload` | jsonb | por tipo; p. ej. `{"user_id": "…", "reason": "REUSE_DETECTED"}` |
 | `status` | varchar(16) | `pending` / `sent`, indexada junto a `created_at` |
 | `attempts` | int | incrementado en cada intento fallido |
@@ -749,6 +1271,13 @@ barrido están en [Baja de cuenta](#baja-de-cuenta-us-11). `EPHEMERAL_DB` tambi�
 borra el esquema de retención anterior, si existe: sobrevivir al borrado de
 `public` lo haría migrar, y heredar una sanción de una corrida anterior.
 
+Tabla `email_challenges` (US-13), creada con `AutoMigrate` y una clave foránea
+hacia `users` en `ensureEmailChallenges`, que la llaman `NewUserRepository` (el
+alta consume el grant en su transacción) y `NewEmailChallengeRepository`. Guarda
+los códigos de email y los tokens que emiten, nunca en claro; su estructura, sus
+reglas y el barrido están en
+[Verificación de email y recuperación de contraseña](#verificación-de-email-y-recuperación-de-contraseña-us-13).
+
 ### Clasificación de errores de la base
 
 `internal/repository/postgres.classifyDBError` traduce cualquier error de
@@ -764,10 +1293,12 @@ un equivalente al "5xx del upstream" de una dependencia HTTP.
 
 ## Eventos publicados
 
-El servicio publica tres eventos, `user.sessions.revoked`,
-`user.status.changed` (US-08) y `user.deleted` (US-11), con el Event Envelope
-estándar de la plataforma. Los tres salen por el outbox. El payload no lleva PII: quien necesite datos de
-la persona los pide a este servicio. El alta no publica nada: Core confirmó que
+El servicio publica cuatro eventos, `user.sessions.revoked`,
+`user.status.changed` (US-08), `user.deleted` (US-11) y `email.requested`
+(US-13), con el Event Envelope estándar de la plataforma. Los cuatro salen por el
+outbox. El payload no lleva PII —salvo `email.requested`, que lleva el
+destinatario y el código porque Notification los necesita para enviar el
+email—: quien necesite datos de la persona los pide a este servicio. El alta no publica nada: Core confirmó que
 `user.created` no tiene consumidor.
 
 Se publican sobre `vvi.topic.exchange`. Este servicio nunca declara esa
@@ -839,9 +1370,10 @@ no depende en absoluto de la disponibilidad de RabbitMQ.
 
 ### `user.status.changed`
 
-Anuncia un cambio de `account_status` (US-08). Hoy solo lo emite el consumo de
+Anuncia un cambio de `account_status` (US-08). Lo emite el consumo de
 `alert.reported`, cuando un emisor ACTIVE llega a `REPORT_REVIEW_THRESHOLD`
-reportes y pasa a `UNDER_REVIEW`. Alert lo consume para bloquear nuevas alertas
+reportes y pasa a `UNDER_REVIEW`; el alta con una sanción heredada (US-11), y el
+desbloqueo de un operador (US-17), que lo devuelve a `ACTIVE`. Alert lo consume para bloquear nuevas alertas
 de ese emisor. `actor` es `null`: es un hecho del sistema, y el usuario va en el
 payload.
 
@@ -864,15 +1396,19 @@ publica con el mismo `eventId` entre reintentos.
 }
 ```
 
-`reason` puede ser `REPORTS_THRESHOLD` (el emisor llegó al umbral de reportes) o,
-desde US-11, `INHERITED_ON_SIGNUP`: la cuenta nació en revisión porque el mismo
-DNI había sido dado de baja con una sanción vigente. Alert ignora el `reason`.
+`reason` puede ser `REPORTS_THRESHOLD` (el emisor llegó al umbral de reportes),
+desde US-11 `INHERITED_ON_SIGNUP` (la cuenta nació en revisión porque el mismo
+DNI había sido dado de baja con una sanción vigente) y, desde US-17,
+`MANUAL_UNBLOCK` (un operador levantó la revisión). Alert ignora el `reason`.
 
-**Levantar la revisión** queda fuera de alcance de US-08 (es manual, para un
-caso de uso futuro de administración). Hacerlo a mano en la base **no alcanza**:
-Alert mantiene una proyección alimentada por este evento, así que además de
-poner `account_status = 'ACTIVE'` hay que emitir `user.status.changed` con
-`ACTIVE`. Sin ese evento, Alert sigue bloqueando al emisor.
+**Levantar la revisión** se hace desde el
+[router de administración](#router-de-administración-us-17) (US-17): el
+desbloqueo escribe, en la misma transacción que el cambio, este evento con
+`"account_status": "ACTIVE"` y `"reason": "MANUAL_UNBLOCK"`, y con `actor`
+`null` como los demás. Hacerlo a mano en la base **no alcanza**: Alert mantiene
+una proyección alimentada por este evento, así que además de poner
+`account_status = 'ACTIVE'` hay que emitirlo. Sin ese evento, Alert sigue
+bloqueando al emisor.
 
 ### `user.deleted`
 
@@ -950,7 +1486,9 @@ sobre es el emisor reportado. En una única transacción se registra el evento e
 si el conteo llega a `REPORT_REVIEW_THRESHOLD` y el usuario estaba `ACTIVE`, se
 lo pasa a `UNDER_REVIEW` y se escribe `user.status.changed` en el outbox. Un
 usuario que ya está en revisión sigue contando pero no vuelve a publicar, y un
-duplicado no incrementa.
+duplicado no incrementa. Desde US-17 cada reporte contado también anota
+`users.last_reported_at`, y el paso a `UNDER_REVIEW` anota `users.under_review_since`
+(un reporte posterior no la mueve).
 
 Igual que con `alert.rejected`, un evento sin `actor` (alerta de un emisor dado
 de baja, US-11) o cuyo usuario ya no existe se confirma sin efecto: nadie queda

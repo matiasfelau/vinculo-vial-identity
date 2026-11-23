@@ -46,7 +46,32 @@ func NewUserRepository(ctx context.Context, db *gorm.DB) (*UserRepository, error
 		return nil, err
 	}
 
+	// Create consume el grant de verificación de email (US-13) en la transacción
+	// del alta, así que email_challenges tiene que existir antes del primer alta.
+	if err := ensureEmailChallenges(ctx, db); err != nil {
+		return nil, err
+	}
+
 	return &UserRepository{db: db}, nil
+}
+
+// consumeEmailVerificationGrant marca como usado el grant de verificación de
+// email del alta. El UPDATE es la guarda: solo afecta una fila si el grant es de
+// ese email, no se usó y no venció, y todo eso se decide en la base, en la misma
+// transacción que crea el usuario, así dos altas con el mismo token no pasan las
+// dos.
+func consumeEmailVerificationGrant(tx *gorm.DB, g *domain.GrantConsumption) error {
+	res := tx.Model(&emailChallengeModel{}).
+		Where("purpose = ? AND subject_hmac = ? AND grant_hash = ?", string(g.Purpose), g.SubjectHMAC, g.GrantHash).
+		Where("consumed_at IS NULL AND grant_expires_at > ?", g.Now.UTC()).
+		Update("consumed_at", g.Now.UTC())
+	if res.Error != nil {
+		return fmt.Errorf("no se pudo consumir el token de verificación: %w", res.Error)
+	}
+	if res.RowsAffected == 0 {
+		return domain.ErrEmailNotVerified
+	}
+	return nil
 }
 
 // claimSanctionCarryover borra, y devuelve, la sanción vigente con ese Blind
@@ -87,7 +112,7 @@ func claimSanction(tx *gorm.DB, dniHashed string, now time.Time) (*domain.Sancti
 // La colisión se colapsa en domain.ErrDuplicateUser sin decir qué índice se violó:
 // distinguir "ese email ya existe" de "ese DNI ya existe" convertiría el endpoint
 // en un oráculo para saber si una persona está registrada.
-func (r *UserRepository) Create(ctx context.Context, u *domain.User, inheritedStatus domain.OutboxEvent) error {
+func (r *UserRepository) Create(ctx context.Context, u *domain.User, inheritedStatus domain.OutboxEvent, grant *domain.GrantConsumption) error {
 	if u == nil {
 		return errors.New("postgres: se requiere un usuario")
 	}
@@ -99,6 +124,15 @@ func (r *UserRepository) Create(ctx context.Context, u *domain.User, inheritedSt
 	candidate := *u
 
 	err := r.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		// El grant se consume primero: si ya no sirve, no se hace nada más. Si el
+		// INSERT que sigue choca con un duplicado, la transacción entera se
+		// deshace y el grant queda sin gastar.
+		if grant != nil {
+			if err := consumeEmailVerificationGrant(tx, grant); err != nil {
+				return err
+			}
+		}
+
 		sanction, err := claimSanction(tx, candidate.DNIHashed, candidate.CreatedAt)
 		if err != nil {
 			return err
@@ -122,11 +156,30 @@ func (r *UserRepository) Create(ctx context.Context, u *domain.User, inheritedSt
 		return nil
 	})
 	if err != nil {
+		if errors.Is(err, domain.ErrEmailNotVerified) {
+			return domain.ErrEmailNotVerified
+		}
 		return mapCreateError(err)
 	}
 
 	*u = candidate
 	return nil
+}
+
+// ExistsByEmail informa si hay una cuenta con ese email. Un único SELECT sobre el
+// índice único de email, sin traer ninguna fila.
+func (r *UserRepository) ExistsByEmail(ctx context.Context, email string) (bool, error) {
+	ctx, cancel := context.WithTimeout(ctx, queryTimeout)
+	defer cancel()
+
+	var count int64
+	if err := r.db.WithContext(ctx).Model(&userModel{}).Where("email = ?", email).Limit(1).Count(&count).Error; err != nil {
+		if classified := classifyDBError(err); errors.Is(classified, domain.ErrDatabaseUnavailable) {
+			return false, classified
+		}
+		return false, fmt.Errorf("postgres: no se pudo consultar el email: %w", err)
+	}
+	return count > 0, nil
 }
 
 // FindByID busca un usuario por su identificador.
@@ -150,23 +203,6 @@ func (r *UserRepository) FindByDNIHashed(ctx context.Context, dniHashed string) 
 
 	var m userModel
 	if err := r.db.WithContext(ctx).Where("dni_hashed = ?", dniHashed).Take(&m).Error; err != nil {
-		return nil, mapFindError(err)
-	}
-	return m.toDomain(), nil
-}
-
-// FindByOwnerAndDNIHash busca el usuario cuyo id y Blind Index de DNI
-// coinciden a la vez. El predicado combina las dos condiciones con AND en
-// una sola consulta a propósito: así "ese owner_id no existe" y "existe,
-// pero el DNI no es el suyo" producen el mismo gorm.ErrRecordNotFound —y por
-// lo tanto el mismo domain.ErrUserNotFound— sin que este repositorio tenga
-// que distinguirlos.
-func (r *UserRepository) FindByOwnerAndDNIHash(ctx context.Context, ownerID uuid.UUID, dniHashed string) (*domain.User, error) {
-	ctx, cancel := context.WithTimeout(ctx, queryTimeout)
-	defer cancel()
-
-	var m userModel
-	if err := r.db.WithContext(ctx).Where("id = ? AND dni_hashed = ?", ownerID, dniHashed).Take(&m).Error; err != nil {
 		return nil, mapFindError(err)
 	}
 	return m.toDomain(), nil

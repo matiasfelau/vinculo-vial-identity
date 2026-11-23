@@ -1,0 +1,8 @@
+# Excepciones de Trivy. Solo hallazgos HIGH/CRITICAL con corrección disponible
+# que no se pueden corregir en el mismo PR. Cada línea lleva arriba un
+# comentario con el motivo y la fecha límite:
+#
+#   # Motivo: <por qué no se puede corregir ahora>. Hasta: AAAA-MM-DD.
+#   CVE-AAAA-NNNNN
+#
+# Sin excepciones vigentes.

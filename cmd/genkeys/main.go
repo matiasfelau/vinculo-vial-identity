@@ -1,12 +1,12 @@
 // Command genkeys genera el material criptográfico que el servicio necesita.
 //
 // Sin esta herramienta, poner en marcha el entorno local exigiría fabricar a
-// mano cuatro claves con el largo y la codificación exactos, que es justo el
+// mano cinco claves con el largo y la codificación exactos, que es justo el
 // tipo de paso donde se termina reutilizando una clave para dos propósitos.
 //
 //	go run ./cmd/genkeys
 //
-// Imprime las cuatro claves privadas —una por mecanismo, nunca compartidas—
+// Imprime las cinco claves privadas —una por mecanismo, nunca compartidas—
 // más las dos públicas que sí se distribuyen: la HPKE, que embebe el frontend
 // para cifrar el payload del registro, y la de verificación de JWT, que
 // consume el Gateway para validar los Access Token que firma este servicio.
@@ -24,6 +24,7 @@ import (
 	"strings"
 
 	"github.com/matiasfelau/vinculo-vial-identity/internal/crypto/blindindex"
+	"github.com/matiasfelau/vinculo-vial-identity/internal/crypto/emailcode"
 	"github.com/matiasfelau/vinculo-vial-identity/internal/crypto/hpke"
 	"github.com/matiasfelau/vinculo-vial-identity/internal/crypto/symmetric"
 	"github.com/matiasfelau/vinculo-vial-identity/internal/token"
@@ -52,6 +53,13 @@ func run() error {
 		return fmt.Errorf("no se pudo generar HMAC_SECRET: %w", err)
 	}
 
+	// Clave propia de los desafíos por email (US-13): generada aparte de HMAC_SECRET
+	// y de AES_KEY, nunca derivada ni reutilizada.
+	emailCodeKey, err := randomBase64(emailcode.KeyLength)
+	if err != nil {
+		return fmt.Errorf("no se pudo generar EMAIL_CODE_HMAC_KEY: %w", err)
+	}
+
 	jwtPrivate, jwtPublic, err := token.GenerateKeyPair()
 	if err != nil {
 		return fmt.Errorf("no se pudo generar el par de JWT: %w", err)
@@ -61,6 +69,7 @@ func run() error {
 	fmt.Printf("IDENTITY_HPKE_PRIVATE_KEY=%s\n", hpkePrivate)
 	fmt.Printf("AES_KEY=%s\n", aesKey)
 	fmt.Printf("HMAC_SECRET=%s\n", hmacSecret)
+	fmt.Printf("EMAIL_CODE_HMAC_KEY=%s\n", emailCodeKey)
 	// El PEM viaja en una sola línea: el parser de .env de este servicio no
 	// soporta valores multilínea, así que los saltos de línea reales se
 	// escapan como \n literal. config.Load los deshace antes de guardar la
